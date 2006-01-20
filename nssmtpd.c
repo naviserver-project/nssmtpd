@@ -592,8 +592,7 @@ SmtpdProc(Ns_DriverCmd cmd, Ns_Sock *sock, struct iovec *bufs, int nbufs)
 {
     switch (cmd) {
      case DriverAccept:
-         Ns_DriverSockRequest(sock, "SMTPD /");
-         return NS_OK;
+         return Ns_DriverSockRequest(sock, "SMTPD /");
      case DriverRecv:
      case DriverSend:
      case DriverKeep:
