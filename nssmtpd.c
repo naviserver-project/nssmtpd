@@ -1058,6 +1058,7 @@ SmtpdRelayData(smtpdConn *conn,char *host,int port)
     Ns_Sock sock;
     smtpdRcpt *rcpt;
     smtpdConn *relay;
+    Ns_Time timeout = { conn->server->writetimeout, 0};
     int size = 0,vcount = 0;
     Ns_Conn *nsconn = Ns_GetConn();
 
@@ -1072,7 +1073,7 @@ SmtpdRelayData(smtpdConn *conn,char *host,int port)
     if (!host) host = conn->server->relayhost,port = conn->server->relayport;
     if (!port) port = 25;
 
-    if ((sock.sock = Ns_SockTimedConnect(host,port,conn->server->writetimeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(host,port,&timeout)) == INVALID_SOCKET) {
       Ns_Log(Error,"nssmtpd: relay: %d/%d: Unable to connect to %s:%d: %s",
              conn->id,getpid(),host,port,strerror(errno));
       SmtpdPuts(conn,"421 Service not available\r\n");
@@ -1184,6 +1185,7 @@ SmtpdSend(smtpdServer *server,Tcl_Interp *interp,const char *sender,const char *
     Ns_Sock sock;
     Tcl_Obj *data;
     smtpdConn *conn;
+    Ns_Time timeout = { conn->server->writetimeout, 0};
     int duplicated = 0;
 
     if (!sender || !rcpt || !dname) {
@@ -1194,7 +1196,7 @@ SmtpdSend(smtpdServer *server,Tcl_Interp *interp,const char *sender,const char *
     if (!host || !*host) host = server->relayhost,port = server->relayport;
     if (!port) port = 25;
 
-    if ((sock.sock = Ns_SockTimedConnect(host,port,server->writetimeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(host,port,&timeout)) == INVALID_SOCKET) {
       Tcl_AppendResult(interp,"nssmtpd: send: unable to connect to ",host,": ",strerror(errno),0);
       return -1;
     }
@@ -1316,6 +1318,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, int len)
 {
     int nread,n;
     char *buf = (char *) vbuf;
+    Ns_Time timeout = { conn->server->readtimeout, 0};
 
     nread = len;
     while(len > 0) {
@@ -1331,7 +1334,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, int len)
       if (len > 0) {
 	/* Attempt to fill the read-ahead buffer. */
         conn->buf.ptr = conn->buf.data;
-        conn->buf.pos = Ns_SockRecv(conn->sock->sock,conn->buf.data,conn->server->bufsize,conn->server->readtimeout);
+        conn->buf.pos = Ns_SockRecv(conn->sock->sock,conn->buf.data,conn->server->bufsize,&timeout);
         if (conn->buf.pos <= 0) return -1;
       }
     }
@@ -1343,11 +1346,12 @@ SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
 {
     int nwrote,n;
     char *buf;
+    Ns_Time timeout = { conn->server->writetimeout, 0};
 
     nwrote = len;
     buf = vbuf;
     while(len > 0) {
-      n = Ns_SockSend(conn->sock->sock,buf,len,conn->server->writetimeout);
+      n = Ns_SockSend(conn->sock->sock,buf,len,&timeout);
       if (n < 0) return -1;
       len -= n;
       buf += n;
@@ -1817,6 +1821,7 @@ SmtpdCheckSpam(smtpdConn *conn)
     Ns_Sock sock;
     smtpdRcpt *rcpt;
     smtpdConn *spamd;
+    Ns_Time timeout = { conn->server->writetimeout, 0};
 
     if (!conn->server->spamdhost) return 0;
     /* Should have at least one unverified recipient */
@@ -1825,7 +1830,7 @@ SmtpdCheckSpam(smtpdConn *conn)
     if (!rcpt) return 0;
 
     /* Connect to spamd server */
-    if ((sock.sock = Ns_SockTimedConnect(conn->server->spamdhost,conn->server->spamdport,conn->server->writetimeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(conn->server->spamdhost,conn->server->spamdport,&timeout)) == INVALID_SOCKET) {
       Ns_Log(Error,"nssmtpd: spamd: %d/%d: unable to connect to %s:%d: %s",conn->id,getpid(),conn->server->spamdhost,conn->server->spamdport,strerror(errno));
       return -1;
     }
