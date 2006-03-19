@@ -12,12 +12,6 @@ MOD      =  nssmtpd.so
 #
 OBJS     = nssmtpd.o
 
-#
-# Objects to clean
-#
-CLEAN   += clean_bak
-BUILD   += clean
-
 # Use DSPAM
 #CFLAGS   += -I/usr/local/include -DUSE_DSPAM -DSIGNATURE_LIFE=14 -DDSPAM_HOME=/usr/local/aolserver/modules/dspam
 #MODLIBS  += -ldspam
@@ -34,7 +28,3 @@ BUILD   += clean
 #MODLIBS  += -lclamav
 
 include  $(NAVISERVER)/include/Makefile.module
-
-clean_bak:
-	rm -rf *~ admin/*~ *.o *.so
-
