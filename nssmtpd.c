@@ -541,7 +541,7 @@ Ns_ModuleInit(char *server, char *module)
 #endif
 
     Ns_RegisterAtStartup(SmtpdInit, serverPtr);
-    Ns_RegisterRequest(server, "SMTPD",  "/", SmtpdRequestProc, NULL, serverPtr, 0);
+    Ns_RegisterRequest(server, "SMTP",  "/", SmtpdRequestProc, NULL, serverPtr, 0);
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
     return NS_OK;
 }
@@ -592,7 +592,7 @@ SmtpdProc(Ns_DriverCmd cmd, Ns_Sock *sock, struct iovec *bufs, int nbufs)
 {
     switch (cmd) {
      case DriverAccept:
-         return Ns_DriverSockRequest(sock, "SMTPD /");
+         return Ns_DriverSockRequest(sock, "SMTP / SMTP/1.0");
      case DriverRecv:
      case DriverSend:
      case DriverKeep:
@@ -1010,6 +1010,18 @@ SmtpdConnPrint(smtpdConn *conn)
       Ns_DStringPrintf(&conn->line,"%s(0x%X/%.2f), ",rcpt->addr,rcpt->flags,rcpt->spam_score);
     Ns_DStringPrintf(&conn->line,"SIZE: %d/%d",conn->body.data.length,conn->body.offset);
     Ns_Log(Notice,conn->line.string);
+
+    /*
+     * Update request line for access logging
+     */
+    
+    Ns_DStringTrunc(&conn->line,0);
+    Ns_DStringPrintf(&conn->line, "SEND /%s SMTP/1.0",conn->from.addr ? conn->from.addr : "Null");
+    for (rcpt = conn->rcpt.list;rcpt;rcpt = rcpt->next) {
+         Ns_DStringPrintf(&conn->line,"/%s",rcpt->addr);
+    }
+    ns_free(nsconn->request->line);
+    nsconn->request->line = ns_strdup(conn->line.string);
 }
 
 static int
