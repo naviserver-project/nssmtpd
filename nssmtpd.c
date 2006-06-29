@@ -342,7 +342,7 @@ static void dnsEncodePacket(dnsPacket * pkt);
 static void dnsPacketFree(dnsPacket * pkt, int type);
 static dnsPacket *dnsLookup(char *name, int type, int *errcode);
 
-static Ns_DriverProc SmtpdProc;
+static Ns_DriverProc SmtpdDriverProc;
 static void SmtpdInit(void *arg);
 static int SmtpdRequestProc(void *arg, Ns_Conn * conn);
 static int SmtpdInterpInit(Tcl_Interp * interp, void *context);
@@ -468,7 +468,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
     init.version = NS_DRIVER_VERSION_1;
     init.name = "nssmtpd";
-    init.proc = SmtpdProc;
+    init.proc = SmtpdDriverProc;
     init.opts = 0;
     init.arg = serverPtr;
     init.path = NULL;
@@ -610,7 +610,7 @@ static int SmtpdRequestProc(void *arg, Ns_Conn * conn)
     return NS_OK;
 }
 
-static int SmtpdProc(Ns_DriverCmd cmd, Ns_Sock * sock, struct iovec *bufs, int nbufs)
+static int SmtpdDriverProc(Ns_DriverCmd cmd, Ns_Sock * sock, struct iovec *bufs, int nbufs)
 {
     switch (cmd) {
     case DriverAccept:
