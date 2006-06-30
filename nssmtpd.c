@@ -466,19 +466,25 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         serverPtr->spamdport = atoi(path);
     }
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
+
+    /* Register SMTP driver */
     init.version = NS_DRIVER_VERSION_1;
     init.name = "nssmtpd";
     init.proc = SmtpdDriverProc;
-    init.opts = 0;
+    init.opts = NS_DRIVER_QUEUE_ONACCEPT;
     init.arg = serverPtr;
     init.path = NULL;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
         return NS_ERROR;
     }
+    Ns_RegisterRequest(server, "SMTP", "/", SmtpdRequestProc, NULL, serverPtr, 0);
+
+    /* Segv/panic handler */
     if (serverPtr->flags & SMTPD_SEGV) {
-        if (!Ns_ConfigGetInt(path, "segvtimeout", &segvTimeout))
+        if (!Ns_ConfigGetInt(path, "segvtimeout", &segvTimeout)) {
             segvTimeout = -1;
+        }
         ns_signal(SIGSEGV, SmtpdSegv);
         Tcl_SetPanicProc(SmtpdPanic);
         Ns_Log(Notice, "nssmtpd: SEGV and Panic trapping is activated for %d seconds", segvTimeout);
@@ -566,7 +572,6 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 #endif
 
     Ns_RegisterAtStartup(SmtpdInit, serverPtr);
-    Ns_RegisterRequest(server, "SMTP", "/", SmtpdRequestProc, NULL, serverPtr, 0);
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
     return NS_OK;
 }
@@ -613,8 +618,10 @@ static int SmtpdRequestProc(void *arg, Ns_Conn * conn)
 static int SmtpdDriverProc(Ns_DriverCmd cmd, Ns_Sock * sock, struct iovec *bufs, int nbufs)
 {
     switch (cmd) {
-    case DriverAccept:
-        return Ns_DriverSockRequest(sock, "SMTP / SMTP/1.0");
+    case DriverQueue:
+        return Ns_DriverSetRequest(sock, "SMTP / SMTP/1.0");
+        break;
+
     case DriverRecv:
     case DriverSend:
     case DriverKeep:
