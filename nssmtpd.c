@@ -2619,13 +2619,15 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             Tcl_AppendResult(interp, SMTPD_VERSION, 0);
         } else
         if (!strcasecmp("address", Tcl_GetString(objv[2]))) {
-            char *address = strstr(server->driver->location, "://");
-            if (address) {
-                address += 3;
-            } else {
-                address = server->driver->location;
+            if (server->driver && server->driver->lcoation) {
+                char *address = strstr(server->driver->location, "://");
+                if (address) {
+                    address += 3;
+                } else {
+                    address = server->driver->location;
+                }
+                Tcl_AppendResult(interp, address, 0);
             }
-            Tcl_AppendResult(interp, address, 0);
         } else
         if (!strcasecmp("relay", Tcl_GetString(objv[2]))) {
             Tcl_Obj *obj = Tcl_NewStringObj(server->relayhost, -1);
