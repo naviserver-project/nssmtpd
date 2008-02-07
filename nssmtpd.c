@@ -1226,7 +1226,7 @@ static int SmtpdRelayData(smtpdConn * conn, char *host, int port)
     sock.driver = conn->sock->driver;
     /* Allocate relay SMTPD connection */
     if (!(relay = SmtpdConnCreate(conn->server, &sock))) {
-        close(sock.sock);
+        ns_sockclose(sock.sock);
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
     }
@@ -1394,7 +1394,7 @@ static int SmtpdSend(smtpdServer * server, Tcl_Interp * interp, const char *send
     /* Allocate virtual SMTPD connection */
     if (!(conn = SmtpdConnCreate(server, &sock))) {
         Tcl_AppendResult(interp, strerror(errno), 0);
-        close(sock.sock);
+        ns_sockclose(sock.sock);
         return -1;
     }
     /* Read greeting line from the conn */
@@ -2160,7 +2160,7 @@ static int SmtpdCheckSpam(smtpdConn * conn)
     }
     /* Allocate virtual SMTPD connection */
     if (!(spamd = SmtpdConnCreate(conn->server, &sock))) {
-        close(sock.sock);
+        ns_sockclose(sock.sock);
         return -1;
     }
     Ns_DStringPrintf(&spamd->line, "CHECK SPAMC/1.3\r\n");
@@ -3952,7 +3952,7 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
             }
             // DNS packet id should be the same
             if (reply->id == req->id) {
-                close(sock);
+                ns_sockclose(sock);
                 dnsPacketFree(req, 0);
                 Ns_MutexLock(&dnsMutex);
                 server->fail_count = server->fail_time = 0;
@@ -3963,7 +3963,7 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
         }
     }
     dnsPacketFree(req, 0);
-    close(sock);
+    ns_sockclose(sock);
     if (errcode) {
         *errcode = ENOENT;
     }
