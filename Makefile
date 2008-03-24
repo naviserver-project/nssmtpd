@@ -24,7 +24,7 @@ OBJS     = nssmtpd.o
 #MODLIBS  += -L/usr/local/lib -lsavi
 
 # ClamAv interface
-#CFLAGS   += -DUSE_CLAMAV
-#MODLIBS  += -lclamav
+CFLAGS   += -DUSE_CLAMAV
+MODLIBS  += -lclamav
 
 include  $(NAVISERVER)/include/Makefile.module

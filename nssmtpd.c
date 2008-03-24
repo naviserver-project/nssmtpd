@@ -319,6 +319,7 @@ static int parsePhrase(char **inp, char **phrasep, char *specials);
 static int parseDomain(char **inp, char **domainp, char **commmentp);
 static int parseRoute(char **inp, char **routep);
 static char *parseSpace(char *s);
+static int parseInt(char *val);
 
 static void dnsInit(char *name, ...);
 static void dnsRecordFree(dnsRecord * pkt);
@@ -550,31 +551,31 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     {
         int rc, virnum;
         if (!(addr = Ns_ConfigGetValue(path, "clamav_dbdir"))) {
-            addr = cl_retdbdir();
+            addr = (char*)cl_retdbdir();
         }
-        if ((rc = cl_loaddbdir(addr, &serverPtr->ClamAvRoot, &virnum))) {
+        if ((rc = cl_load(addr, &serverPtr->ClamAvRoot, (unsigned int*)&virnum, CL_DB_STDOPT))) {
             Ns_Log(Error, "nssmtpd: clamav: failed to load db: %s", cl_strerror(rc));
             return NS_ERROR;
         }
-        if ((rc = cl_buildtrie(serverPtr->ClamAvRoot))) {
+        if ((rc = cl_build(serverPtr->ClamAvRoot))) {
             Ns_Log(Error, "nssmtpd: clamav: failed to build trie: %s", cl_strerror(rc));
-            cl_freetrie(serverPtr->ClamAvRoot);
+            cl_free(serverPtr->ClamAvRoot);
             return NS_ERROR;
         }
         memset(&serverPtr->ClamAvLimits, 0, sizeof(struct cl_limits));
-        if (!Ns_ConfigGetInt(path, "clamav_maxfiles", &serverPtr->ClamAvLimits.maxfiles)) {
+        if (!Ns_ConfigGetInt(path, "clamav_maxfiles", (int*)&serverPtr->ClamAvLimits.maxfiles)) {
             serverPtr->ClamAvLimits.maxfiles = 1000;
         }
-        if (!Ns_ConfigGetInt(path, "clamav_maxfilesize", &serverPtr->ClamAvLimits.maxfilesize)) {
+        if (!Ns_ConfigGetInt(path, "clamav_maxfilesize", (int*)&serverPtr->ClamAvLimits.maxfilesize)) {
             serverPtr->ClamAvLimits.maxfilesize = 10 * 1048576;
         }
-        if (!Ns_ConfigGetInt(path, "clamav_maxreclevel", &serverPtr->ClamAvLimits.maxreclevel)) {
+        if (!Ns_ConfigGetInt(path, "clamav_maxreclevel", (int*)&serverPtr->ClamAvLimits.maxreclevel)) {
             serverPtr->ClamAvLimits.maxreclevel = 5;
         }
-        if (!Ns_ConfigGetInt(path, "clamav_maxratio", &serverPtr->ClamAvLimits.maxratio)) {
+        if (!Ns_ConfigGetInt(path, "clamav_maxratio", (int*)&serverPtr->ClamAvLimits.maxratio)) {
             serverPtr->ClamAvLimits.maxratio = 200;
         }
-        if (!Ns_ConfigGetInt(path, "clamav_archivememlim", &serverPtr->ClamAvLimits.archivememlim)) {
+        if (!Ns_ConfigGetInt(path, "clamav_archivememlim", (int*)&serverPtr->ClamAvLimits.archivememlim)) {
             serverPtr->ClamAvLimits.archivememlim = 0;
         }
         Ns_Log(Notice, "nssmtpd: clamav: loaded %d virues", virnum);
@@ -1942,8 +1943,8 @@ static void SmtpdConnParseData(smtpdConn * conn)
                 if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK)) {
                     static char *info = "The attachement has been removed due to virus infection";
                     // Check attachement for virus, replace infected file with text message
-                    if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, &len))) ||
-                        (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, &len)))) {
+                    if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, (int*)&len))) ||
+                        (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, (int*)&len)))) {
                         SmtpdCheckVirus(conn, ptr, len, fileHdr->value);
                         ns_free(ptr);
                     }
@@ -2342,17 +2343,27 @@ static int SmtpdCheckVirus(smtpdConn * conn, char *data, int datalen, char *loca
 
 #ifdef USE_CLAMAV
     const char *virname;
+    char tmpfile[128];
     unsigned long size = 0;
+    int fd;
 
     if (datalen) {
-        if (cl_scanbuff(data, datalen, &virname, conn->server->ClamAvRoot) == CL_VIRUS) {
+        tmpnam(tmpfile);
+        fd = open(tmpfile, O_CREAT|O_RDWR, 0644);
+        if (fd < 0) {
+            Tcl_AppendResult(conn->interp, strerror(errno), 0);
+            return TCL_ERROR;
+        }
+        write(fd, data, datalen);
+        unlink(tmpfile);
+        if (cl_scandesc(fd, &virname, &size, conn->server->ClamAvRoot, &conn->server->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
             conn->flags |= SMTPD_GOTVIRUS;
-            SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, virname, 1);
+            SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, (char*)virname, 1);
         }
     } else {
-        if (cl_scanfile(data, &virname, &size, conn->server->ClamAvRoot, &conn->server->ClamAvLimits, CL_ARCHIVE | CL_MAIL | CL_OLE2) == CL_VIRUS) {
+        if (cl_scanfile(data, &virname, &size, conn->server->ClamAvRoot, &conn->server->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
             conn->flags |= SMTPD_GOTVIRUS;
-            SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, virname, 1);
+            SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, (char*)virname, 1);
         }
     }
 #endif
@@ -2985,7 +2996,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             Tcl_Obj *item, *list = Tcl_NewListObj(0, 0);
             if (objc > 3) {
                 if ((name = Tcl_GetString(objv[3]))) {
-                    if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+                    if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                         Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                         return TCL_ERROR;
                     }
@@ -3014,7 +3025,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
     case cmdGetRcptData:
         if (objc > 3) {
             if ((name = Tcl_GetString(objv[3]))) {
-                if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+                if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                     Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                     return TCL_ERROR;
                 }
@@ -3034,7 +3045,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             return TCL_ERROR;
         }
         if ((name = Tcl_GetString(objv[3]))) {
-            if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+            if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                 Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                 return TCL_ERROR;
             }
@@ -3055,7 +3066,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
                 return TCL_ERROR;
             }
             if ((name = Tcl_GetString(objv[3]))) {
-                if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+                if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                     Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                     return TCL_ERROR;
                 }
@@ -3099,7 +3110,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
                 return TCL_ERROR;
             }
             if ((name = Tcl_GetString(objv[3]))) {
-                if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+                if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                     Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                     return TCL_ERROR;
                 }
@@ -3134,7 +3145,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             return TCL_ERROR;
         }
         if ((name = Tcl_GetString(objv[3]))) {
-            if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+            if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                 Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                 return TCL_ERROR;
             }
@@ -3178,7 +3189,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             return TCL_ERROR;
         }
         if ((name = Tcl_GetString(objv[3]))) {
-            if (TclLooksLikeInt(name, -1) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
+            if (parseInt(name) && Tcl_GetIntFromObj(interp, objv[3], &index) != TCL_OK) {
                 Tcl_WrongNumArgs(interp, 2, objv, "?address|index?");
                 return TCL_ERROR;
             }
@@ -3582,6 +3593,31 @@ static char *parseSpace(char *s)
     return s;
 }
 
+static int parseInt(char *val)
+{
+    if (val == NULL || *val == 0) {
+        return 0;
+    }
+    // Skip leading spaces
+    while (isspace(*val)) {
+        val++;
+    }
+    // Check for minus sign
+    if (!isdigit(*val)) {
+        if (*val != '-') {
+            return 0;
+        }
+        val++;
+    }
+    while (*val) {
+        if (!isdigit(*val)) {
+            return 0;
+        }
+        val++;
+    }       
+    return 1;
+}
+
 static char *encodehex(const char *buf, int len)
 {
     char *s;
@@ -3607,6 +3643,7 @@ static char *decodehex(const char *str, int *len)
         return 0;
     }
     *len = strlen(str) / 2;
+
     t = p = ns_calloc(1, *len);
     for (s = (char *) str; *s && c < *len; c++) {
         if (!isxdigit(*s) || !isxdigit(*(s + 1))) {
