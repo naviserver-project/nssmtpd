@@ -549,12 +549,14 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 
 #ifdef USE_CLAMAV
     {
-        int rc, virnum;
+        int rc;
+        unsigned int virnum;
+
         if (!(addr = Ns_ConfigGetValue(path, "clamav_dbdir"))) {
             addr = (char*)cl_retdbdir();
         }
-        if ((rc = cl_load(addr, &serverPtr->ClamAvRoot, (unsigned int*)&virnum, CL_DB_STDOPT))) {
-            Ns_Log(Error, "nssmtpd: clamav: failed to load db: %s", cl_strerror(rc));
+        if ((rc = cl_load(addr, &serverPtr->ClamAvRoot, &virnum, CL_DB_STDOPT))) {
+            Ns_Log(Error, "nssmtpd: clamav: failed to load db %s: %s", addr, cl_strerror(rc));
             return NS_ERROR;
         }
         if ((rc = cl_build(serverPtr->ClamAvRoot))) {
@@ -578,7 +580,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         if (!Ns_ConfigGetInt(path, "clamav_archivememlim", (int*)&serverPtr->ClamAvLimits.archivememlim)) {
             serverPtr->ClamAvLimits.archivememlim = 0;
         }
-        Ns_Log(Notice, "nssmtpd: clamav: loaded %d virues", virnum);
+        Ns_Log(Notice, "nssmtpd: clamav: loaded %u virues", virnum);
     }
 #endif
 
@@ -3614,7 +3616,7 @@ static int parseInt(char *val)
             return 0;
         }
         val++;
-    }       
+    }
     return 1;
 }
 
