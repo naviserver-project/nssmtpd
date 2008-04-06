@@ -439,6 +439,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     serverPtr->dataproc = Ns_ConfigGetValue(path, "dataproc");
     serverPtr->errorproc = Ns_ConfigGetValue(path, "errorproc");
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
+
     /* Parse flags */
     if ((addr = Ns_ConfigGetValue(path, "flags"))) {
         char *n;
@@ -451,23 +452,31 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         }
         Ns_Log(Notice, "ns_smtpd: flags = 0x%x", serverPtr->flags);
     }
+
     /* Add local domains to relay table */
     serverPtr->relaylist = ns_calloc(1, sizeof(smtpdRelay));
     serverPtr->relaylist->name = ns_strdup("localhost");
-    addr = Ns_InfoHostname();
-    for (path = strrchr(addr, '.') - 1; path > addr; path--) {
-        if (*path == '.') {
+
+    path = Ns_InfoHostname();
+    while (path != NULL) {
+        addr = strchr(path, '.');
+        if (addr != NULL) {
             relay = ns_calloc(1, sizeof(smtpdRelay));
-            relay->name = ns_strdup(path + 1);
+            relay->name = ns_strdup(path);
             relay->next = serverPtr->relaylist;
             serverPtr->relaylist = relay;
+            Ns_Log(Notice, "ns_smtpd: adding local relay domain: %s", path);
+            addr++;
         }
+        path = addr;
     }
+
     /* SMTP relay support */
     if (serverPtr->relayhost && (path = strchr(serverPtr->relayhost, ':'))) {
         *path++ = 0;
         serverPtr->relayport = atoi(path);
     }
+
     /* SpamAssassin support */
     serverPtr->spamdport = 783;
     if (serverPtr->spamdhost && (path = strchr(serverPtr->spamdhost, ':'))) {
@@ -509,9 +518,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         CISweepClassFactory2 *pFactory;
 
         // Initialize fake handler to keep all virus data in the memory
-        if ((hr =
-             DllGetClassObject((REFIID) & SOPHOS_CLASSID_SAVI, (REFIID) & SOPHOS_IID_CLASSFACTORY2,
-                               (void **) &pFactory)) < 0) {
+        if ((hr = DllGetClassObject((REFIID) & SOPHOS_CLASSID_SAVI, (REFIID) & SOPHOS_IID_CLASSFACTORY2, (void **) &pFactory)) < 0) {
             Ns_Log(Error, "nssmtpd: sophos: Failed to get class factory interface: %x", hr);
             return NS_ERROR;
         }
@@ -552,18 +559,6 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         int rc;
         unsigned int virnum;
 
-        if (!(addr = Ns_ConfigGetValue(path, "clamav_dbdir"))) {
-            addr = (char*)cl_retdbdir();
-        }
-        if ((rc = cl_load(addr, &serverPtr->ClamAvRoot, &virnum, CL_DB_STDOPT))) {
-            Ns_Log(Error, "nssmtpd: clamav: failed to load db %s: %s", addr, cl_strerror(rc));
-            return NS_ERROR;
-        }
-        if ((rc = cl_build(serverPtr->ClamAvRoot))) {
-            Ns_Log(Error, "nssmtpd: clamav: failed to build trie: %s", cl_strerror(rc));
-            cl_free(serverPtr->ClamAvRoot);
-            return NS_ERROR;
-        }
         memset(&serverPtr->ClamAvLimits, 0, sizeof(struct cl_limits));
         if (!Ns_ConfigGetInt(path, "clamav_maxfiles", (int*)&serverPtr->ClamAvLimits.maxfiles)) {
             serverPtr->ClamAvLimits.maxfiles = 1000;
@@ -580,7 +575,16 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         if (!Ns_ConfigGetInt(path, "clamav_archivememlim", (int*)&serverPtr->ClamAvLimits.archivememlim)) {
             serverPtr->ClamAvLimits.archivememlim = 0;
         }
-        Ns_Log(Notice, "nssmtpd: clamav: loaded %u virues", virnum);
+
+        if (!(addr = Ns_ConfigGetValue(path, "clamav_dbdir"))) {
+            addr = (char*)cl_retdbdir();
+        }
+        if ((rc = cl_load(addr, &serverPtr->ClamAvRoot, &virnum, CL_DB_STDOPT)) ||
+            (rc = cl_build(serverPtr->ClamAvRoot))) {
+            Ns_Log(Error, "nssmtpd: clamav: failed to load db %s: %s", addr, cl_strerror(rc));
+        } else {
+            Ns_Log(Notice, "nssmtpd: clamav: loaded %u virues", virnum);
+        }
     }
 #endif
 
