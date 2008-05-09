@@ -569,9 +569,6 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         if (!Ns_ConfigGetInt(path, "clamav_maxreclevel", (int*)&serverPtr->ClamAvLimits.maxreclevel)) {
             serverPtr->ClamAvLimits.maxreclevel = 5;
         }
-        if (!Ns_ConfigGetInt(path, "clamav_maxratio", (int*)&serverPtr->ClamAvLimits.maxratio)) {
-            serverPtr->ClamAvLimits.maxratio = 200;
-        }
         if (!Ns_ConfigGetInt(path, "clamav_archivememlim", (int*)&serverPtr->ClamAvLimits.archivememlim)) {
             serverPtr->ClamAvLimits.archivememlim = 0;
         }
