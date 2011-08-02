@@ -134,6 +134,8 @@ typedef struct _smtpdServer {
     int writetimeout;
     char *relayhost;
     int relayport;
+    char *address;
+    int port;
     char *spamdhost;
     int spamdport;
     char *initproc;
@@ -343,7 +345,11 @@ static void dnsEncodePacket(dnsPacket * pkt);
 static void dnsPacketFree(dnsPacket * pkt, int type);
 static dnsPacket *dnsLookup(char *name, int type, int *errcode);
 
-static Ns_DriverProc SmtpdDriverProc;
+static Ns_DriverAcceptProc SmtpdAcceptProc;
+static Ns_DriverListenProc SmtpdListenProc;
+static Ns_DriverRequestProc SmtpdRequestProc;
+static Ns_DriverCloseProc SmtpdCloseProc;
+
 static void SmtpdInit(void *arg);
 static int SmtpdRequestProc(void *arg, Ns_Conn * conn);
 static int SmtpdInterpInit(Tcl_Interp * interp, void *context);
@@ -409,6 +415,10 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Tcl_InitHashTable(&serverPtr->sessions, TCL_ONE_WORD_KEYS);
 
     path = Ns_ConfigGetPath(server, module, NULL);
+    serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
+    if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
+        serverPtr->port = 25;
+    }
     if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
     }
@@ -486,17 +496,23 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
-    init.version = NS_DRIVER_VERSION_1;
+    init.version = NS_DRIVER_VERSION_2;
     init.name = "nssmtpd";
-    init.proc = SmtpdDriverProc;
-    init.opts = NS_DRIVER_QUEUE_ONACCEPT;
+    init.listenProc = SmtpdListenProc;
+    init.acceptProc = SmtpdAcceptProc;
+    init.recvProc = NULL; //SmtpdRecvProc;
+    init.sendProc = NULL; // SmtpdSendProc;
+    init.sendFileProc = NULL; // SmtpdSendFileProc;
+    init.keepProc = NULL; // SmtpdKeepProc;
+    init.requestProc = SmtpdRequestProc;
+    init.closeProc = SmtpdCloseProc;
+    init.opts = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
     init.arg = serverPtr;
-    init.path = NULL;
+    init.path = path;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
         return NS_ERROR;
     }
-    Ns_RegisterRequest(server, "SMTP", "/", SmtpdRequestProc, NULL, serverPtr, 0);
 
     /* Segv/panic handler */
     if (serverPtr->flags & SMTPD_SEGV) {
@@ -612,6 +628,7 @@ static void SmtpdPanic(CONST char *fmt, ...)
 static void SmtpdSegv(int sig)
 {
     unsigned int now = time(0);
+
     Ns_Log(Error, "nssmtpd: SIGSEGV received %d", getpid());
     while (time(0) - now < segvTimeout) {
         sleep(1);
@@ -624,45 +641,187 @@ static void SmtpdSegv(int sig)
  */
 static int SmtpdInterpInit(Tcl_Interp * interp, void *arg)
 {
+    Ns_Log(Debug,"SmtpdInterpInit");
     Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, arg, NULL);
     return NS_OK;
 }
 
-static int SmtpdRequestProc(void *arg, Ns_Conn * conn)
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdAcceptProc --
+ *
+ *      Accept a new socket in non-blocking mode.
+ *
+ * Results:
+ *      possible results:
+ *      NS_DRIVER_ACCEPT:       a socket was accepted, poll for data
+ *      NS_DRIVER_ACCEPT_DATA:  a socket was accepted, data present, read immediately
+ *                      if in async mode, defer reading to connection thread
+ *      NS_DRIVER_ACCEPT_QUEUE: a socket was accepted, queue immediately
+ *      NS_DRIVER_ACCEPT_ERROR: no socket was accepted
+ *
+ *     This function returns either NS_DRIVER_ACCEPT_QUEUE or
+ *     NS_DRIVER_ACCEPT_ERROR
+ *
+ * Side effects:
+ *      None.
+ *
+ *----------------------------------------------------------------------
+ */
+ 
+static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, SOCKET listensock, struct sockaddr *sockaddrPtr, int *socklenPtr)
 {
-    smtpdServer *server = arg;
-    SmtpdThread(SmtpdConnCreate(server, Ns_ConnSockPtr(conn)));
-    return NS_OK;
-}
+    int     status = NS_DRIVER_ACCEPT_ERROR;
 
-static int SmtpdDriverProc(Ns_DriverCmd cmd, Ns_Sock * sock, struct iovec *bufs, int nbufs)
-{
-    switch (cmd) {
-    case DriverQueue:
-        return Ns_DriverSetRequest(sock, "SMTP / SMTP/1.0");
-        break;
+    /*
+     * This function is essentially copied from nssocket.c but returns
+     * on success NS_DRIVER_ACCEPT_QUEUE.
+     */
 
-    case DriverRecv:
-    case DriverSend:
-    case DriverKeep:
-    case DriverClose:
-        break;
+    sock->sock = Ns_SockAccept(listensock, sockaddrPtr, socklenPtr);
+    if (sock->sock != INVALID_SOCKET) {
+
+#ifdef __APPLE__
+      /* 
+       * Darwin's poll returns per default writable in situations,
+       * where nothing can be written.  Setting the socket option for
+       * the send low watermark to 1 fixes this problem.
+       */
+        int value = 1;
+	setsockopt(sock->sock, SOL_SOCKET,SO_SNDLOWAT, &value, sizeof(value));
+#endif
+	status = NS_DRIVER_ACCEPT_QUEUE;
     }
-    return NS_ERROR;
+    return status;
 }
 
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdListenProc --
+ *
+ *      Open a listening socket in non-blocking mode.
+ *
+ * Results:
+ *      The open socket or INVALID_SOCKET on error.
+ *
+ * Side effects:
+ *      None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static SOCKET SmtpdListenProc(Ns_Driver *driver, CONST char *address, int port, int backlog)
+{
+    SOCKET sock;
+    smtpdServer *srvPtr = (smtpdServer*)driver->arg;
+
+    sock = Ns_SockListenEx(srvPtr->address, srvPtr->port,backlog);
+    if (sock != INVALID_SOCKET) {
+        (void) Ns_SockSetNonBlocking(sock);
+    }
+    return sock;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdRequestProc --
+ *
+ *      Process an smtp request. This proc start a thread for handling
+ *      the request.
+ *
+ * Results:
+ *      NS_OK
+ *
+ * Side effects:
+ *      None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int SmtpdRequestProc(void *arg, Ns_Conn *conn)
+{
+  smtpdServer *server = arg;
+
+  SmtpdThread(SmtpdConnCreate(server, Ns_ConnSockPtr(conn)));
+  return NS_OK;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdCloseProc --
+ *
+ *      Close an Smptd proc (finish the request)
+ *
+ * Results:
+ *      None
+ *
+ * Side effects:
+ *      None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static void SmtpdCloseProc(Ns_Sock *sock)
+{
+  Ns_Log(Debug,"SmtpdCloseProc");
+  sock->sock=-1;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdInit --
+ *
+ *      Initialize Smtpd via tcl script
+ *
+ * Results:
+ *      None
+ *
+ * Side effects:
+ *      None
+ *
+ *----------------------------------------------------------------------
+ */
 static void SmtpdInit(void *arg)
 {
     smtpdServer *server = arg;
-    if (server->initproc)
+
+    Ns_Log(Debug,"SmtpdInit");
+
+    if (server->initproc) {
         Ns_TclEval(0, server->server, server->initproc);
+    }
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdThread --
+ *
+ *      Process an Smtpd connection. This thread implements the main
+ *      Smtpd logic.
+ *
+ * Results:
+ *      None
+ *
+ * Side effects:
+ *      None
+ *
+ *----------------------------------------------------------------------
+ */
 static void SmtpdThread(smtpdConn * conn)
 {
     char *data;
     Ns_Conn *nsconn = Ns_GetConn();
     smtpdServer *server = conn->server;
+
+    Ns_Log(Debug,"SmtpdThread");
 
     Ns_GetHostByAddr(&conn->line, Ns_ConnPeer(nsconn));
     if (!conn->line.length && conn->flags & SMTPD_RESOLVE) {
@@ -676,6 +835,7 @@ static void SmtpdThread(smtpdConn * conn)
         SmtpdConnFree(conn);
         return;
     }
+
     conn->host = ns_strdup(conn->line.string);
     Ns_MutexLock(&server->locallock);
     if (SmtpdCheckIpaddr(server->local, inet_addr(Ns_ConnPeer(nsconn))))
@@ -689,6 +849,8 @@ static void SmtpdThread(smtpdConn * conn)
     if (SmtpdWriteDString(conn, &conn->line)) {
         goto error;
     }
+
+    Ns_Log(Debug,"SmtpdThread: %s",conn->line.string);
 
     while (1) {
         conn->cmd = SMTP_READ;
@@ -1066,6 +1228,8 @@ static smtpdConn *SmtpdConnCreate(smtpdServer * server, Ns_Sock * sock)
     Tcl_HashEntry *rec;
     int new;
 
+    Ns_Log(Debug,"SmtpdConnCreate");
+
     Ns_MutexLock(&connLock);
     if ((conn = connList)) {
         connList = connList->next;
@@ -1089,7 +1253,10 @@ static smtpdConn *SmtpdConnCreate(smtpdServer * server, Ns_Sock * sock)
 
     Ns_MutexLock(&server->lock);
     conn->id = server->id++;
-    rec = Tcl_CreateHashEntry(&server->sessions, (char *) conn->id, &new);
+    rec = Tcl_CreateHashEntry(
+			      &server->sessions, 
+			      (char *) (long)conn->id, 
+			      &new);
     Tcl_SetHashValue(rec, conn);
     Ns_MutexUnlock(&server->lock);
     return conn;
@@ -1097,6 +1264,8 @@ static smtpdConn *SmtpdConnCreate(smtpdServer * server, Ns_Sock * sock)
 
 static void SmtpdConnReset(smtpdConn * conn)
 {
+    Ns_Log(Debug,"SmtpdConnReset");
+
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
     ns_free(conn->from.addr), conn->from.addr = 0;
@@ -1127,6 +1296,7 @@ static void SmtpdConnReset(smtpdConn * conn)
 
 static void SmtpdConnPrint(smtpdConn * conn)
 {
+
     Ns_Conn *nsconn;
     smtpdRcpt *rcpt;
 
@@ -1141,7 +1311,7 @@ static void SmtpdConnPrint(smtpdConn * conn)
         Ns_DStringPrintf(&conn->line, "%s(0x%X/%.2f), ", rcpt->addr, rcpt->flags, rcpt->spam_score);
     }
     Ns_DStringPrintf(&conn->line, "SIZE: %d/%d", conn->body.data.length, conn->body.offset);
-    Ns_Log(Notice, conn->line.string);
+    Ns_Log(Notice, "%s", conn->line.string);
 
     /*
      * Update request line for access logging
@@ -1176,11 +1346,13 @@ static void SmtpdConnFree(smtpdConn * conn)
 {
     Tcl_HashEntry *rec;
 
+    Ns_Log(Debug,"SmtpdConnFree");
+
     if (!conn) {
         return;
     }
     Ns_MutexLock(&conn->server->lock);
-    if ((rec = Tcl_FindHashEntry(&conn->server->sessions, (char *) conn->id))) {
+    if ((rec = Tcl_FindHashEntry(&conn->server->sessions, (char *)(long) conn->id))) {
         Tcl_DeleteHashEntry(rec);
     }
     Ns_MutexUnlock(&conn->server->lock);
@@ -1206,6 +1378,8 @@ static int SmtpdRelayData(smtpdConn * conn, char *host, int port)
     Ns_Time timeout = { conn->server->writetimeout, 0 };
     int size = 0, vcount = 0;
     Ns_Conn *nsconn = Ns_GetConn();
+
+    Ns_Log(Debug,"SmtpdRelayData");
 
     /* if we have single recipient use recipient's relay
        otherwise for different recipients use default relay */
@@ -1376,6 +1550,8 @@ static int SmtpdSend(smtpdServer * server, Tcl_Interp * interp, const char *send
     Ns_Time timeout = { server->writetimeout, 0 };
     int duplicated = 0;
 
+    Ns_Log(Debug,"SmtpdSend");
+
     if (!sender || !rcpt || !dname) {
         Tcl_AppendResult(interp, "nssmtpd: send: empty arguments", 0);
         return -1;
@@ -1530,6 +1706,8 @@ static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, int flags)
     int count = -1;
     smtpdRcpt *rcpt, *rcpt2;
 
+    Ns_Log(Debug,"SmtpdRcptFree");
+
     for (rcpt = conn->rcpt.list; rcpt;) {
         count++;
         if ((flags && rcpt->flags & SMTPD_VERIFIED) || (addr && !strcmp(rcpt->addr, addr)) || (index >= 0 && count == index)) {
@@ -1559,6 +1737,8 @@ static int SmtpdRead(smtpdConn * conn, void *vbuf, int len)
     int nread, n;
     char *buf = (char *) vbuf;
     Ns_Time timeout = { conn->server->readtimeout, 0 };
+
+    Ns_Log(Debug,"SmtpdRead");
 
     nread = len;
     while (len > 0) {
@@ -1593,6 +1773,8 @@ static int SmtpdWrite(smtpdConn * conn, void *vbuf, int len)
     char *buf;
     Ns_Time timeout = { conn->server->writetimeout, 0 };
 
+    Ns_Log(Debug,"SmtpdWrite");
+    
     nwrote = len;
     buf = vbuf;
     while (len > 0) {
@@ -1611,6 +1793,7 @@ static int SmtpdReadLine(smtpdConn * conn, Ns_DString * dsPtr)
     char buf[1];
     int len = 0, nread;
 
+    Ns_Log(Debug,"SmtpdReadLine");
     Ns_DStringTrunc(dsPtr, 0);
     do {
         if ((nread = SmtpdRead(conn, buf, 1)) == 1) {
@@ -1630,6 +1813,9 @@ static int SmtpdReadLine(smtpdConn * conn, Ns_DString * dsPtr)
 static int SmtpdWriteData(smtpdConn * conn, char *buf, int len)
 {
     int nwrote;
+
+    Ns_Log(Debug,"SmtpdWriteData");
+
     if (conn->server->debug > 5) {
         Ns_Log(Notice, "nssmtpd: %d: >>> %s", conn->id, buf);
     }
@@ -1738,6 +1924,8 @@ static void SmtpdConnParseData(smtpdConn * conn)
     unsigned int encodingSize, contentSize;
     smtpdHdr *header = 0, *boundary = 0, *fileHdr;
     char *body, *end, *line, *hdr, *ptr, *filePtr;
+
+    Ns_Log(Debug,"SmtpdConnParseData");
 
     hdr = conn->body.data.string;
     if (!(body = strstr(hdr, "\r\n\r\n")) && !(body = strstr(hdr, "\n\n"))) {
@@ -2005,8 +2193,16 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
             hp = &hp_a;
         }
 #else
+# ifdef __APPLE__
+	/* 
+	 * This should be most probably changed to a newer interface,
+	 * but we have no gethostbyname_r() on current Mac OS X
+	 */
+        hp = gethostbyname(addr);
+# else
         hp = gethostbyname_r(addr, &hp_a, buf, sizeof(buf), &hp_errno);
-#endif
+# endif
+#endif 
         if (!hp) {
             return 0;
         }
@@ -2531,7 +2727,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             return TCL_ERROR;
         }
         Ns_MutexLock(&server->lock);
-        rec = Tcl_FindHashEntry(&server->sessions, (char *) id);
+        rec = Tcl_FindHashEntry(&server->sessions, (char *)(long) id);
         Ns_MutexUnlock(&server->lock);
         if (!rec) {
             Tcl_AppendResult(interp, "invalid session id: ", Tcl_GetStringFromObj(objv[2], 0), 0);
@@ -4069,7 +4265,7 @@ static int dnsParseName(dnsPacket * pkt, char **ptr, char *buf, int buflen, int 
     char *p;
 
     if (level > 15) {
-        Ns_Log(Error, "nsdns: infinite loop %d: %d", (*ptr - pkt->buf.data) - 2, level);
+        Ns_Log(Error, "nsdns: infinite loop %ld: %d", (*ptr - pkt->buf.data) - 2, level);
         return -9;
     }
     while ((len = *((*ptr)++)) != 0) {

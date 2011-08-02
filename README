@@ -2,7 +2,7 @@ SMTPD server/proxy for NaviServer
 Release 1.0
 vlad@crystalballinc.com
 
-    SMTPD proxy/server for Naniserver
+    SMTPD proxy/server for Naviserver
 
 This is Naviserver module that implements SMTP protocol 
 and acts as SMTP proxy with anti-spam and anti-virus capabilities. 
@@ -83,7 +83,7 @@ ns_smtpd usage:
 
 *Licensing*
 
-Maverix is covered by Mozilla license.
+nssmptd is covered by Mozilla license.
 
 *Authors*
 
