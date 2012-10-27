@@ -670,7 +670,7 @@ static int SmtpdInterpInit(Tcl_Interp * interp, void *arg)
  *----------------------------------------------------------------------
  */
  
-static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, SOCKET listensock, struct sockaddr *sockaddrPtr, int *socklenPtr)
+static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listensock, struct sockaddr *sockaddrPtr, int *socklenPtr)
 {
     int     status = NS_DRIVER_ACCEPT_ERROR;
 
@@ -713,9 +713,9 @@ static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, SOCKET listensock,
  *----------------------------------------------------------------------
  */
 
-static SOCKET SmtpdListenProc(Ns_Driver *driver, CONST char *address, int port, int backlog)
+static NS_SOCKET SmtpdListenProc(Ns_Driver *driver, CONST char *address, int port, int backlog)
 {
-    SOCKET sock;
+    NS_SOCKET sock;
     smtpdServer *srvPtr = (smtpdServer*)driver->arg;
 
     sock = Ns_SockListenEx(srvPtr->address, srvPtr->port,backlog);
@@ -2182,13 +2182,16 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     if (sscanf(str, "%[^/]/%s", addr, mask) == 2);
     else
     if (sscanf(str, "%s", addr) == 1) {
-        int hp_errno;
-        char **x, buf[1024];
+        char **x;
         smtpdIpaddr *arec;
-        struct hostent *hp = 0, hp_a, *hp_b;
+        struct hostent *hp = 0;
 
         // Obtain all ip addresses for given hostname
 #if defined(linux)
+        int hp_errno;
+	char buf[1024];
+        struct hostent hp_a, *hp_b;
+
         if (!gethostbyname_r(addr, &hp_a, buf, sizeof(buf), &hp_b, &hp_errno)) {
             hp = &hp_a;
         }
@@ -2200,6 +2203,10 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
 	 */
         hp = gethostbyname(addr);
 # else
+        int hp_errno;
+	char buf[1024];
+        struct hostent hp_a;
+
         hp = gethostbyname_r(addr, &hp_a, buf, sizeof(buf), &hp_errno);
 # endif
 #endif 
@@ -2218,7 +2225,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         // invalid IP address
         return 0;
     }
-    if ((ipaddr = inet_addr(addr)) < 0) {
+    if ((ipaddr = inet_addr(addr)) <= 0) {
         return 0;
     }
     /* Decode mask */
@@ -2226,7 +2233,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         if (strchr(mask, '.')) {
             ipmask = inet_addr(mask);
         } else
-        if ((ipmask = atoi(mask)) >= 0 && ipmask < 33) {
+        if (ipmask < 33) {
             ipmask = ipmask ? htonl(0xfffffffful << (32 - ipmask)) : 0;
         }
     }
