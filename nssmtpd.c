@@ -407,7 +407,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 {
     char *path, *addr;
     smtpdRelay *relay;
-    Ns_DriverInitData init;
+    Ns_DriverInitData init = {0};
     smtpdServer *serverPtr;
 
     serverPtr = ns_calloc(1, sizeof(smtpdServer));
