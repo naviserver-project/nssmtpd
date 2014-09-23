@@ -112,7 +112,7 @@ typedef struct _smtpdRelay {
 typedef struct _smtpdRcpt {
     struct _smtpdRcpt *next, *prev;
     char *addr;
-    int flags;
+    unsigned int flags;
     char *data;
     struct {
         int port;
@@ -124,7 +124,7 @@ typedef struct _smtpdRcpt {
 typedef struct _smtpdServer {
     char *server;
     unsigned int id;
-    int flags;
+    unsigned int flags;
     int debug;
     int bufsize;
     int maxline;
@@ -161,7 +161,7 @@ typedef struct _smtpdConn {
     struct _smtpdConn *next;
     unsigned int id;
     int cmd;
-    int flags;
+    unsigned int flags;
     char *host;
     Ns_Sock *sock;
     Ns_DString line;
@@ -361,7 +361,7 @@ static smtpdConn *SmtpdConnCreate(smtpdServer * server, Ns_Sock * sock);
 static void SmtpdConnReset(smtpdConn * conn);
 static void SmtpdConnFree(smtpdConn * conn);
 static void SmtpdConnPrint(smtpdConn * conn);
-static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, int flags);
+static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn * conn, char *proc);
 static void SmtpdConnParseData(smtpdConn * conn);
 static char *SmtpdGetHeader(smtpdConn * conn, char *name);
@@ -1701,7 +1701,7 @@ static int SmtpdSend(smtpdServer * server, Tcl_Interp * interp, const char *send
     return -1;
 }
 
-static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, int flags)
+static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, unsigned int flags)
 {
     int count = -1;
     smtpdRcpt *rcpt, *rcpt2;
@@ -3266,7 +3266,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         break;
 
     case cmdSetFlag:{
-            int flags;
+            unsigned int flags;
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
                 return TCL_ERROR;
@@ -3310,7 +3310,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         }
 
     case cmdUnsetFlag:{
-            int flags;
+            unsigned int flags;
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
                 return TCL_ERROR;
@@ -3469,7 +3469,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             Ns_DString ds;
             DSPAM_CTX *CTX;
             struct _ds_spam_signature SIG;
-            int flags = DSF_CHAINED | DSF_NOISE;
+            unsigned int flags = DSF_CHAINED | DSF_NOISE;
 
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "1|0 email message ?signature? ?mode? ?source?");
