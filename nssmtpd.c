@@ -365,7 +365,9 @@ static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, unsigned int 
 static int SmtpdConnEval(smtpdConn * conn, char *proc);
 static void SmtpdConnParseData(smtpdConn * conn);
 static char *SmtpdGetHeader(smtpdConn * conn, char *name);
+#if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn * conn, char *name, char *value, int alloc);
+#endif
 static int SmtpdRead(smtpdConn * conn, void *vbuf, int len);
 static int SmtpdWrite(smtpdConn * conn, void *vbuf, int len);
 static int SmtpdWriteDString(smtpdConn * conn, Ns_DString * dsPtr);
@@ -1904,6 +1906,7 @@ static char *SmtpdGetHeader(smtpdConn * conn, char *name)
     return "";
 }
 
+#if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn * conn, char *name, char *value, int alloc)
 {
     smtpdHdr *hdr = ns_calloc(1, sizeof(smtpdHdr));
@@ -1912,6 +1915,7 @@ static void SmtpdConnAddHeader(smtpdConn * conn, char *name, char *value, int al
     hdr->next = conn->body.headers;
     conn->body.headers = hdr;
 }
+#endif
 
 /*
  *  Find where headers end, if the first line looks like header, find the
@@ -3266,7 +3270,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         break;
 
     case cmdSetFlag:{
-            unsigned int flags;
+            int flags;
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
                 return TCL_ERROR;
@@ -3310,7 +3314,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         }
 
     case cmdUnsetFlag:{
-            unsigned int flags;
+            int flags;
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
                 return TCL_ERROR;
@@ -3378,9 +3382,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         }
         rcpt = ns_calloc(1, sizeof(smtpdRcpt));
         rcpt->addr = ns_strdup(Tcl_GetString(objv[3]));
-        if (objc > 4 && Tcl_GetIntFromObj(interp, objv[4], &rcpt->flags) != TCL_OK) {
+	{ int flags;
+	  if (objc > 4 && Tcl_GetIntFromObj(interp, objv[4], &flags) != TCL_OK) {
             return TCL_ERROR;
-        }
+	  }
+	  rcpt->flags = flags;
+	}
         if (objc > 5) {
             rcpt->data = ns_strcopy(Tcl_GetString(objv[5]));
         }
@@ -4337,12 +4344,13 @@ static dnsPacket *dnsParseHeader(void *buf, int size)
 
 static dnsRecord *dnsParseRecord(dnsPacket * pkt, int query)
 {
-    int rc, offset;
+    int rc;
+    //int offset;
     char name[256] = "";
     dnsRecord *y;
 
     y = ns_calloc(1, sizeof(dnsRecord));
-    offset = (pkt->buf.ptr - pkt->buf.data) - 2;
+    //offset = (pkt->buf.ptr - pkt->buf.data) - 2;
     // The name of the resource
     if ((rc = dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0)) < 0) {
         snprintf(name, 255, "invalid name: %d %s: ", rc, pkt->buf.ptr);
@@ -4405,7 +4413,7 @@ static dnsRecord *dnsParseRecord(dnsPacket * pkt, int query)
     case DNS_TYPE_NS:
     case DNS_TYPE_CNAME:
     case DNS_TYPE_PTR:
-        offset = (pkt->buf.ptr - pkt->buf.data) - 2;
+	//offset = (pkt->buf.ptr - pkt->buf.data) - 2;
         if (dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0) < 0) {
             goto err;
         }
