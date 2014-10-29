@@ -672,7 +672,8 @@ static int SmtpdInterpInit(Tcl_Interp * interp, void *arg)
  *----------------------------------------------------------------------
  */
  
-static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listensock, struct sockaddr *sockaddrPtr, int *socklenPtr)
+static NS_DRIVER_ACCEPT_STATUS 
+SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listensock, struct sockaddr *sockaddrPtr, socklen_t *socklenPtr)
 {
     int     status = NS_DRIVER_ACCEPT_ERROR;
 
@@ -682,7 +683,7 @@ static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listenso
      */
 
     sock->sock = Ns_SockAccept(listensock, sockaddrPtr, socklenPtr);
-    if (sock->sock != INVALID_SOCKET) {
+    if (sock->sock != NS_INVALID_SOCKET) {
 
 #ifdef __APPLE__
       /* 
@@ -707,7 +708,7 @@ static NS_DRIVER_ACCEPT_STATUS SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listenso
  *      Open a listening socket in non-blocking mode.
  *
  * Results:
- *      The open socket or INVALID_SOCKET on error.
+ *      The open socket or NS_INVALID_SOCKET on error.
  *
  * Side effects:
  *      None
@@ -721,7 +722,7 @@ static NS_SOCKET SmtpdListenProc(Ns_Driver *driver, CONST char *address, int por
     smtpdServer *srvPtr = (smtpdServer*)driver->arg;
 
     sock = Ns_SockListenEx(srvPtr->address, srvPtr->port,backlog);
-    if (sock != INVALID_SOCKET) {
+    if (sock != NS_INVALID_SOCKET) {
         (void) Ns_SockSetNonBlocking(sock);
     }
     return sock;
@@ -1397,7 +1398,7 @@ static int SmtpdRelayData(smtpdConn * conn, char *host, int port)
     if (!port) {
         port = 25;
     }
-    if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
         Ns_Log(Error, "nssmtpd: relay: %d/%d: Unable to connect to %s:%d: %s",
                conn->id, getpid(), host, port, strerror(errno));
         SmtpdPuts(conn, "421 Service not available\r\n");
@@ -1568,7 +1569,7 @@ static int SmtpdSend(smtpdServer * server, Tcl_Interp * interp, const char *send
         port = 25;
     }
 
-    if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
         Tcl_AppendResult(interp, "nssmtpd: send: unable to connect to ", host, ": ", strerror(errno), 0);
         return -1;
     }
@@ -1924,10 +1925,13 @@ static void SmtpdConnAddHeader(smtpdConn * conn, char *name, char *value, int al
 static void SmtpdConnParseData(smtpdConn * conn)
 {
     unsigned int len, size;
-    char *encodingType, *contentType;
+    smtpdHdr    *header = 0, *boundary = 0, *fileHdr;
+    char        *encodingType, *contentType;
+    char        *body, *end, *line, *hdr, *ptr;
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
+    char  *filePtr;
     unsigned int encodingSize, contentSize;
-    smtpdHdr *header = 0, *boundary = 0, *fileHdr;
-    char *body, *end, *line, *hdr, *ptr, *filePtr;
+#endif
 
     Ns_Log(Debug,"SmtpdConnParseData");
 
@@ -2030,7 +2034,10 @@ static void SmtpdConnParseData(smtpdConn * conn)
     hdr = strstr(body, boundary->name);
     while (hdr) {
         fileHdr = 0;
-        filePtr = contentType = encodingType = 0;
+        contentType = encodingType = 0;
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
+        filePtr = NULL;
+#endif
         if (!(hdr = strchr(hdr, '\n'))) {
             break;
         }
@@ -2080,16 +2087,22 @@ static void SmtpdConnParseData(smtpdConn * conn)
                     }
                     fileHdr->value = ns_calloc(1, (unsigned) (line - ptr) + 1);
                     memcpy(fileHdr->value, ptr, (unsigned) (line - ptr));
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
                     filePtr = ptr;
+#endif
                 }
             } else
             if (!strncasecmp(hdr, "Content-Transfer-Encoding:", 26)) {
                 for (encodingType = hdr + 26; *encodingType && isspace(*encodingType); encodingType++);
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
                 encodingSize = end - encodingType;
+#endif
             } else
             if (!strncasecmp(hdr, "Content-Type:", 13)) {
                 for (contentType = hdr + 13; *contentType && isspace(*contentType); contentType++);
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
                 contentSize = end - contentType;
+#endif
                 if ((ptr = SmtpdStrNPos(contentType, "boundary=", end - contentType))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line && *line != '\n' && *line != '\r' && *line != '"'; line++);
@@ -2109,7 +2122,9 @@ static void SmtpdConnParseData(smtpdConn * conn)
                     fileHdr->name = ns_strdup(SMTPD_HDR_FILE);
                     fileHdr->value = ns_calloc(1, (unsigned) (line - ptr) + 1);
                     memcpy(fileHdr->value, ptr, (unsigned) (line - ptr));
+#if defined(USE_CLAMAV) || defined(USE_SAVI)
                     filePtr = ptr;
+#endif
                 }
             }
             // Reached end of the headers and everything is fine
@@ -2364,7 +2379,7 @@ static int SmtpdCheckSpam(smtpdConn * conn)
     }
 
     /* Connect to spamd server */
-    if ((sock.sock = Ns_SockTimedConnect(conn->server->spamdhost, conn->server->spamdport, &timeout)) == INVALID_SOCKET) {
+    if ((sock.sock = Ns_SockTimedConnect(conn->server->spamdhost, conn->server->spamdport, &timeout)) == NS_INVALID_SOCKET) {
         Ns_Log(Error, "nssmtpd: spamd: %d/%d: unable to connect to %s:%d: %s", conn->id, getpid(), conn->server->spamdhost,
                conn->server->spamdport, strerror(errno));
         return -1;
@@ -2841,7 +2856,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("address", Tcl_GetString(objv[2]))) {
             if (server->driver && server->driver->location) {
-                char *address = strstr(server->driver->location, "://");
+                const char *address = strstr(server->driver->location, "://");
                 if (address) {
                     address += 3;
                 } else {
