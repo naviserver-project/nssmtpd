@@ -138,12 +138,12 @@ typedef struct _smtpdServer {
     int port;
     char *spamdhost;
     int spamdport;
-    char *initproc;
-    char *heloproc;
-    char *mailproc;
-    char *rcptproc;
-    char *dataproc;
-    char *errorproc;
+    const char *initproc;
+    const char *heloproc;
+    const char *mailproc;
+    const char *rcptproc;
+    const char *dataproc;
+    const char *errorproc;
     Ns_Mutex relaylock;
     Ns_Mutex lock;
     smtpdRelay *relaylist;
@@ -362,7 +362,7 @@ static void SmtpdConnReset(smtpdConn * conn);
 static void SmtpdConnFree(smtpdConn * conn);
 static void SmtpdConnPrint(smtpdConn * conn);
 static void SmtpdRcptFree(smtpdConn * conn, char *addr, int index, unsigned int flags);
-static int SmtpdConnEval(smtpdConn * conn, char *proc);
+static int SmtpdConnEval(smtpdConn * conn, const char *proc);
 static void SmtpdConnParseData(smtpdConn * conn);
 static char *SmtpdGetHeader(smtpdConn * conn, char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
@@ -385,7 +385,7 @@ static int SmtpdCheckSpam(smtpdConn * conn);
 static int SmtpdCheckVirus(smtpdConn * conn, char *data, int datalen, char *location);
 static void SmtpdPanic(CONST char *fmt, ...);
 static void SmtpdSegv(int sig);
-static int SmtpdFlags(char *name);
+static int SmtpdFlags(const char *name);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 
@@ -407,7 +407,8 @@ static int dnsFailureTimeout = 300;
 
 NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 {
-    char *path, *addr;
+    char *path, *addr2;
+    const char *addr;
     smtpdRelay *relay;
     Ns_DriverInitData init = {0};
     smtpdServer *serverPtr;
@@ -471,16 +472,16 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 
     path = Ns_InfoHostname();
     while (path != NULL) {
-        addr = strchr(path, '.');
-        if (addr != NULL) {
+        addr2 = strchr(path, '.');
+        if (addr2 != NULL) {
             relay = ns_calloc(1, sizeof(smtpdRelay));
             relay->name = ns_strdup(path);
             relay->next = serverPtr->relaylist;
             serverPtr->relaylist = relay;
             Ns_Log(Notice, "ns_smtpd: adding local relay domain: %s", path);
-            addr++;
+            addr2++;
         }
-        path = addr;
+        path = addr2;
     }
 
     /* SMTP relay support */
@@ -1325,11 +1326,11 @@ static void SmtpdConnPrint(smtpdConn * conn)
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "/%s", rcpt->addr);
     }
-    ns_free(nsconn->request->line);
+    ns_free((char *)nsconn->request->line);
     nsconn->request->line = ns_strdup(conn->line.string);
 }
 
-static int SmtpdConnEval(smtpdConn * conn, char *proc)
+static int SmtpdConnEval(smtpdConn * conn, const char *proc)
 {
     char name[256];
 
@@ -2606,7 +2607,7 @@ static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr * list, unsigned long addr)
     return 0;
 }
 
-static int SmtpdFlags(char *name)
+static int SmtpdFlags(const char *name)
 {
     if (!strcasecmp(name, "verified")) {
         return SMTPD_VERIFIED;
