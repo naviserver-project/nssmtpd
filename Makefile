@@ -10,7 +10,7 @@ MOD      =  nssmtpd.so
 #
 # Objects to build.
 #
-OBJS     = nssmtpd.o
+MODOBJS     = nssmtpd.o
 
 # Use DSPAM
 #CFLAGS   += -I/usr/local/include -DUSE_DSPAM -DSIGNATURE_LIFE=14 -DDSPAM_HOME=/usr/local/aolserver/modules/dspam

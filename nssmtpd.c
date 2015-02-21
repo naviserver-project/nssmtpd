@@ -352,7 +352,7 @@ static Ns_DriverCloseProc SmtpdCloseProc;
 
 static void SmtpdInit(void *arg);
 static int SmtpdRequestProc(void *arg, Ns_Conn * conn);
-static int SmtpdInterpInit(Tcl_Interp * interp, void *context);
+static Ns_TclTraceProc SmtpdInterpInit;
 static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
 static void SmtpdThread(smtpdConn * conn);
 static int SmtpdRelayData(smtpdConn * conn, char *host, int port);
@@ -417,7 +417,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     serverPtr->server = server;
     Tcl_InitHashTable(&serverPtr->sessions, TCL_ONE_WORD_KEYS);
 
-    path = Ns_ConfigGetPath(server, module, NULL);
+    path = ns_strdup(Ns_ConfigGetPath(server, module, NULL));
     serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
     if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
         serverPtr->port = 25;
@@ -514,6 +514,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     init.path = path;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
+	ns_free(path);
         return NS_ERROR;
     }
 
@@ -539,23 +540,27 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         // Initialize fake handler to keep all virus data in the memory
         if ((hr = DllGetClassObject((REFIID) & SOPHOS_CLASSID_SAVI, (REFIID) & SOPHOS_IID_CLASSFACTORY2, (void **) &pFactory)) < 0) {
             Ns_Log(Error, "nssmtpd: sophos: Failed to get class factory interface: %x", hr);
+	    ns_free(path);
             return NS_ERROR;
         }
         if ((hr = pFactory->pVtbl->CreateInstance(pFactory, NULL, (REFIID) & SOPHOS_IID_SAVI3, (void **) &pSAVI)) < 0) {
             pFactory->pVtbl->Release(pFactory);
             Ns_Log(Error, "nssmtpd: sophos: Failed to get a CSAVI3 interface: %x", hr);
+	    ns_free(path);
             return NS_ERROR;
         }
         pFactory->pVtbl->Release(pFactory);
         if ((hr = pSAVI->pVtbl->InitialiseWithMoniker(pSAVI, "ns_savi")) < 0) {
             Ns_Log(Error, "nssmtpd: sophos: Failed to initialise SAVI: %x", hr);
             pSAVI->pVtbl->Release(pSAVI);
+	    ns_free(path);
             return NS_ERROR;
         }
         if ((hr = pSAVI->pVtbl->LoadVirusData(pSAVI)) < 0) {
             Ns_Log(Error, "nssmtpd: sophos: Unable to load virus data: %x", hr);
             pSAVI->pVtbl->Terminate(pSAVI);
             pSAVI->pVtbl->Release(pSAVI);
+	    ns_free(path);
             return NS_ERROR;
         }
         // Engine version
@@ -610,6 +615,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 
     Ns_RegisterAtStartup(SmtpdInit, serverPtr);
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
+    ns_free(path);
     return NS_OK;
 }
 
@@ -642,10 +648,10 @@ static void SmtpdSegv(int sig)
 /*
  * Add ns_smtpd commands to interp.
  */
-static int SmtpdInterpInit(Tcl_Interp * interp, void *arg)
+static int SmtpdInterpInit(Tcl_Interp * interp, const void *arg)
 {
     Ns_Log(Debug,"SmtpdInterpInit");
-    Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
     return NS_OK;
 }
 
@@ -1340,7 +1346,7 @@ static int SmtpdConnEval(smtpdConn * conn, const char *proc)
     }
     snprintf(name, sizeof(name), "%s %d", proc, conn->id);
     if (Tcl_Eval(conn->interp, name) == TCL_ERROR) {
-        Ns_TclLogError(conn->interp);
+	(void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd eval)");
         return TCL_ERROR;
     }
     return TCL_OK;
