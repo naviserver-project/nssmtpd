@@ -417,7 +417,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     serverPtr->server = server;
     Tcl_InitHashTable(&serverPtr->sessions, TCL_ONE_WORD_KEYS);
 
-    path = ns_strdup(Ns_ConfigGetPath(server, module, NULL));
+    path = ns_strdup(Ns_ConfigGetPath(server, module, (char *)0));
     serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
     if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
         serverPtr->port = 25;
@@ -1344,7 +1344,7 @@ static int SmtpdConnEval(smtpdConn * conn, const char *proc)
     if (!proc || !*proc) {
         return TCL_OK;
     }
-    snprintf(name, sizeof(name), "%s %d", proc, conn->id);
+    snprintf(name, sizeof(name), "%s %u", proc, conn->id);
     if (Tcl_Eval(conn->interp, name) == TCL_ERROR) {
 	(void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd eval)");
         return TCL_ERROR;
@@ -1779,7 +1779,7 @@ static int SmtpdRead(smtpdConn * conn, void *vbuf, int len)
 
 static int SmtpdWrite(smtpdConn * conn, void *vbuf, int len)
 {
-    int nwrote, n;
+    int nwrote;
     char *buf;
     Ns_Time timeout = { conn->server->writetimeout, 0 };
 
@@ -1788,7 +1788,8 @@ static int SmtpdWrite(smtpdConn * conn, void *vbuf, int len)
     nwrote = len;
     buf = vbuf;
     while (len > 0) {
-        n = Ns_SockSend(conn->sock->sock, buf, len, &timeout);
+        int n = Ns_SockSend(conn->sock->sock, buf, len, &timeout);
+	
         if (n < 0) {
             return -1;
         }
@@ -1822,15 +1823,14 @@ static int SmtpdReadLine(smtpdConn * conn, Ns_DString * dsPtr)
 
 static int SmtpdWriteData(smtpdConn * conn, char *buf, int len)
 {
-    int nwrote;
-
     Ns_Log(Debug,"SmtpdWriteData");
 
     if (conn->server->debug > 5) {
         Ns_Log(Notice, "nssmtpd: %d: >>> %s", conn->id, buf);
     }
     while (len > 0) {
-        nwrote = SmtpdWrite(conn, buf, len);
+        int nwrote = SmtpdWrite(conn, buf, len);
+	
         if (nwrote < 0) {
             return NS_ERROR;
         }
@@ -1933,10 +1933,8 @@ static void SmtpdConnParseData(smtpdConn * conn)
 {
     unsigned int len, size;
     smtpdHdr    *header = 0, *boundary = 0, *fileHdr;
-    char        *encodingType, *contentType;
     char        *body, *end, *line, *hdr, *ptr;
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
-    char  *filePtr;
     unsigned int encodingSize, contentSize;
 #endif
 
@@ -2040,11 +2038,12 @@ static void SmtpdConnParseData(smtpdConn * conn)
     // Go from one message part to another and parse headers
     hdr = strstr(body, boundary->name);
     while (hdr) {
-        fileHdr = 0;
-        contentType = encodingType = 0;
+        char *encodingType = NULL, *contentType = NULL;
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
-        filePtr = NULL;
-#endif
+        char  *filePtr = NULL;
+#endif        
+
+        fileHdr = 0;
         if (!(hdr = strchr(hdr, '\n'))) {
             break;
         }
@@ -2158,7 +2157,6 @@ static void SmtpdConnParseData(smtpdConn * conn)
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                 // Virus scanning
                 if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK)) {
-                    static char *info = "The attachement has been removed due to virus infection";
                     // Check attachement for virus, replace infected file with text message
                     if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, (int*)&len))) ||
                         (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, (int*)&len)))) {
@@ -2166,6 +2164,8 @@ static void SmtpdConnParseData(smtpdConn * conn)
                         ns_free(ptr);
                     }
                     if (conn->flags & SMTPD_GOTVIRUS) {
+                        static char *info = "The attachement has been removed due to virus infection";
+                        
                         while (body[size - 1] == '\n' || body[size - 1] == '\r') {
                             size--;
                         }
@@ -2205,9 +2205,9 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     else
     if (sscanf(str, "%[0123456789.]", addr) == 1);
     else
-    if (sscanf(str, "%[^/]/%s", addr, mask) == 2);
+    if (sscanf(str, "%[^/]/%17s", addr, mask) == 2);
     else
-    if (sscanf(str, "%s", addr) == 1) {
+    if (sscanf(str, "%31s", addr) == 1) {
         char **x;
         smtpdIpaddr *arec;
         struct hostent *hp = 0;
@@ -2322,11 +2322,12 @@ static int SmtpdCheckDomain(smtpdConn * conn, char *domain)
 
 static int SmtpdCheckRelay(smtpdConn * conn, smtpdEmail * addr, char **host, int *port)
 {
-    char *p, *s;
     smtpdRelay *relay;
 
     Ns_MutexLock(&conn->server->relaylock);
     for (relay = conn->server->relaylist; relay; relay = relay->next) {
+        char *p, *s;
+
         p = &addr->domain[strlen(addr->domain) - 1];
         s = &relay->name[strlen(relay->name) - 1];
         while (*p == *s) {
@@ -2350,6 +2351,7 @@ static int SmtpdCheckRelay(smtpdConn * conn, smtpdEmail * addr, char **host, int
         }
     }
     Ns_MutexUnlock(&conn->server->relaylock);
+    
     return 0;
 }
 
@@ -2551,13 +2553,13 @@ static int SmtpdCheckVirus(smtpdConn * conn, char *data, int datalen, char *loca
             Ns_DStringAppend(&ds, "Type=Pattern; ");
             break;
         }
-        if ((hr = pResults->pVtbl->GetLocationInformation(pResults, 80, buf, NULL)) >= 0) {
+        if (pResults->pVtbl->GetLocationInformation(pResults, 80, buf, NULL) >= 0) {
             Ns_DStringPrintf(&ds, "Location=%s; ", buf);
         }
-        if ((hr = pResults->pVtbl->GetVirusName(pResults, 80, buf, NULL)) >= 0) {
+        if (pResults->pVtbl->GetVirusName(pResults, 80, buf, NULL) >= 0) {
             Ns_DStringPrintf(&ds, "Name=%s; ", buf);
         }
-        if ((hr = pResults->pVtbl->IsDisinfectable(pResults, &isDisinfectable)) >= 0) {
+        if (pResults->pVtbl->IsDisinfectable(pResults, &isDisinfectable) >= 0) {
             Ns_DStringPrintf(&ds, "Repair=%s; ", isDisinfectable ? "Yes" : "No");
         }
         SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, ds.string, 1);
@@ -2575,11 +2577,12 @@ static int SmtpdCheckVirus(smtpdConn * conn, char *data, int datalen, char *loca
 
 #ifdef USE_CLAMAV
     const char *virname;
-    char tmpfile[128];
     unsigned long size = 0;
-    int fd;
 
     if (datalen) {
+        int fd;
+        char tmpfile[128];
+        
         tmpnam(tmpfile);
         fd = open(tmpfile, O_CREAT|O_RDWR, 0644);
         if (fd < 0) {
@@ -2911,10 +2914,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
                 return TCL_ERROR;
             }
             if ((name = Tcl_GetString(objv[3]))) {
-                char *p;
                 smtpdRelay *relay = ns_calloc(1, sizeof(smtpdRelay));
+                
                 relay->name = ns_strdup(name);
                 if ((relay->host = strchr(relay->name, ':'))) {
+                    char *p;
+                                    
                     *relay->host++ = 0;
                     if ((p = strchr(relay->host, ':'))) {
                         *p++ = 0;
@@ -2929,6 +2934,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("check", Tcl_GetString(objv[2]))) {
             smtpdEmail addr;
+            
             if (objc < 4) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address");
                 return TCL_ERROR;
@@ -2937,9 +2943,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             if (parseEmail(&addr, name)) {
                 int port;
                 smtpdConn conn;
-                char *host, buf[10];
+                char *host;
+                
                 conn.server = server;
                 if (SmtpdCheckRelay(&conn, &addr, &host, &port)) {
+                    char buf[10];
+                    
                     sprintf(buf, ":%d", port ? port : 25);
                     Tcl_AppendResult(interp, host, buf, 0);
                     ns_free(host);
@@ -2955,10 +2964,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("get", Tcl_GetString(objv[2]))) {
             smtpdRelay *relay;
-            Tcl_Obj *obj, *list = Tcl_NewListObj(0, 0);
+            Tcl_Obj *list = Tcl_NewListObj(0, 0);
+            
             Ns_MutexLock(&server->relaylock);
             for (relay = server->relaylist; relay; relay = relay->next) {
-                obj = Tcl_NewStringObj(relay->name, -1);
+                Tcl_Obj *obj = Tcl_NewStringObj(relay->name, -1);
+                
                 if (relay->host) {
                     Tcl_AppendStringsToObj(obj, ":", relay->host, 0);
                     if (relay->port) {
@@ -3032,6 +3043,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("del", Tcl_GetString(objv[2]))) {
             smtpdIpaddr *addr;
+            
             if (objc < 4) {
                 Tcl_WrongNumArgs(interp, 2, objv, "domain|ipaddr");
                 return TCL_ERROR;
@@ -3044,6 +3056,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("check", Tcl_GetString(objv[2]))) {
             smtpdIpaddr *addr;
+            
             if (objc < 4) {
                 Tcl_WrongNumArgs(interp, 2, objv, "ipaddr");
                 return TCL_ERROR;
@@ -3055,10 +3068,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("get", Tcl_GetString(objv[2]))) {
             smtpdIpaddr *addr;
-            Tcl_Obj *obj, *list = Tcl_NewListObj(0, 0);
+            Tcl_Obj *list = Tcl_NewListObj(0, 0);
+            
             Ns_MutexLock(&server->locallock);
             for (addr = server->local; addr; addr = addr->next) {
-                obj = Tcl_NewStringObj(inet_ntoa(addr->addr), -1);
+                Tcl_Obj *obj = Tcl_NewStringObj(inet_ntoa(addr->addr), -1);
+                
                 Tcl_AppendStringsToObj(obj, "/", inet_ntoa(addr->mask), 0);
                 Tcl_ListObjAppendElement(interp, list, obj);
             }
@@ -3068,6 +3083,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         if (!strcasecmp("set", Tcl_GetString(objv[2]))) {
             int i;
             smtpdIpaddr *addr, *end = 0;
+            
             Ns_MutexLock(&server->locallock);
             while (server->local) {
                 addr = server->local->next;
@@ -3088,6 +3104,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         } else
         if (!strcasecmp("clear", Tcl_GetString(objv[2]))) {
             smtpdIpaddr *addr;
+            
             Ns_MutexLock(&server->locallock);
             while (server->local) {
                 addr = server->local->next;
@@ -3100,7 +3117,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
 
     case cmdSend:{
             int port = 0;
-            char *host = 0;
+            char *host = NULL;
 
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 1, objv, "sender_email rcpt_email data_varname ?server? ?port?");
@@ -3404,7 +3421,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
         }
         rcpt = ns_calloc(1, sizeof(smtpdRcpt));
         rcpt->addr = ns_strdup(Tcl_GetString(objv[3]));
-	{ int flags;
+	{ int flags = 0;
 	  if (objc > 4 && Tcl_GetIntFromObj(interp, objv[4], &flags) != TCL_OK) {
             return TCL_ERROR;
 	  }
@@ -3487,7 +3504,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
             conn->rcpt.list->addr = ns_strdup(objc > 3 ? Tcl_GetString(objv[3]) : "smtpd");
             SmtpdCheckSpam(conn);
             sprintf(score, "%.2f", conn->rcpt.list->spam_score);
-            Tcl_AppendResult(interp, conn->rcpt.list->flags & SMTPD_GOTSPAM ? "Spam" : "Innocent", " ", score, " ",
+            Tcl_AppendResult(interp,
+                             ((conn->rcpt.list->flags & SMTPD_GOTSPAM) != 0) ? "Spam" : "Innocent",
+                             " ", score, " ",
                              SmtpdGetHeader(conn, SMTPD_HDR_SIGNATURE), 0);
             SmtpdConnFree(conn);
             break;
@@ -3657,13 +3676,13 @@ static int parseEmail(smtpdEmail * addr, char *str)
  */
 static int parsePhrase(char **inp, char **phrasep, char *specials)
 {
-    int c;
     char *src = *inp, *dst;
 
     src = parseSpace(src);
     *phrasep = dst = src;
     for (;;) {
-        c = *src++;
+        char c = *src++;
+        
         if (c == '\"') {
             while ((c = *src)) {
                 src++;
@@ -3702,7 +3721,7 @@ static int parsePhrase(char **inp, char **phrasep, char *specials)
  */
 static int parseDomain(char **inp, char **domainp, char **commentp)
 {
-    int c, comment;
+    int comment;
     char *src = *inp, *dst, *cdst;
 
     if (commentp) {
@@ -3711,7 +3730,8 @@ static int parseDomain(char **inp, char **domainp, char **commentp)
     src = parseSpace(src);
     *domainp = dst = src;
     for (;;) {
-        c = *src++;
+        char c = *src++;
+        
         if (isalnum(c) || c == '-' || c == '[' || c == ']') {
             *dst++ = c;
             if (commentp) {
@@ -3767,13 +3787,12 @@ static int parseDomain(char **inp, char **domainp, char **commentp)
  */
 static int parseRoute(char **inp, char **routep)
 {
-    int c;
     char *src = *inp, *dst;
 
     src = parseSpace(src);
     *routep = dst = src;
     for (;;) {
-        c = *src++;
+        char c = *src++;
         if (isalnum(c) || c == '-' || c == '[' || c == ']' || c == ',' || c == '@') {
             *dst++ = c;
         } else
@@ -3896,7 +3915,7 @@ static char *encode64(const char *in, int len)
 {
     static char basis_64[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????";
-    unsigned char oval, *out, *buf;
+    unsigned char *out, *buf;
 
     buf = out = ns_malloc((unsigned) (len + 2) / 3 * 4 + 1);
 
@@ -3909,6 +3928,8 @@ static char *encode64(const char *in, int len)
         len -= 3;
     }
     if (len > 0) {
+        unsigned char oval;
+        
         *out++ = basis_64[in[0] >> 2];
         oval = (in[0] << 4) & 0x30;
         if (len > 1) {
@@ -3982,11 +4003,13 @@ static char *decode64(const char *in, int len, int *outlen)
 static char *encodeqp(const char *in, int len)
 {
     int i = 0;
-    char c, *buf, *out;
+    char *buf, *out;
     static char *hex = "0123456789ABCDEF";
 
     buf = out = ns_malloc((unsigned) (3 * len + (6 * len) / 75 + 3));
     while (len--) {
+        char c;
+        
         if ((c = *in++) == '\r' && *in == '\n' && len) {
             *out++ = '\r';
             *out++ = *in++;
@@ -4020,12 +4043,14 @@ static char *encodeqp(const char *in, int len)
 
 static char *decodeqp(const char *in, int len, int *outlen)
 {
-    char c, c2, *out, *buf, *ptr, *s;
+    char c2, *out, *buf, *ptr, *s;
 
     s = (char *) in;
     ptr = buf = out = ns_malloc((unsigned) len + 1);
 
     while (s - in < len) {
+        char c;
+        
         switch (c = *s++) {
         case '=':
             if (s - in < len)
@@ -4131,7 +4156,7 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
     dnsServer *server = 0;
     dnsPacket *req, *reply;
     struct sockaddr_in saddr;
-    int sock, len, timeout, retries, now;
+    int sock, len;
 
     if (!name) {
         return 0;
@@ -4161,6 +4186,8 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
     dnsEncodePacket(req);
 
     while (1) {
+        int timeout, retries, now;
+        
         now = time(0);
         Ns_MutexLock(&dnsMutex);
         retries = dnsResolverRetries;
@@ -4368,7 +4395,7 @@ static dnsRecord *dnsParseRecord(dnsPacket * pkt, int query)
 {
     int rc;
     //int offset;
-    char name[256] = "";
+    char name[256] = {'\0'};
     dnsRecord *y;
 
     y = ns_calloc(1, sizeof(dnsRecord));
@@ -4519,12 +4546,15 @@ static dnsPacket *dnsParsePacket(unsigned char *packet, int size)
 static void dnsEncodeName(dnsPacket * pkt, char *name)
 {
     dnsName *nm;
-    unsigned int c;
-    int i, k = 0, len;
 
     dnsEncodeGrow(pkt, (name ? strlen(name) + 1 : 1), "name");
     if (name) {
+        int k = 0, len;
+
         while (name[k]) {
+            int i;
+            unsigned int c;
+            
             for (len = 0; (c = name[k + len]) != 0 && c != '.'; len++);
             if (!len || len > 63) {
                 break;
@@ -4688,3 +4718,12 @@ static void dnsPacketFree(dnsPacket * pkt, int type)
     ns_free(pkt->buf.data);
     ns_free(pkt);
 }
+
+/*
+ * Local Variables:
+ * mode: c
+ * c-basic-offset: 4
+ * fill-column: 78
+ * indent-tabs-mode: nil
+ * End:
+ */
