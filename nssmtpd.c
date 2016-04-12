@@ -388,6 +388,7 @@ static void SmtpdSegv(int sig);
 static int SmtpdFlags(const char *name);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
+NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 
 // Free list of connection structures
 static smtpdConn *connList = 0;
