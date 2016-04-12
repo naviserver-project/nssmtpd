@@ -1306,7 +1306,6 @@ static void SmtpdConnReset(smtpdConn * conn)
 
 static void SmtpdConnPrint(smtpdConn * conn)
 {
-
     Ns_Conn *nsconn;
     smtpdRcpt *rcpt;
 
@@ -1326,14 +1325,13 @@ static void SmtpdConnPrint(smtpdConn * conn)
     /*
      * Update request line for access logging
      */
-
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "SEND /%s SMTP/1.0", conn->from.addr ? conn->from.addr : "Null");
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "/%s", rcpt->addr);
     }
-    ns_free((char *)nsconn->request->line);
-    nsconn->request->line = ns_strdup(conn->line.string);
+    ns_free((char *)nsconn->request.line);
+    nsconn->request.line = ns_strdup(conn->line.string);
 }
 
 static int SmtpdConnEval(smtpdConn * conn, const char *proc)
