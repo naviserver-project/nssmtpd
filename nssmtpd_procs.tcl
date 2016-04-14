@@ -3,16 +3,16 @@
 
 namespace eval smtpd {
 
-   variable version "Smtpd version 2.5"
+   variable version "Smtpd version 2.6"
 }
 
 proc smtpd::init {} {
 
     set path "ns/server/[ns_info server]/module/nssmtpd"
-    eval ns_smtpd relay set [ns_config $path relaydomains]
-    ns_log notice smtpd::init: Relay Domains: [ns_smtpd relay get]
-    eval ns_smtpd local set [ns_config $path localdomains]
-    ns_log notice smtpd::init: Local Domains: [ns_smtpd local get]
+    ns_smtpd relay set {*}[ns_config $path relaydomains]
+    ns_log notice "smtpd::init: Relay Domains: [ns_smtpd relay get]"
+    ns_smtpd local set {*}[ns_config $path localdomains]
+    ns_log notice "smtpd::init: Local Domains: [ns_smtpd local get]"
 }
 
 # Decode message header
@@ -208,7 +208,7 @@ proc smtpd::error { id } {
     set line [ns_smtpd getline $id]
     # sendmail 550 user unknown reply
     if { [regexp -nocase {RCPT TO: <([^@ ]+@[^ ]+)>: 550} $line d user_email] } {
-      ns_log notice smtpd::error: $id: Dropping $user_email
+      ns_log notice "smtpd::error: $id: Dropping $user_email"
     }
 }
 
