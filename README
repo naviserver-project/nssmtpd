@@ -1,5 +1,5 @@
 SMTPD server/proxy for NaviServer
-Release 1.0
+Release 2.1
 vlad@crystalballinc.com
 
     SMTPD proxy/server for Naviserver
@@ -23,23 +23,23 @@ To support anti-virus feature one of the following should be installed:
 Add the following configuration directives to the nsd.tcl file, modules
 section should already exist, so just add nssmtpd line there:
 
-ns_section      "ns/server/${server}/modules"
-ns_param        nssmtpd            ${home}/bin/nssmtpd.so
+    ns_section      "ns/server/${server}/modules"
+    ns_param        nssmtpd            ${home}/bin/nssmtpd.so
+    
+    ns_section      "ns/server/${server}/module/nssmtpd"
+    ns_param        port                    2525
+    ns_param        address                 127.0.0.1
+    ns_param        relay                   localhost:25
+    ns_param        spamd                   localhost
+    ns_param        initproc                smtpd::init
+    ns_param        rcptproc                smtpd::rcpt
+    ns_param        dataproc                smtpd::data
+    ns_param        errorproc               smtpd::error
+    ns_param	    relaydomains	    "localhost domain.com"
+    ns_param	    localdomains	    "localhost domain.com"
 
-ns_section      "ns/server/${server}/module/nssmtpd"
-ns_param        port                    2525
-ns_param        address                 127.0.0.1
-ns_param        relay                   localhost:25
-ns_param        spamd                   localhost
-ns_param        initproc                smtpd::init
-ns_param        rcptproc                smtpd::rcpt
-ns_param        dataproc                smtpd::data
-ns_param        errorproc               smtpd::error
-ns_param	relaydomains		"localhost domain.com"
-ns_param	localdomains		"localhost domain.com"
-
-Once enabled, smtpd acts as SMTP server forwarding all messaged to
-configured real smtp server via relay parameter. for each SMTP command
+Once enabled, smtpd acts as SMTP server forwarding all messages to the
+configured real smtp server via "relay" parameter. For each SMTP command
 it calles configured Tcl handler which performs actual processing.
 
 *Usage*
@@ -88,4 +88,5 @@ nssmptd is covered by Mozilla license.
 *Authors*
 
 Vlad Seryakov vlad@crystalballinc.com
+Gustaf Neumann neumann@wu-wien.ac.at
 

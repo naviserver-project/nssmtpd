@@ -74,7 +74,7 @@
 #define SMTPD_GOTSPAM        0x0080000
 #define SMTPD_GOTVIRUS       0x0100000
 
-#define SMTPD_VERSION              "2.0"
+#define SMTPD_VERSION              "2.1"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"
@@ -89,8 +89,8 @@ typedef struct _smtpdEmail {
 // IP access list
 typedef struct _smtpdIpaddr {
     struct _smtpdIpaddr *next;
-    struct in_addr addr;
-    struct in_addr mask;
+    struct NS_SOCKADDR_STORAGE addr;
+    struct NS_SOCKADDR_STORAGE mask;
 } smtpdIpaddr;
 
 // SMTP Headers
@@ -122,7 +122,7 @@ typedef struct _smtpdRcpt {
 } smtpdRcpt;
 
 typedef struct _smtpdServer {
-    char *server;
+    const char *server;
     unsigned int id;
     unsigned int flags;
     int debug;
@@ -200,6 +200,7 @@ typedef struct _smtpdConn {
 #define DNS_TYPE_MINFO          14
 #define DNS_TYPE_MX             15
 #define DNS_TYPE_TXT            16
+#define DNS_TYPE_AAAA           28
 #define DNS_TYPE_SRV            33
 #define DNS_TYPE_ANY            255
 #define DNS_DEFAULT_TTL         (60 * 60)
@@ -246,7 +247,7 @@ typedef struct _smtpdConn {
 typedef struct _dnsServer {
     struct _dnsServer *next;
     char *name;
-    unsigned long ipaddr;
+    //unsigned long ipaddr;
     unsigned long fail_time;
     unsigned long fail_count;
 } dnsServer;
@@ -378,7 +379,7 @@ static char *SmtpdStrPos(char *as1, char *as2);
 static char *SmtpdStrNPos(char *as1, char *as2, int len);
 static char *SmtpdStrTrim(char *str);
 static smtpdIpaddr *SmtpdParseIpaddr(char *str);
-static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr * list, unsigned long addr);
+static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
 static int SmtpdCheckDomain(smtpdConn * conn, char *domain);
 static int SmtpdCheckRelay(smtpdConn * conn, smtpdEmail * addr, char **host, int *port);
 static int SmtpdCheckSpam(smtpdConn * conn);
@@ -406,7 +407,7 @@ static int dnsResolverRetries = 3;
 static int dnsResolverTimeout = 5;
 static int dnsFailureTimeout = 300;
 
-NS_EXPORT int Ns_ModuleInit(char *server, char *module)
+NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
 {
     char *path, *addr2;
     const char *addr;
@@ -500,7 +501,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
-    init.version = NS_DRIVER_VERSION_2;
+    init.version = NS_DRIVER_VERSION_3;
     init.name = "nssmtpd";
     init.listenProc = SmtpdListenProc;
     init.acceptProc = SmtpdAcceptProc;
@@ -617,6 +618,9 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_RegisterAtStartup(SmtpdInit, serverPtr);
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
     ns_free(path);
+
+    Ns_Log(Notice, "nssmtpd: version %s loaded", SMTPD_VERSION);
+
     return NS_OK;
 }
 
@@ -849,8 +853,9 @@ static void SmtpdThread(smtpdConn * conn)
 
     conn->host = ns_strdup(conn->line.string);
     Ns_MutexLock(&server->locallock);
-    if (SmtpdCheckIpaddr(server->local, inet_addr(Ns_ConnPeer(nsconn))))
+    if (SmtpdCheckIpaddr(server->local, Ns_ConnPeer(nsconn))) {
         conn->flags |= SMTPD_LOCAL;
+    }
     Ns_MutexUnlock(&server->locallock);
     /* Our greeting message */
     Ns_DStringTrunc(&conn->line, 0);
@@ -2196,72 +2201,121 @@ static void SmtpdConnParseData(smtpdConn * conn)
 
 static smtpdIpaddr *SmtpdParseIpaddr(char *str)
 {
-    smtpdIpaddr *alist = 0;
-    char addr[32], mask[32] = "";
-    unsigned long ipaddr, ipmask = 0;
+    struct sockaddr *saPtr, *addr_saPtr;
+    smtpdIpaddr     *alist = NULL;
+    char             addr[NS_IPADDR_SIZE], mask[NS_IPADDR_SIZE] = "", format[16];
+    bool             have_ipmask = NS_FALSE;
+    int              rc, maskBits;
+
+    snprintf(format, sizeof(format), "%%%lus", sizeof(addr));
 
     if (sscanf(str, "%[0123456789.]/%[0123456789.]", addr, mask) == 2);
     else
-    if (sscanf(str, "%[0123456789.]", addr) == 1);
+    if (sscanf(str, "%[0123456789.:]", addr) == 1);
     else
     if (sscanf(str, "%[^/]/%17s", addr, mask) == 2);
     else
-    if (sscanf(str, "%31s", addr) == 1) {
-        char **x;
+    if (sscanf(str, format, addr) == 1) {
         smtpdIpaddr *arec;
-        struct hostent *hp = 0;
+        Tcl_DString  ds, *dsPtr = &ds;
+        Tcl_Obj     *listObj, **objv;
+        int          objc, i;
 
-        // Obtain all ip addresses for given hostname
-#if defined(linux)
-        int hp_errno;
-	char buf[1024];
-        struct hostent hp_a, *hp_b;
-
-        if (!gethostbyname_r(addr, &hp_a, buf, sizeof(buf), &hp_b, &hp_errno)) {
-            hp = &hp_a;
-        }
-#else
-# ifdef __APPLE__
-	/* 
-	 * This should be most probably changed to a newer interface,
-	 * but we have no gethostbyname_r() on current Mac OS X
-	 */
-        hp = gethostbyname(addr);
-# else
-        int hp_errno;
-	char buf[1024];
-        struct hostent hp_a;
-
-        hp = gethostbyname_r(addr, &hp_a, buf, sizeof(buf), &hp_errno);
-# endif
-#endif 
-        if (!hp) {
+        // Obtain all IP addresses for given hostname
+        Tcl_DStringInit(dsPtr);
+        if (Ns_GetAllAddrByHost(dsPtr, addr) == NS_FALSE) {
+            Ns_Log(Error, "could not obtain IP addresses for '%s'", addr);
             return 0;
         }
-        for (x = hp->h_addr_list; x != NULL && *x != NULL; x++) {
+
+        listObj = Tcl_NewStringObj(Tcl_DStringValue(dsPtr), Tcl_DStringLength(dsPtr));
+        rc = Tcl_ListObjGetElements(NULL, listObj, &objc, &objv);
+        if (rc != TCL_OK) {
+            Ns_Log(Error, "invalid list of ip adresses '%s'", Tcl_GetString(listObj));
+            return 0;
+        }
+
+        for (i = 0; i< objc; i++) {
             arec = ns_calloc(1, sizeof(smtpdIpaddr));
-            memcpy(&arec->addr.s_addr, *x, sizeof(arec->addr.s_addr));
-            arec->mask.s_addr = inet_addr("255.255.255.255");
+            saPtr = (struct sockaddr *)&(arec->addr);
+            rc = Ns_GetSockAddr(saPtr, Tcl_GetString(objv[i]), 0);
+            if (rc != TCL_OK) {
+                Ns_Log(Error, "invalid ip adresses '%s'", Tcl_GetString(objv[i]));
+                return 0;
+            }
+            addr_saPtr = saPtr;
+            saPtr = (struct sockaddr *)&(arec->mask);
+            saPtr->sa_family = addr_saPtr->sa_family;
+            
+            if (addr_saPtr->sa_family == AF_INET) {
+                Ns_SockaddrMaskBits(saPtr, 32);
+            } else {
+                Ns_SockaddrMaskBits(saPtr, 128);
+            }
+            /*
+             * Keep the masked addr in the record.
+             */
+            Ns_SockaddrMask(addr_saPtr, saPtr, addr_saPtr);
+                            
             arec->next = alist;
             alist = arec;
         }
+
         return alist;
     } else {
         // invalid IP address
         return 0;
     }
-    if ((ipaddr = inet_addr(addr)) <= 0) {
+
+    alist = ns_calloc(1, sizeof(smtpdIpaddr));
+
+    saPtr = (struct sockaddr *)&(alist->addr);
+    rc = Ns_GetSockAddr(saPtr, addr, 0);
+    if (rc != TCL_OK) {
+        Ns_Log(Error, "invalid ip adresses '%s'", addr);
         return 0;
     }
+
+    addr_saPtr = saPtr;
+    saPtr = (struct sockaddr *)&(alist->mask);
+    saPtr->sa_family = addr_saPtr->sa_family;
+    maskBits = 0;
+    
     /* Decode mask */
     if (*mask) {
-        if (strchr(mask, '.')) {
-            ipmask = inet_addr(mask);
-        } else
-        if (ipmask < 33) {
-            ipmask = ipmask ? htonl(0xfffffffful << (32 - ipmask)) : 0;
+        if (strchr(mask, '.') || strchr(mask, ':')) {
+            (void) Ns_GetSockAddr(saPtr, mask, 0);
+            have_ipmask = NS_TRUE;
+        } else {
+            maskBits = strtol(mask, NULL, 10);
         }
     }
+    if (have_ipmask == NS_FALSE) {
+        if (maskBits == 0) {
+            if (addr_saPtr->sa_family == AF_INET6) {
+                maskBits = 128;
+            } else {
+                maskBits = 32;
+            }
+        }
+        if ((addr_saPtr->sa_family == AF_INET6) && (maskBits <= 128)) {
+            Ns_SockaddrMaskBits(saPtr, maskBits);
+            have_ipmask = NS_TRUE;
+        } else if ((addr_saPtr->sa_family == AF_INET) && (maskBits <= 32)) {
+            Ns_SockaddrMaskBits(saPtr, maskBits);
+            have_ipmask = NS_TRUE;
+        } else {
+            Ns_Log(Error, "invalid mask bits %d for ip adresses '%s'", maskBits, addr);
+        }
+    }
+    if (have_ipmask == NS_TRUE) {
+        /*
+         * Keep the masked addr in the record.
+         */
+        Ns_SockaddrMask(addr_saPtr, saPtr, addr_saPtr);
+    }
+        
+#if 0        
     /* Guess netmask */
     if (!ipmask) {
         ipmask = ntohl(ipaddr);
@@ -2281,10 +2335,8 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         }
     }
     /* 1.2.3.4/255.255.255.0  --> 1.2.3.0 */
-    ipaddr &= ipmask;
-    alist = ns_calloc(1, sizeof(smtpdIpaddr));
-    alist->addr.s_addr = ipaddr;
-    alist->mask.s_addr = ipmask;
+#endif    
+
     return alist;
 }
 
@@ -2604,15 +2656,34 @@ static int SmtpdCheckVirus(smtpdConn * conn, char *data, int datalen, char *loca
     return TCL_OK;
 }
 
-static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr * list, unsigned long addr)
+static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr * list, const char *ipString)
 {
-    while (list) {
-        if (ntohl(addr & list->mask.s_addr) == ntohl(list->addr.s_addr)) {
-            return list;
+    struct NS_SOCKADDR_STORAGE sa_ip;
+    struct sockaddr *sa_ipPtr = (struct sockaddr *)&sa_ip;
+    int    rc;
+
+    rc = ns_inet_pton(sa_ipPtr, ipString);
+    if (unlikely(rc <= 0)) {
+        Ns_Log(Error, "nssmtpd: invalid incoming ip address '%s'", ipString);
+    } else {
+        while (list) {
+            struct NS_SOCKADDR_STORAGE sa;
+            struct sockaddr *maskPtr = (struct sockaddr *)&list->mask, *saPtr = (struct sockaddr *)&sa;
+
+            /*
+             * Obtain a copy of the incoming ip address and mask it. Then check
+             * the masked result with our entry.
+             */
+            memcpy(&sa, sa_ipPtr, sizeof (struct NS_SOCKADDR_STORAGE));
+            Ns_SockaddrMask(saPtr, maskPtr, saPtr);
+            
+            if (Ns_SockaddrSameIP(saPtr, (struct sockaddr *)&list->addr) == NS_TRUE) {
+                return list;
+            }
+            list = list->next;
         }
-        list = list->next;
     }
-    return 0;
+    return NULL;
 }
 
 static int SmtpdFlags(const char *name)
@@ -3048,8 +3119,18 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
                 return TCL_ERROR;
             }
             Ns_MutexLock(&server->locallock);
-            if ((addr = SmtpdCheckIpaddr(server->local, inet_addr(Tcl_GetString(objv[3]))))) {
-                addr->addr.s_addr = addr->mask.s_addr = 0;
+            if ((addr = SmtpdCheckIpaddr(server->local, Tcl_GetString(objv[3])))) {
+                /*
+                 * just clear the bits
+                 */
+                struct sockaddr *addrPtr = (struct sockaddr *)&(addr->addr);
+                struct sockaddr *maskPtr = (struct sockaddr *)&(addr->mask);
+                int maskBits = 32;
+                if (addrPtr->sa_family == AF_INET6) {
+                    maskBits = 128;
+                }
+                Ns_SockaddrMaskBits(addrPtr, maskBits);
+                Ns_SockaddrMaskBits(maskPtr, maskBits);
             }
             Ns_MutexUnlock(&server->locallock);
         } else
@@ -3061,19 +3142,28 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CON
                 return TCL_ERROR;
             }
             Ns_MutexLock(&server->locallock);
-            addr = SmtpdCheckIpaddr(server->local, inet_addr(Tcl_GetString(objv[3])));
+            addr = SmtpdCheckIpaddr(server->local, Tcl_GetString(objv[3]));
             Ns_MutexUnlock(&server->locallock);
             Tcl_AppendResult(interp, addr ? "1" : "0", 0);
         } else
         if (!strcasecmp("get", Tcl_GetString(objv[2]))) {
             smtpdIpaddr *addr;
-            Tcl_Obj *list = Tcl_NewListObj(0, 0);
+            Tcl_Obj     *list = Tcl_NewListObj(0, 0);
             
             Ns_MutexLock(&server->locallock);
             for (addr = server->local; addr; addr = addr->next) {
-                Tcl_Obj *obj = Tcl_NewStringObj(inet_ntoa(addr->addr), -1);
+                char     ipString[NS_IPADDR_SIZE];
+                Tcl_Obj *obj;
+                struct sockaddr *saPtr;
                 
-                Tcl_AppendStringsToObj(obj, "/", inet_ntoa(addr->mask), 0);
+                saPtr = (struct sockaddr *)&(addr->addr);
+                obj = Tcl_NewStringObj(ns_inet_ntop(saPtr, ipString, sizeof(ipString)), -1);
+
+                saPtr = (struct sockaddr *)&(addr->mask);
+                Tcl_AppendStringsToObj(obj, "/",
+                                       ns_inet_ntop(saPtr, ipString, sizeof(ipString)),
+                                       NULL);
+                
                 Tcl_ListObjAppendElement(interp, list, obj);
             }
             Ns_MutexUnlock(&server->locallock);
@@ -4117,7 +4207,7 @@ static void dnsInit(char *name, ...)
                 }
                 server = ns_calloc(1, sizeof(dnsServer));
                 server->name = ns_strdup(s);
-                server->ipaddr = inet_addr(s);
+                //server->ipaddr = inet_addr(s);
                 for (next = dnsServers; next && next->next; next = next->next);
                 if (!next) {
                     dnsServers = server;
@@ -4154,18 +4244,12 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
     struct timeval tv;
     dnsServer *server = 0;
     dnsPacket *req, *reply;
-    struct sockaddr_in saddr;
-    int sock, len;
+    int sock = NS_INVALID_SOCKET, len;
 
     if (!name) {
         return 0;
     }
-    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        if (errcode) {
-            *errcode = errno;
-        }
-        return 0;
-    }
+
     // Prepare DNS request packet
     req = ns_calloc(1, sizeof(dnsPacket));
     req->id = (unsigned long) req % (unsigned long) name;
@@ -4185,8 +4269,10 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
     dnsEncodePacket(req);
 
     while (1) {
-        int timeout, retries, now;
-        
+        int timeout, retries, now, rc;
+        struct NS_SOCKADDR_STORAGE sa;
+        struct sockaddr           *saPtr = (struct sockaddr *)&sa;
+
         now = time(0);
         Ns_MutexLock(&dnsMutex);
         retries = dnsResolverRetries;
@@ -4218,12 +4304,26 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
         if (dnsDebug > 5) {
             Ns_Log(Error, "dnsLookup: %s: resolving %s...", server->name, name);
         }
-        saddr.sin_addr.s_addr = server->ipaddr;
-        saddr.sin_family = AF_INET;
-        saddr.sin_port = htons(53);
+
+        // todo: don't hard-code port 53 (DNS port)
+        rc = Ns_GetSockAddr(saPtr, server->name, 53);
+        if (rc != TCL_OK) {
+            Ns_Log(Error, "dnsLookup: invalid server name '%s'", server->name);
+            return 0;
+        }
+        
+        if (sock == NS_INVALID_SOCKET) {
+            if ((sock = socket(saPtr->sa_family, SOCK_DGRAM, 0)) < 0) {
+                if (errcode) {
+                    *errcode = errno;
+                }
+                return 0;
+            }
+        }
+
         while (retries--) {
             len = sizeof(struct sockaddr_in);
-            if (sendto(sock, req->buf.data + 2, req->buf.size, 0, (struct sockaddr *) &saddr, len) < 0) {
+            if (sendto(sock, req->buf.data + 2, req->buf.size, 0, saPtr, len) < 0) {
                 if (dnsDebug > 3) {
                     Ns_Log(Error, "dnsLookup: %s: sendto: %s", server->name, strerror(errno));
                 }
@@ -4445,6 +4545,9 @@ static dnsRecord *dnsParseRecord(dnsPacket * pkt, int query)
         goto err;
     }
     switch (y->type) {
+    case DNS_TYPE_AAAA:
+        Ns_Log(Notice, "AAAA records are not implemented yet");
+        break;
     case DNS_TYPE_A:
         memcpy(&y->data.ipaddr, pkt->buf.ptr, 4);
         pkt->buf.ptr += 4;
