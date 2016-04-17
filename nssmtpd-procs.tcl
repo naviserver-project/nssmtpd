@@ -77,11 +77,11 @@ proc smtpd::decodeBounce { id body } {
 
     foreach { filter data } $filters {
       if { [regexp -nocase $filter $body d sender_email] } { 
-        if { $data != "" } { set sender_email [format $data $sender_email] }
+        if { $data ne "" } { set sender_email [format $data $sender_email] }
         break
       }
     }
-    if { $sender_email != "" } {
+    if { $sender_email ne "" } {
       foreach rcpt [ns_smtpd getrcpt $id] {
         foreach { user_email user_flags spam_score } $rcpt {}
         ns_log Error smtpd::decodeBounce: $id: $user_email: $sender_email
@@ -94,46 +94,50 @@ proc smtpd::decodeBounce { id body } {
 proc smtpd::decodeSender { id } {
 
     set From [ns_smtpd getfrom $id]
-    if { [set Sender [ns_smtpd checkemail [ns_smtpd gethdr $id Sender]]] != "" } {
+    if { [set Sender [ns_smtpd checkemail [ns_smtpd gethdr $id Sender]]] ne "" } {
       return $Sender
     }
-    if { [set ReplyTo [ns_smtpd checkemail [ns_smtpd gethdr $id Reply-To]]] != "" && $ReplyTo != $From } {
+    if { [set ReplyTo [ns_smtpd checkemail [ns_smtpd gethdr $id Reply-To]]] ne "" && $ReplyTo ne $From } {
       return $ReplyTo
     }
-    if { [set XSender [ns_smtpd checkemail [ns_smtpd gethdr $id X-Sender]]] != "" } {
+    if { [set XSender [ns_smtpd checkemail [ns_smtpd gethdr $id X-Sender]]] ne "" } {
       return $XSender
     }
     # Try for old/obsolete mailing lists
-    if { [ns_smtpd gethdr $id Mailing-List] != "" ||
-         [ns_smtpd gethdr $id List-Help] != "" ||
-         [ns_smtpd gethdr $id List-Unsubscribe] != "" ||
-         [ns_smtpd gethdr $id Precedence] == "bulk" ||
-         [ns_smtpd gethdr $id Precedence] == "list" } {
-      if { $ReplyTo != "" } {
-        return $ReplyTo
-      } else {
-        return $From
-      }
+    if { [ns_smtpd gethdr $id Mailing-List] ne "" ||
+         [ns_smtpd gethdr $id List-Help] ne "" ||
+         [ns_smtpd gethdr $id List-Unsubscribe] ne "" ||
+         [ns_smtpd gethdr $id Precedence] in {"bulk" "list"}
+     } {
+	if { $ReplyTo ne "" } {
+	    return $ReplyTo
+	} else {
+	    return $From
+	}
     }
     return $From
 }
 
 proc smtpd::helo { id } {
-
+    ns_log Debug(smtpd) "### smtpd::helo $id"
 }
 
 proc smtpd::mail { id } {
-
+    ns_log Debug(smtpd) "### smtpd::mail $id"
 }
 
 proc smtpd::rcpt { id } {
-
+   
     # Current recipient
-    foreach { user_email user_flags spam_score } [ns_smtpd getrcpt $id 0] {}
+    lassign [ns_smtpd getrcpt $id 0] user_email user_flags spam_score
+
+    ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email ($user_flags & [ns_smtpd flag RELAY])"
+    
     # Non-relayable user, just pass it through
     if { !($user_flags & [ns_smtpd flag RELAY]) } {
-      ns_smtpd setflag $id 0 VERIFIED
-      return
+	ns_smtpd setflag $id 0 VERIFIED
+	ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... pass through"
+	return
     }
     # Example of checking by recipient
     switch -regexp -- $user_email {
@@ -142,21 +146,25 @@ proc smtpd::rcpt { id } {
         # User is not allowed to receive any mail
         ns_smtpd setreply $id "550 ${user_email}... User unknown\r\n"
         ns_smtpd delrcpt $id 0
+	ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... not allowed"
         return
      }
      
      default {
-        # Check everything for this domain
-        ns_smtpd setflag $id 0 VIRUSCHECK
-        ns_smtpd setflag $id 0 SPAMCHECK
-        return
+	 # Check everything for this domain
+	 ns_smtpd setflag $id 0 VIRUSCHECK
+	 ns_smtpd setflag $id 0 SPAMCHECK
+	 #return
      }
     }
+    ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email VERIFIED"
+
     # All other emails are allowed
     ns_smtpd setflag $id 0 VERIFIED
 }
 
 proc smtpd::data { id } {
+    ns_log Debug(smtpd) "### smtpd::data $id"
 
     # Global connection flags
     set conn_flags [ns_smtpd getflag $id -1]
@@ -168,21 +176,33 @@ proc smtpd::data { id } {
     set signature [ns_smtpd gethdr $id X-Smtpd-Signature]
     set virus_status [ns_smtpd gethdr $id X-Smtpd-Virus-Status]
     # Message data
-    foreach { body body_offset body_size } [ns_smtpd getbody $id] {}
+    lassign [ns_smtpd getbody $id] body body_offset body_size
     
     # Find users who needs verification
     foreach rcpt [ns_smtpd getrcpt $id] {
-      foreach { deliver_email user_flags spam_score } $rcpt {}
-      # Non-relayable user
-      if { !($user_flags & [ns_smtpd flag RELAY]) } { continue }
-      # SPAM detected
-      if { $user_flags & [ns_smtpd flag GOTSPAM] } { continue }
-      # Already delivered user
-      if { $user_flags & [ns_smtpd flag DELIVERED] } { continue }
-      # Virus detected
-      if { $conn_flags & [ns_smtpd flag GOTVIRUS] } { continue }
-      # Recipient is okay
-      set users($deliver_email) $spam_score
+	lassign $rcpt deliver_email user_flags spam_score
+	# Non-relayable user
+	if { !($user_flags & [ns_smtpd flag RELAY]) } {
+	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... Non-relayable"
+	    continue
+	}
+	# SPAM detected
+	if { $user_flags & [ns_smtpd flag GOTSPAM] } {
+	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTSPAM"
+	    continue
+	}
+	# Already delivered user
+	if { $user_flags & [ns_smtpd flag DELIVERED] } {
+	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... DELIVERED"
+	    continue
+	}
+	# Virus detected
+	if { $conn_flags & [ns_smtpd flag GOTVIRUS] } {
+	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTVIRUS"
+	    continue
+	}
+	# Recipient is okay
+	set users($deliver_email) $spam_score
     }
     if { [array size users] > 0 } {
       # Build attachements list
@@ -203,7 +223,9 @@ proc smtpd::data { id } {
     }
 }
 
+
 proc smtpd::error { id } {
+    ns_log Debug(smtpd) "### smtpd::error $id"
 
     set line [ns_smtpd getline $id]
     # sendmail 550 user unknown reply

@@ -5,7 +5,8 @@ endif
 #
 # Module name
 #
-MOD      =  nssmtpd.so
+MODNAME  = nssmtpd
+MOD      = nssmtpd.so
 
 #
 # Objects to build.
@@ -31,5 +32,8 @@ MODOBJS     = nssmtpd.o
 #
 #CFLAGS   += -DUSE_CLAMAV
 #MODLIBS  += -lclamav
+
+TCL       = nssmtpd-procs.tcl
+MODLIBS  += -lnssock
 
 include  $(NAVISERVER)/include/Makefile.module
