@@ -521,7 +521,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
-    init.version = NS_DRIVER_VERSION_3;
+    init.version = NS_DRIVER_VERSION_4;
     init.name = "nssmtpd";
     init.listenProc = Ns_DriverSockListen; //SmtpdListenProc;
     init.acceptProc = SmtpdAcceptProc;
@@ -534,6 +534,8 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     init.opts = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
     init.arg = serverPtr;
     init.path = path;
+    init.protocol = "smtp";
+    init.defport = 25;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
 	ns_free(path);
