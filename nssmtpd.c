@@ -535,7 +535,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     init.arg = serverPtr;
     init.path = path;
     init.protocol = "smtp";
-    init.defport = 25;
+    init.defaultPort = 25;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
 	ns_free(path);
