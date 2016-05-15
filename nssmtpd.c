@@ -928,6 +928,7 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringInit(&conn->line);
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
+                    Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
