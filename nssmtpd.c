@@ -414,6 +414,9 @@ static int dnsResolverRetries = 3;
 static int dnsResolverTimeout = 5;
 static int dnsFailureTimeout = 300;
 
+// Default port
+const static int DEFAULT_PORT = 25;
+
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
 NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
@@ -435,7 +438,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
     
     if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
-        serverPtr->port = 25;
+        serverPtr->port = DEFAULT_PORT;
     }
     if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
@@ -500,7 +503,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     }
 
     /* SMTP relay support */
-    serverPtr->relayport = 25;
+    serverPtr->relayport = DEFAULT_PORT;
     if (serverPtr->relayhost != NULL) {
         Ns_HttpParseHost(serverPtr->relayhost, &serverPtr->relayhost, &portString);
         if (portString != NULL) {
@@ -535,7 +538,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     init.arg = serverPtr;
     init.path = path;
     init.protocol = "smtp";
-    init.defaultPort = 25;
+    init.defaultPort = DEFAULT_PORT;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
 	ns_free(path);
@@ -1391,7 +1394,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         port = conn->config->relayport;
     }
     if (!port) {
-        port = 25;
+        port = DEFAULT_PORT;
     }
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
         Ns_Log(Error, "nssmtpd: relay: %d/%d: Unable to connect to %s:%d: %s",
@@ -1562,7 +1565,7 @@ static int SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender
         port = config->relayport;
     }
     if (!port) {
-        port = 25;
+        port = DEFAULT_PORT;
     }
 
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
@@ -3010,7 +3013,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 if (SmtpdCheckRelay(&conn, &addr, &host, &port)) {
                     char buf[10];
                     
-                    sprintf(buf, ":%d", port ? port : 25);
+                    sprintf(buf, ":%d", port ? port : DEFAULT_PORT);
                     Tcl_AppendResult(interp, host, buf, 0);
                     ns_free(host);
                 }
