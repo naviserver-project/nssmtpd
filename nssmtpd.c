@@ -44,6 +44,12 @@
 #include <dspam/libdspam.h>
 #endif
 
+#ifdef HAVE_OPENSSL_EVP_H
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
@@ -56,6 +62,7 @@
 #define SMTP_HELP           9
 #define SMTP_NOOP           10
 #define SMTP_READ           11
+#define SMTP_STARTTLS       12
 
 /* Server flags */
 #define SMTPD_VERIFIED       0x0000001
@@ -175,6 +182,8 @@ typedef struct _smtpdConn {
     Ns_Sock *sock;
     Ns_DString line;
     Ns_DString reply;
+    NS_TLS_SSL_CTX *ctx;
+    NS_TLS_SSL *ssl;
     Tcl_Interp *interp;
     smtpdConfig *config;
     struct {
@@ -394,6 +403,12 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
 static void SmtpdPanic(const char *fmt, ...);
 static void SmtpdSegv(int sig);
 static int SmtpdFlags(const char *name);
+
+static int Ns_TLS_CtxServerCreate(Tcl_Interp *interp, const char *cert,
+                                  const char *caFile, const char *caPath,
+                                  int verify, NS_TLS_SSL_CTX **ctxPtr);
+static int Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock,
+                            NS_TLS_SSL_CTX *ctx, NS_TLS_SSL **sslPtr);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
@@ -931,7 +946,9 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringInit(&conn->line);
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
+#ifdef HAVE_OPENSSL_EVP_H
                     Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
+#endif
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
@@ -943,6 +960,45 @@ static void SmtpdThread(smtpdConn *conn)
                 break;
             }
             conn->flags |= SMTPD_GOTHELO;
+            continue;
+        }
+
+        if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
+            NS_TLS_SSL_CTX *ctx;
+            NS_TLS_SSL *ssl;
+
+            if (SmtpdPuts(conn, "220 Go Ahead\r\n") != NS_OK) {
+                goto error;
+            }
+
+            int result = Ns_TLS_CtxServerCreate(conn->interp,
+                "/home/costash/server.pem" /*cert*/,
+                NULL /*caFile*/,
+                NULL /*caPath*/,
+                0 /*verify*/,
+                &ctx);
+            Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
+
+            conn->ctx = ctx;
+
+            if (likely(result == TCL_OK)) {
+                /*
+                 * Establish the SSL/TLS connection.
+                 */
+                result = Ns_TLS_SSLAccept(conn->interp, conn->sock->sock, ctx, &ssl);
+                conn->ssl = ssl;
+                Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept result=%d", result);
+                if (result != TCL_OK) {
+                    Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept failed");
+                    ns_sockclose(conn->sock->sock);
+                    goto error;
+                }
+            } else {
+                ns_sockclose(conn->sock->sock);
+                goto error;
+            }
+            Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
+
             continue;
         }
 
@@ -4820,6 +4876,158 @@ static void dnsPacketFree(dnsPacket *pkt, int type)
     ns_free(pkt->buf.data);
     ns_free(pkt);
 }
+
+#ifdef HAVE_OPENSSL_EVP_H
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * Ns_TLS_CtxServerCreate --
+ *
+ *   Create and Initialize OpenSSL context
+ *
+ * Results:
+ *   Result code.
+ *
+ * Side effects:
+ *  None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
+                       const char *cert, const char *caFile, const char *caPath, int verify,
+                       NS_TLS_SSL_CTX **ctxPtr)
+{
+    NS_TLS_SSL_CTX *ctx;
+
+    NS_NONNULL_ASSERT(interp != NULL);
+    NS_NONNULL_ASSERT(ctxPtr != NULL);
+
+    ctx = SSL_CTX_new(SSLv23_server_method());
+    *ctxPtr = ctx;
+    if (ctx == NULL) {
+        Ns_TclPrintfResult(interp, "ctx init failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        return TCL_ERROR;
+    }
+
+    int rc = SSL_CTX_set_cipher_list(ctx, "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!RC4");
+
+    SSL_CTX_set_default_verify_paths(ctx);
+    SSL_CTX_load_verify_locations(ctx, caFile, caPath);
+    SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+    SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
+
+    if (cert != NULL) {
+        if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1) {
+            Ns_TclPrintfResult(interp, "certificate load error: %s", ERR_error_string(ERR_get_error(), NULL));
+            return TCL_ERROR;
+        }
+
+        if (SSL_CTX_use_PrivateKey_file(ctx, cert, SSL_FILETYPE_PEM) != 1) {
+            Ns_TclPrintfResult(interp, "private key load error: %s", ERR_error_string(ERR_get_error(), NULL));
+            return TCL_ERROR;
+        }
+    }
+
+    return TCL_OK;
+}
+
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * Ns_TLS_SSLAccept --
+ *
+ *   Initialize a socket as ssl socket and wait until the socket is usable (is
+ *   accepted, handshake performed)
+ *
+ * Results:
+ *   Result code.
+ *
+ * Side effects:
+ *   None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock, NS_TLS_SSL_CTX *ctx,
+                  NS_TLS_SSL **sslPtr)
+{
+    NS_TLS_SSL     *ssl;
+
+    NS_NONNULL_ASSERT(interp != NULL);
+    NS_NONNULL_ASSERT(ctx != NULL);
+    NS_NONNULL_ASSERT(sslPtr != NULL);
+
+    Ns_Log(SmtpdDebug, "SSLAccept: before new.");
+    ssl = SSL_new(ctx);
+    *sslPtr = ssl;
+    if (ssl == NULL) {
+        Ns_TclPrintfResult(interp, "SSLAccept failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        Ns_Log(SmtpdDebug, "SSLAccept failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        return TCL_ERROR;
+    }
+
+    SSL_set_fd(ssl, sock);
+    SSL_set_accept_state(ssl);
+
+    while (1) {
+        int rc, sslerr;
+
+        Ns_Log(SmtpdDebug, "ssl accept");
+        //rc  = SSL_accept(ssl);
+        rc = SSL_do_handshake(ssl);
+        Ns_Log(SmtpdDebug, "ssl accept rc=%d", rc);
+        sslerr = SSL_get_error(ssl, rc);
+        Ns_Log(SmtpdDebug, "ssl accept sslerr=%d", sslerr);
+
+        if (sslerr == SSL_ERROR_WANT_WRITE || sslerr == SSL_ERROR_WANT_READ) {
+            Ns_Time timeout = { 0, 10000 }; /* 10ms */
+            Ns_SockTimedWait(sock, NS_SOCK_WRITE|NS_SOCK_READ, &timeout);
+            continue;
+        }
+        break;
+    }
+
+    Ns_Log(SmtpdDebug, "SSLAccept state: %d",  SSL_get_state(ssl));
+    if (!SSL_is_init_finished(ssl)) {
+        Ns_TclPrintfResult(interp, "ssl accept failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        Ns_Log(SmtpdDebug, "ssl accept failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        return TCL_ERROR;
+    }
+
+    return TCL_OK;
+}
+
+#else
+
+
+static int
+Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
+                       const char *cert, const char *caFile, const char *caPath, int verify,
+                       NS_TLS_SSL_CTX **ctxPtr)
+{
+    Ns_TclPrintfResult(interp, "CtxCreate failed: no support for OpenSSL built in");
+    return TCL_ERROR;
+}
+
+
+static int
+Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET UNUSED(sock), NS_TLS_SSL_CTX *UNUSED(ctx),
+                  NS_TLS_SSL **UNUSED(sslPtr))
+{
+    Ns_TclPrintfResult(interp, "SSLCreate failed: no support for OpenSSL built in");
+    return TCL_ERROR;
+}
+
+
+#endif
 
 /*
  * Local Variables:
