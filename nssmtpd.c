@@ -400,7 +400,9 @@ static char *SmtpdGetHeader(smtpdConn *conn, char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
+static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr);
 static int SmtpdRead(smtpdConn *conn, void *vbuf, int len);
+static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length);
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len);
 static int SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
 static int SmtpdPuts(smtpdConn *conn, char *string);
@@ -424,11 +426,6 @@ static int Ns_TLS_CtxServerCreate(Tcl_Interp *interp, const char *cert,
                                   int verify, NS_TLS_SSL_CTX **ctxPtr);
 static int Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock,
                             NS_TLS_SSL_CTX *ctx, NS_TLS_SSL **sslPtr);
-static ssize_t TlsRecv(Ns_Sock *sock, struct iovec *bufs, int nbufs,
-                       Ns_Time *timeoutPtr, unsigned int flags);
-static ssize_t TlsSend(Ns_Sock *sock, const struct iovec *bufs, int nbufs,
-                       const Ns_Time *timeoutPtr, unsigned int flags);
-static void TlsClose(Ns_Sock *sock);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
@@ -1824,11 +1821,9 @@ static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int f
     }
 }
 
-static ssize_t
-        SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
+static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
 {
     ssize_t       received;
-    int n = 0;
 
     NS_NONNULL_ASSERT(sock != NULL);
     NS_NONNULL_ASSERT(buffer != NULL);
@@ -1885,13 +1880,6 @@ again:
     return received;
 }
 
-
-
-
-
-
-
-
 static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
 {
     int nread, n;
@@ -1919,16 +1907,8 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
 
-            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout);
-            /*if (conn->sock->arg != NULL) {
-#ifdef HAVE_OPENSSL_EVP_H
-                //TODO: figure out how to call this
-                conn->buf.pos = TlsRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, 0);
-#endif
-            } else {
-                conn->buf.pos = Ns_SockRecv(conn->sock->sock, conn->buf.data, conn->config->bufsize, &timeout);
-            }
-*/
+            conn->buf.pos = (int)SmtpdRecv(conn->sock, conn->buf.data, (size_t)conn->config->bufsize, &timeout);
+
             if (conn->buf.pos <= 0) {
                 return -1;
             }
@@ -1937,10 +1917,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
     return nread;
 }
 
-
-
-static ssize_t
-MySmtpdSend(Ns_Sock *sock, char *buffer, size_t length)
+static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
 {
     ssize_t       sent;
 
@@ -1988,13 +1965,6 @@ MySmtpdSend(Ns_Sock *sock, char *buffer, size_t length)
     return sent;
 }
 
-
-
-
-
-
-
-
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
 {
     int nwrote;
@@ -2004,15 +1974,7 @@ static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
     nwrote = len;
     buf = vbuf;
     while (len > 0) {
-        int n;
-        /*if (conn->sock->arg != NULL) {
-#ifdef HAVE_OPENSSL_EVP_H
-            n = TlsSend(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, 0);
-#endif
-        } else {
-            n = Ns_SockSend(conn->sock->sock, buf, len, &timeout);
-        }*/
-        n = MySmtpdSend(conn->sock, buf, len);
+        ssize_t n = SmtpdUnixSend(conn->sock, buf, (size_t)len);
 
         if (n < 0) {
             return -1;
@@ -5185,187 +5147,6 @@ Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock, NS_TLS_SSL_CTX *ctx,
     return TCL_OK;
 }
 
-/*
- *----------------------------------------------------------------------
- *
- * TlsRecv --
- *
- *      Receive data into given buffers.
- *
- * Results:
- *      Total number of bytes received or -1 on error or timeout.
- *
- * Side effects:
- *      None
- *
- *----------------------------------------------------------------------
- */
-
-static ssize_t
-TlsRecv(Ns_Sock *sock, struct iovec *bufs, int nbufs, Ns_Time *timeoutPtr, unsigned int flags)
-{
-    SSLDriver *drvPtr = sock->driver->arg;
-    SSLContext *sslPtr = sock->arg;
-    int got = 0;
-    char *p = (char *)bufs->iov_base;
-
-    /*
-     * Verify client certificate, driver may require valid cert
-     */
-
-    if (drvPtr->verify && sslPtr->verified == 0) {
-        X509 *peer;
-        if ((peer = SSL_get_peer_certificate(sslPtr->ssl))) {
-             X509_free(peer);
-             if (SSL_get_verify_result(sslPtr->ssl) != X509_V_OK) {
-                 char ipString[NS_IPADDR_SIZE];
-                 Ns_Log(Error, "nsssl: client certificate not valid by %s",
-                        ns_inet_ntop((struct sockaddr *)&(sock->sa), ipString, sizeof(ipString)));
-                 return NS_ERROR;
-             }
-        } else {
-            char ipString[NS_IPADDR_SIZE];
-            Ns_Log(Error, "nsssl: no client certificate provided by %s",
-                   ns_inet_ntop((struct sockaddr *)&(sock->sa), ipString, sizeof(ipString)));
-            return NS_ERROR;
-        }
-        sslPtr->verified = 1;
-    }
-
-    while (1) {
-        int err, n;
-
-        ERR_clear_error();
-        n = SSL_read(sslPtr->ssl, p + got, bufs->iov_len - got);
-        err = SSL_get_error(sslPtr->ssl, n);
-
-        switch (err) {
-        case SSL_ERROR_NONE:
-            if (n < 0) {
-                fprintf(stderr, "### SSL_read should not happen\n");
-                return n;
-            }
-            /*fprintf(stderr, "### SSL_read %d pending %d\n", n, SSL_pending(sslPtr->ssl));*/
-            got += n;
-            if (n == 1 && got < bufs->iov_len) {
-                /*fprintf(stderr, "### SSL retry after read of %d bytes\n", n);*/
-                continue;
-            }
-            /*Ns_Log(Notice, "### SSL_read %d got <%s>", got, p);*/
-            return got;
-
-        case SSL_ERROR_WANT_READ:
-            /*fprintf(stderr, "### SSL_read WANT_READ returns %d\n", got);*/
-            return got;
-
-        default:
-            /*fprintf(stderr, "### SSL_read error\n");*/
-            SSL_set_shutdown(sslPtr->ssl, SSL_RECEIVED_SHUTDOWN);
-            return -1;
-        }
-    }
-
-    return -1;
-}
-
-
-/*
- *----------------------------------------------------------------------
- *
- * TlsSend --
- *
- *      Send data from given buffers.
- *
- * Results:
- *      Total number of bytes sent or -1 on error or timeout.
- *
- * Side effects:
- *      None
- *
- *----------------------------------------------------------------------
- */
-
-static ssize_t
-TlsSend(Ns_Sock *sock, const struct iovec *bufs, int nbufs,
-     const Ns_Time *timeoutPtr, unsigned int flags)
-{
-    SSLContext *sslPtr = sock->arg;
-    int         rc, size;
-    bool        decork;
-
-    size = 0;
-    decork = Ns_SockCork(sock, NS_TRUE);
-    while (nbufs > 0) {
-        if (bufs->iov_len > 0) {
-            ERR_clear_error();
-            rc = SSL_write(sslPtr->ssl, bufs->iov_base, bufs->iov_len);
-
-            if (rc < 0) {
-                if (SSL_get_error(sslPtr->ssl, rc) == SSL_ERROR_WANT_WRITE) {
-                    Ns_Time timeout = { sock->driver->sendwait, 0 };
-                    if (Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout) == NS_OK) {
-                    continue;
-                    }
-                }
-                if (decork == NS_TRUE) {
-                    Ns_SockCork(sock, NS_FALSE);
-                }
-                SSL_set_shutdown(sslPtr->ssl, SSL_RECEIVED_SHUTDOWN);
-                return -1;
-            }
-            size += rc;
-            if (rc < bufs->iov_len) {
-                Ns_Log(Debug, "SSL: partial write, wanted %ld wrote %d", bufs->iov_len, rc);
-            break;
-            }
-        }
-        nbufs--;
-        bufs++;
-    }
-
-    if (decork == NS_TRUE) {
-        Ns_SockCork(sock, NS_FALSE);
-    }
-    return size;
-}
-
-
-/*
- *----------------------------------------------------------------------
- *
- * TlsClose --
- *
- *      Close the connection socket.
- *
- * Results:
- *      None.
- *
- * Side effects:
- *      Does not close UDP socket
- *
- *----------------------------------------------------------------------
- */
-
-static void
-TlsClose(Ns_Sock *sock)
-{
-    SSLContext *sslPtr = sock->arg;
-
-    if (sslPtr != NULL) {
-        int i;
-        for (i = 0; i < 4 && !SSL_shutdown(sslPtr->ssl); i++) {
-            ;
-        }
-        SSL_free(sslPtr->ssl);
-        ns_free(sslPtr);
-    }
-    if (sock->sock > -1) {
-        ns_sockclose(sock->sock);
-        sock->sock = -1;
-    }
-    sock->arg = NULL;
-}
-
 //#else
 #if 0
 
@@ -5384,27 +5165,6 @@ Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET UNUSED(sock), NS_TLS_SSL_CTX *UNU
                   NS_TLS_SSL **UNUSED(sslPtr))
 {
     Ns_TclPrintfResult(interp, "SSLAccept failed: no support for OpenSSL built in");
-    return TCL_ERROR;
-}
-
-static ssize_t
-TlsRecv(Ns_Sock *sock, struct iovec *bufs, int nbufs, Ns_Time *timeoutPtr, unsigned int flags)
-{
-    Ns_TclPrintfResult(interp, "TlsRecv failed: no support for OpenSSL built in");
-    return TCL_ERROR;
-}
-
-static ssize_t
-TlsSend(Ns_Sock *sock, const struct iovec *bufs, int nbufs,
-        const Ns_Time *timeoutPtr, unsigned int flags)
-{
-    Ns_TclPrintfResult(interp, "TlsSend failed: no support for OpenSSL built in");
-    return TCL_ERROR;
-}
-
-static void TlsClose(Ns_Sock *sock)
-{
-    Ns_TclPrintfResult(interp, "TlsClose failed: no support for OpenSSL built in");
     return TCL_ERROR;
 }
 
