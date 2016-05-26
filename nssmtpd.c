@@ -81,6 +81,7 @@
 #define SMTPD_GOTMAIL        0x0040000
 #define SMTPD_GOTSPAM        0x0080000
 #define SMTPD_GOTVIRUS       0x0100000
+#define SMTPD_GOTSTARTTLS    0x0200000
 
 #define SMTPD_VERSION              "2.1"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
@@ -878,6 +879,7 @@ static void SmtpdThread(smtpdConn *conn)
 
     while (1) {
         conn->cmd = SMTP_READ;
+        fprintf(stderr, "SmptdThread: %p \n", conn->sock->arg);
         if (SmtpdReadLine(conn, &conn->line) < 0) {
             goto error;
         }
@@ -965,9 +967,11 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringInit(&conn->line);
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
-#ifdef HAVE_OPENSSL_EVP_H
-                    Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
-#endif
+//#ifdef HAVE_OPENSSL_EVP_H
+                    if (!(conn->flags & SMTPD_GOTSTARTTLS)) {
+                        Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
+                    }
+//#endif
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
@@ -982,8 +986,9 @@ static void SmtpdThread(smtpdConn *conn)
             continue;
         }
 
-#ifdef HAVE_OPENSSL_EVP_H
+//#ifdef HAVE_OPENSSL_EVP_H
         if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
+            conn->cmd = SMTP_STARTTLS;
             NS_TLS_SSL_CTX *ctx;
             NS_TLS_SSL *ssl;
 
@@ -1015,15 +1020,20 @@ static void SmtpdThread(smtpdConn *conn)
                     goto error;
                 }
                 sslPtr->ssl = ssl;
-                conn->sock->arg = sslPtr;
+                fprintf(stderr, "STARTTLS--setting ssl %p->%p\n", conn->sock, ssl);
+                conn->sock->arg = ssl;
             } else {
                 goto error;
             }
             Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
+            fprintf(stderr, "SmptdThread: end of STARTTLS %p \n", conn->sock->arg);
+
+            conn->flags &= ~(SMTPD_GOTHELO);
+            conn->flags |= (SMTPD_GOTSTARTTLS);
 
             continue;
         }
-#endif
+//#endif
 
         if (!strncasecmp(conn->line.string, "RSET", 4)) {
             conn->cmd = SMTP_RSET;
@@ -1814,6 +1824,74 @@ static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int f
     }
 }
 
+static ssize_t
+        SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
+{
+    ssize_t       received;
+    int n = 0;
+
+    NS_NONNULL_ASSERT(sock != NULL);
+    NS_NONNULL_ASSERT(buffer != NULL);
+again:
+    fprintf(stderr, "Receive: want receive %lu bytes {from ssl %d %p->%p}\n", length, sock->arg!=NULL, sock, sock->arg);
+    if (sock->arg == NULL) {
+        received = ns_recv(sock->sock, buffer, length, 0);
+    } else {
+//#ifdef HAVE_OPENSSL_EVP_H
+        SSL *ssl = (SSL *)sock->arg;
+        fprintf(stderr, "### SSL_read want %lu\n", length);
+
+        received = 0;
+        for (;;) {
+            int n = 0, err;
+
+            n = SSL_read(ssl, buffer+received, (int)(length - (size_t)received));
+            err = SSL_get_error(ssl, n);
+            fprintf(stderr, "### SSL_read n %d got %lu err %d\n", n, received, err);
+            switch (err) {
+            case SSL_ERROR_NONE:
+                if (n < 0) {
+                    Ns_Log(Error, "SSL_read failed but no error, should not happen");
+                    fprintf(stderr, "### SSL_read failed but no error, should not happen");
+                    break;
+                }
+                received += n;
+                break;
+
+            case SSL_ERROR_WANT_READ:
+                fprintf(stderr, "### partial read, n %d\n", (int)n);
+                if (n < 0) {
+                    continue;
+                }
+                received += n;
+                continue;
+            }
+            break;
+        }
+//#else
+#if 0
+        received = -1;
+#endif
+    }
+
+    fprintf(stderr, "Receive: received %ld bytes from {%s} %d \n", received, buffer, errno);
+    if (received == -1 && errno == EWOULDBLOCK) {
+        if (Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr) == NS_OK) {
+            goto again;
+        }
+    }
+
+    Ns_Log(Ns_LogTaskDebug, "HttpTaskRecv received %ld bytes (from %lu)", received, length);
+    return received;
+}
+
+
+
+
+
+
+
+
 static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
 {
     int nread, n;
@@ -1841,7 +1919,8 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
 
-            if (conn->sock->arg != NULL) {
+            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout);
+            /*if (conn->sock->arg != NULL) {
 #ifdef HAVE_OPENSSL_EVP_H
                 //TODO: figure out how to call this
                 conn->buf.pos = TlsRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, 0);
@@ -1849,7 +1928,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             } else {
                 conn->buf.pos = Ns_SockRecv(conn->sock->sock, conn->buf.data, conn->config->bufsize, &timeout);
             }
-
+*/
             if (conn->buf.pos <= 0) {
                 return -1;
             }
@@ -1857,6 +1936,64 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
     }
     return nread;
 }
+
+
+
+static ssize_t
+MySmtpdSend(Ns_Sock *sock, char *buffer, size_t length)
+{
+    ssize_t       sent;
+
+    NS_NONNULL_ASSERT(sock != NULL);
+    NS_NONNULL_ASSERT(buffer != NULL);
+
+    if (sock->arg == NULL) {
+        sent = ns_send(sock->sock, buffer, length, 0);
+    } else {
+//#ifdef HAVE_OPENSSL_EVP_H
+        struct iovec  iov;
+        (void) Ns_SetVec(&iov, 0, buffer, length);
+
+        SSL *ssl = (SSL *)sock->arg;
+        sent = 0;
+        for (;;) {
+            int     err;
+            ssize_t n;
+
+            n = SSL_write(ssl, iov.iov_base, (int)iov.iov_len);
+            err = SSL_get_error(ssl, n);
+            if (err == SSL_ERROR_WANT_WRITE) {
+                Ns_Time timeout = { 0, 10000 }; /* 10ms */
+
+                Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout);
+                continue;
+            }
+            if (likely(n > -1)) {
+                sent += n;
+
+                if (((size_t)n < iov.iov_len)) {
+                    Ns_ResetVec(&iov, 1, (size_t)n);
+                    continue;
+                }
+            }
+            break;
+        }
+//#else
+#if 0
+        sent = -1;
+#endif
+    }
+
+    Ns_Log(Ns_LogTaskDebug, "HttpTaskSend sent %ld bytes (from %lu)", sent, length);
+    return sent;
+}
+
+
+
+
+
+
+
 
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
 {
@@ -1868,13 +2005,14 @@ static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
     buf = vbuf;
     while (len > 0) {
         int n;
-        if (conn->sock->arg != NULL) {
+        /*if (conn->sock->arg != NULL) {
 #ifdef HAVE_OPENSSL_EVP_H
             n = TlsSend(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, 0);
 #endif
         } else {
             n = Ns_SockSend(conn->sock->sock, buf, len, &timeout);
-        }
+        }*/
+        n = MySmtpdSend(conn->sock, buf, len);
 
         if (n < 0) {
             return -1;
@@ -4917,7 +5055,7 @@ static void dnsPacketFree(dnsPacket *pkt, int type)
     ns_free(pkt);
 }
 
-#ifdef HAVE_OPENSSL_EVP_H
+//#ifdef HAVE_OPENSSL_EVP_H
 
 
 /*
@@ -5228,8 +5366,8 @@ TlsClose(Ns_Sock *sock)
     sock->arg = NULL;
 }
 
-#else
-
+//#else
+#if 0
 
 static int
 Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
