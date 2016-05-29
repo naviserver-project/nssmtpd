@@ -1505,18 +1505,78 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         return -1;
     }
 
-    /* HELO command */
+    /* EHLO command */
     Ns_DStringTrunc(&conn->line, 0);
-    Ns_DStringPrintf(&conn->line, "HELO %s\r\n", Ns_InfoHostname());
+    Ns_DStringPrintf(&conn->line, "EHLO %s\r\n", Ns_InfoHostname());
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
         goto error421;
     }
-    if (SmtpdReadLine(relay, &relay->line) <= 0) {
-        goto error421;
+    int hasStarttls = 0;
+    do {
+        int nread = SmtpdReadLine(relay, &relay->line);
+        if (nread <= 0) {
+            goto error421;
+        }
+        fprintf(stderr, "RELAY-HELO-line: nread=%d {%s}\r\n", nread, relay->line.string);
+        if (strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
+            hasStarttls = 1;
+        }
+        if (relay->line.string[0] != '2') {
+            goto errorrelay;
+        }
+    } while (relay->line.string[3] != ' ');
+    fprintf(stderr, "RELAY-HELO: hasStarttls=%d\r\n", hasStarttls);
+
+    /* If STARTTLS available attempt it. */
+//#ifdef HAVE_OPENSSL_EVP_H
+    if (hasStarttls) {
+
+        Ns_DStringTrunc(&conn->line, 0);
+        Ns_DStringPrintf(&conn->line, "STARTTLS\r\n");
+        if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
+            fprintf(stderr, "RELAY-STARTTLS: Writing STARTTLS command failed\r\n");
+            goto error421;
+        }
+        if (SmtpdReadLine(relay, &relay->line) <= 0 || relay->line.string[0] != '2') {
+            fprintf(stderr, "RELAY-STARTTLS-reply-line: {%s}\r\n", relay->line.string);
+            goto error421;
+        }
+
+        NS_TLS_SSL_CTX *ctx;
+        NS_TLS_SSL     *ssl;
+
+        if (relay->interp == NULL) {
+            relay->interp = conn->interp;
+        }
+        int result = Ns_TLS_CtxClientCreate(
+            relay->interp,
+            "/home/costash/server.pem" /*cert*/,
+            NULL /*caFile*/,
+            NULL /*caPath*/,
+            0 /*verify*/,
+            &ctx);
+
+        if (likely(result == TCL_OK)) {
+            /*
+             * Make sure, the socket is in a writable state.
+             */
+
+            if (Ns_SockTimedWait(relay->sock->sock, NS_SOCK_WRITE|NS_SOCK_READ, &timeout) != NS_OK) {
+                fprintf(stderr, "RELAY-STARTTLS: sock not ready result=%d sock=%d\r\n", relay->sock->sock);
+                goto error421;
+            };
+            /*
+             * Establish the SSL/TLS connection.
+             */
+            result = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, &ssl);
+            relay->sock->arg = ssl;
+        }
+        if (unlikely(result != TCL_OK)) {
+            fprintf(stderr, "RELAY-STARTTLS: result=%d sock=%d ssl=%p\r\n", result, relay->sock->sock, ssl);
+            goto error421;
+        }
     }
-    if (relay->line.string[0] != '2') {
-        goto errorrelay;
-    }
+//#endif
 
     /* MAIL FROM command */
     Ns_DStringTrunc(&conn->line, 0);
@@ -1871,7 +1931,9 @@ again:
 
     fprintf(stderr, "Receive: received %ld bytes from {%s} %d \n", received, buffer, errno);
     if (received == -1 && errno == EWOULDBLOCK) {
+        fprintf(stderr, "Receive: errno = EWOULDBLOCK. Try to wait.\r\n");
         if (Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr) == NS_OK) {
+            fprintf(stderr, "Receive: trying again\r\n");
             goto again;
         }
     }
@@ -1989,17 +2051,20 @@ static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
 {
     char buf[1];
     int len = 0, nread;
+   // fprintf(stderr, "====SmtpdReadLine:\r\n");
 
     Ns_DStringTrunc(dsPtr, 0);
     do {
         if ((nread = SmtpdRead(conn, buf, 1)) == 1) {
             Ns_DStringNAppend(dsPtr, buf, 1);
+            //fprintf(stderr, "====SmtpdReadLine: nread=%d str={%s}\r\n", nread, dsPtr->string);
             ++len;
             if (buf[0] == '\n') {
                 break;
             }
         }
     } while (nread == 1 && dsPtr->length <= conn->config->maxline);
+    //fprintf(stderr, "====SmtpdReadLine: OUT-loop nread=%d str={%s}\r\n", nread, dsPtr->string);
     
     if (nread > 0 && Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         char *end = &dsPtr->string[dsPtr->length-1], saved = *end;
@@ -2008,6 +2073,7 @@ static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
         Ns_Log(SmtpdDebug, "nssmtpd: %d: <<< %s", conn->id, dsPtr->string);
         *end = saved;
     }
+    //fprintf(stderr, "====SmtpdReadLine: BEFORE-return nread=%d str={%s}\r\n", nread, dsPtr->string);
     return (nread > 0 ? len : nread);
 }
 
