@@ -39,7 +39,7 @@ section should already exist, so just add nssmtpd line there:
     ns_param	    localdomains	    "localhost domain.com"
 
 # For STARTTLS functionality
-    ns_param certchainfile "/home/costash/server.pem"
+    ns_param certchainfile "pathToYourCertificateChainFile.pem"
     ns_param cafile ""
     ns_param capath ""
     ns_param ciphers "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!RC4"
