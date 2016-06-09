@@ -334,22 +334,6 @@ typedef struct _dnsPacket {
     } buf;
 } dnsPacket;
 
-#ifdef HAVE_OPENSSL_EVP_H
-typedef struct {
-    SSL_CTX     *ctx;
-    Ns_Mutex     lock;
-    int          verify;
-    int          deferaccept;  /* Enable the TCP_DEFER_ACCEPT optimization. */
-    DH          *dhKey512;     /* Fallback Diffie Hellman keys of length 512 */
-    DH          *dhKey1024;    /* Fallback Diffie Hellman keys of length 1024 */
-} SSLDriver;
-
-typedef struct {
-    SSL         *ssl;
-    int          verified;
-} SSLContext;
-#endif
-
 static int parseEmail(smtpdEmail *addr, char *str);
 static char *encode64(const char *in, int len);
 static char *decode64(const char *in, int len, int *outlen);
@@ -1025,12 +1009,6 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept failed");
                     goto error;
                 }
-                SSLContext *sslPtr = ns_calloc(1, sizeof(SSLContext));
-                if (sslPtr == NULL) {
-                    Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept failed. Could not allocate SSLContext.");
-                    goto error;
-                }
-                sslPtr->ssl = ssl;
                 conn->sock->arg = ssl;
             } else {
                 goto error;
