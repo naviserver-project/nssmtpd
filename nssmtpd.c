@@ -172,6 +172,12 @@ typedef struct _smtpdConfig {
     struct cl_node *ClamAvRoot;
     struct cl_limits ClamAvLimits;
 #endif
+#ifdef HAVE_OPENSSL_EVP_H
+    char *certchainfile;
+    char *cafile;
+    char *capath;
+    char *ciphers;
+#endif
 } smtpdConfig;
 
 typedef struct _smtpdConn {
@@ -423,7 +429,7 @@ static int SmtpdFlags(const char *name);
 
 static int Ns_TLS_CtxServerCreate(Tcl_Interp *interp, const char *cert,
                                   const char *caFile, const char *caPath,
-                                  int verify, NS_TLS_SSL_CTX **ctxPtr);
+                                  int verify, const char *ciphers, NS_TLS_SSL_CTX **ctxPtr);
 static int Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock,
                             NS_TLS_SSL_CTX *ctx, NS_TLS_SSL **sslPtr);
 
@@ -502,6 +508,13 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     serverPtr->dataproc = Ns_ConfigGetValue(path, "dataproc");
     serverPtr->errorproc = Ns_ConfigGetValue(path, "errorproc");
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
+
+#ifdef HAVE_OPENSSL_EVP_H
+    serverPtr->certchainfile = ns_strcopy(Ns_ConfigGetValue(path, "certchainfile"));
+    serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(path, "cafile"));
+    serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(path, "capath"));
+    serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(path, "ciphers"));
+#endif
 
     /* Parse flags */
     if ((addr = Ns_ConfigGetValue(path, "flags"))) {
@@ -876,7 +889,6 @@ static void SmtpdThread(smtpdConn *conn)
 
     while (1) {
         conn->cmd = SMTP_READ;
-        fprintf(stderr, "SmptdThread: %p \n", conn->sock->arg);
         if (SmtpdReadLine(conn, &conn->line) < 0) {
             goto error;
         }
@@ -964,11 +976,11 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringInit(&conn->line);
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
                     if (!(conn->flags & SMTPD_GOTSTARTTLS)) {
                         Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
                     }
-//#endif
+#endif
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
@@ -983,7 +995,7 @@ static void SmtpdThread(smtpdConn *conn)
             continue;
         }
 
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
         if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
             conn->cmd = SMTP_STARTTLS;
             NS_TLS_SSL_CTX *ctx;
@@ -993,11 +1005,13 @@ static void SmtpdThread(smtpdConn *conn)
                 goto error;
             }
 
-            int result = Ns_TLS_CtxServerCreate(conn->interp,
-                "/home/costash/server.pem" /*cert*/,
-                NULL /*caFile*/,
-                NULL /*caPath*/,
+            int result = Ns_TLS_CtxServerCreate(
+                conn->interp,
+                conn->config->certchainfile,
+                conn->config->cafile,
+                conn->config->capath,
                 0 /*verify*/,
+                conn->config->ciphers,
                 &ctx);
             Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
 
@@ -1017,20 +1031,18 @@ static void SmtpdThread(smtpdConn *conn)
                     goto error;
                 }
                 sslPtr->ssl = ssl;
-                fprintf(stderr, "STARTTLS--setting ssl %p->%p\n", conn->sock, ssl);
                 conn->sock->arg = ssl;
             } else {
                 goto error;
             }
             Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
-            fprintf(stderr, "SmptdThread: end of STARTTLS %p \n", conn->sock->arg);
 
             conn->flags &= ~(SMTPD_GOTHELO);
             conn->flags |= (SMTPD_GOTSTARTTLS);
 
             continue;
         }
-//#endif
+#endif
 
         if (!strncasecmp(conn->line.string, "RSET", 4)) {
             conn->cmd = SMTP_RSET;
@@ -1517,7 +1529,6 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         if (nread <= 0) {
             goto error421;
         }
-        fprintf(stderr, "RELAY-HELO-line: nread=%d {%s}\r\n", nread, relay->line.string);
         if (strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
             hasStarttls = 1;
         }
@@ -1525,20 +1536,17 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
             goto errorrelay;
         }
     } while (relay->line.string[3] != ' ');
-    fprintf(stderr, "RELAY-HELO: hasStarttls=%d\r\n", hasStarttls);
 
     /* If STARTTLS available attempt it. */
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
     if (hasStarttls) {
 
         Ns_DStringTrunc(&conn->line, 0);
         Ns_DStringPrintf(&conn->line, "STARTTLS\r\n");
         if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
-            fprintf(stderr, "RELAY-STARTTLS: Writing STARTTLS command failed\r\n");
             goto error421;
         }
         if (SmtpdReadLine(relay, &relay->line) <= 0 || relay->line.string[0] != '2') {
-            fprintf(stderr, "RELAY-STARTTLS-reply-line: {%s}\r\n", relay->line.string);
             goto error421;
         }
 
@@ -1550,9 +1558,9 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         }
         int result = Ns_TLS_CtxClientCreate(
             relay->interp,
-            "/home/costash/server.pem" /*cert*/,
-            NULL /*caFile*/,
-            NULL /*caPath*/,
+            conn->config->certchainfile,
+            conn->config->cafile,
+            conn->config->capath,
             0 /*verify*/,
             &ctx);
 
@@ -1562,7 +1570,6 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
              */
 
             if (Ns_SockTimedWait(relay->sock->sock, NS_SOCK_WRITE|NS_SOCK_READ, &timeout) != NS_OK) {
-                fprintf(stderr, "RELAY-STARTTLS: sock not ready result=%d sock=%d\r\n", relay->sock->sock);
                 goto error421;
             };
             /*
@@ -1572,11 +1579,10 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
             relay->sock->arg = ssl;
         }
         if (unlikely(result != TCL_OK)) {
-            fprintf(stderr, "RELAY-STARTTLS: result=%d sock=%d ssl=%p\r\n", result, relay->sock->sock, ssl);
             goto error421;
         }
     }
-//#endif
+#endif
 
     /* MAIL FROM command */
     Ns_DStringTrunc(&conn->line, 0);
@@ -1888,13 +1894,11 @@ static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *ti
     NS_NONNULL_ASSERT(sock != NULL);
     NS_NONNULL_ASSERT(buffer != NULL);
 again:
-    fprintf(stderr, "Receive: want receive %lu bytes {from ssl %d %p->%p}\n", length, sock->arg!=NULL, sock, sock->arg);
     if (sock->arg == NULL) {
         received = ns_recv(sock->sock, buffer, length, 0);
     } else {
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
         SSL *ssl = (SSL *)sock->arg;
-        fprintf(stderr, "### SSL_read want %lu\n", length);
 
         received = 0;
         for (;;) {
@@ -1902,19 +1906,16 @@ again:
 
             n = SSL_read(ssl, buffer+received, (int)(length - (size_t)received));
             err = SSL_get_error(ssl, n);
-            fprintf(stderr, "### SSL_read n %d got %lu err %d\n", n, received, err);
             switch (err) {
             case SSL_ERROR_NONE:
                 if (n < 0) {
                     Ns_Log(Error, "SSL_read failed but no error, should not happen");
-                    fprintf(stderr, "### SSL_read failed but no error, should not happen");
                     break;
                 }
                 received += n;
                 break;
 
             case SSL_ERROR_WANT_READ:
-                fprintf(stderr, "### partial read, n %d\n", (int)n);
                 if (n < 0) {
                     continue;
                 }
@@ -1923,17 +1924,13 @@ again:
             }
             break;
         }
-//#else
-#if 0
+#else
         received = -1;
 #endif
     }
 
-    fprintf(stderr, "Receive: received %ld bytes from {%s} %d \n", received, buffer, errno);
     if (received == -1 && errno == EWOULDBLOCK) {
-        fprintf(stderr, "Receive: errno = EWOULDBLOCK. Try to wait.\r\n");
         if (Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr) == NS_OK) {
-            fprintf(stderr, "Receive: trying again\r\n");
             goto again;
         }
     }
@@ -1989,7 +1986,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
     if (sock->arg == NULL) {
         sent = ns_send(sock->sock, buffer, length, 0);
     } else {
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
         struct iovec  iov;
         (void) Ns_SetVec(&iov, 0, buffer, length);
 
@@ -2017,8 +2014,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
             }
             break;
         }
-//#else
-#if 0
+#else
         sent = -1;
 #endif
     }
@@ -2031,7 +2027,6 @@ static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
 {
     int nwrote;
     char *buf;
-    Ns_Time timeout = { conn->config->writetimeout, 0 };
 
     nwrote = len;
     buf = vbuf;
@@ -2051,20 +2046,17 @@ static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
 {
     char buf[1];
     int len = 0, nread;
-   // fprintf(stderr, "====SmtpdReadLine:\r\n");
 
     Ns_DStringTrunc(dsPtr, 0);
     do {
         if ((nread = SmtpdRead(conn, buf, 1)) == 1) {
             Ns_DStringNAppend(dsPtr, buf, 1);
-            //fprintf(stderr, "====SmtpdReadLine: nread=%d str={%s}\r\n", nread, dsPtr->string);
             ++len;
             if (buf[0] == '\n') {
                 break;
             }
         }
     } while (nread == 1 && dsPtr->length <= conn->config->maxline);
-    //fprintf(stderr, "====SmtpdReadLine: OUT-loop nread=%d str={%s}\r\n", nread, dsPtr->string);
     
     if (nread > 0 && Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         char *end = &dsPtr->string[dsPtr->length-1], saved = *end;
@@ -2073,7 +2065,6 @@ static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
         Ns_Log(SmtpdDebug, "nssmtpd: %d: <<< %s", conn->id, dsPtr->string);
         *end = saved;
     }
-    //fprintf(stderr, "====SmtpdReadLine: BEFORE-return nread=%d str={%s}\r\n", nread, dsPtr->string);
     return (nread > 0 ? len : nread);
 }
 
@@ -5083,7 +5074,7 @@ static void dnsPacketFree(dnsPacket *pkt, int type)
     ns_free(pkt);
 }
 
-//#ifdef HAVE_OPENSSL_EVP_H
+#ifdef HAVE_OPENSSL_EVP_H
 
 
 /*
@@ -5105,6 +5096,7 @@ static void dnsPacketFree(dnsPacket *pkt, int type)
 static int
 Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
                        const char *cert, const char *caFile, const char *caPath, int verify,
+                       const char *ciphers,
                        NS_TLS_SSL_CTX **ctxPtr)
 {
     NS_TLS_SSL_CTX *ctx;
@@ -5119,7 +5111,11 @@ Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
         return TCL_ERROR;
     }
 
-    int rc = SSL_CTX_set_cipher_list(ctx, "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!RC4");
+    int rc = SSL_CTX_set_cipher_list(ctx, ciphers);
+    if (!rc) {
+        Ns_TclPrintfResult(interp, "ctx cipher list failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        return TCL_ERROR;
+    }
 
     SSL_CTX_set_default_verify_paths(ctx);
     SSL_CTX_load_verify_locations(ctx, caFile, caPath);
@@ -5186,12 +5182,8 @@ Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock, NS_TLS_SSL_CTX *ctx,
     while (1) {
         int rc, sslerr;
 
-        Ns_Log(SmtpdDebug, "ssl accept");
-        //rc  = SSL_accept(ssl);
         rc = SSL_do_handshake(ssl);
-        Ns_Log(SmtpdDebug, "ssl accept rc=%d", rc);
         sslerr = SSL_get_error(ssl, rc);
-        Ns_Log(SmtpdDebug, "ssl accept sslerr=%d", sslerr);
 
         if (sslerr == SSL_ERROR_WANT_WRITE || sslerr == SSL_ERROR_WANT_READ) {
             Ns_Time timeout = { 0, 10000 }; /* 10ms */
@@ -5201,7 +5193,6 @@ Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock, NS_TLS_SSL_CTX *ctx,
         break;
     }
 
-    Ns_Log(SmtpdDebug, "SSLAccept state: %d",  SSL_get_state(ssl));
     if (!SSL_is_init_finished(ssl)) {
         Ns_TclPrintfResult(interp, "ssl accept failed: %s", ERR_error_string(ERR_get_error(), NULL));
         Ns_Log(SmtpdDebug, "ssl accept failed: %s", ERR_error_string(ERR_get_error(), NULL));
@@ -5213,12 +5204,12 @@ Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock, NS_TLS_SSL_CTX *ctx,
     return TCL_OK;
 }
 
-//#else
-#if 0
+#else
 
 static int
 Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
                        const char *cert, const char *caFile, const char *caPath, int verify,
+                       const char *ciphers,
                        NS_TLS_SSL_CTX **ctxPtr)
 {
     Ns_TclPrintfResult(interp, "CtxCreate failed: no support for OpenSSL built in");
