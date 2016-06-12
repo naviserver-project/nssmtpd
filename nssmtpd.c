@@ -413,9 +413,11 @@ static int SmtpdFlags(const char *name);
 
 static int Ns_TLS_CtxServerCreate(Tcl_Interp *interp, const char *cert,
                                   const char *caFile, const char *caPath,
-                                  int verify, const char *ciphers, NS_TLS_SSL_CTX **ctxPtr);
+                                  int verify, const char *ciphers, NS_TLS_SSL_CTX **ctxPtr)
+    NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(7);
 static int Ns_TLS_SSLAccept(Tcl_Interp *interp, NS_SOCKET sock,
-                            NS_TLS_SSL_CTX *ctx, NS_TLS_SSL **sslPtr);
+                            NS_TLS_SSL_CTX *ctx, NS_TLS_SSL **sslPtr)
+        NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(3) NS_GNUC_NONNULL(4);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
@@ -986,6 +988,7 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
             NS_TLS_SSL_CTX *ctx;
             NS_TLS_SSL *ssl;
+            int result;
 
             conn->cmd = SMTP_STARTTLS;
 
@@ -993,7 +996,7 @@ static void SmtpdThread(smtpdConn *conn)
                 goto error;
             }
 
-            int result = Ns_TLS_CtxServerCreate(
+            result = Ns_TLS_CtxServerCreate(
                 conn->interp,
                 conn->config->certificate,
                 conn->config->cafile,
@@ -1456,7 +1459,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     smtpdRcpt *rcpt;
     smtpdConn *relay;
     Ns_Time timeout = { conn->config->writetimeout, 0 };
-    int size = 0, vcount = 0;
+    int size = 0, vcount = 0, hasStarttls = 0;
     Ns_Conn *nsconn = Ns_GetConn();
 
     Ns_Log(SmtpdDebug,"====== SmtpdRelayData");
@@ -1504,7 +1507,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
         goto error421;
     }
-    int hasStarttls = 0;
+    hasStarttls = 0;
     do {
         int nread = SmtpdReadLine(relay, &relay->line);
         if (nread <= 0) {
@@ -5081,6 +5084,7 @@ Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
                        NS_TLS_SSL_CTX **ctxPtr)
 {
     NS_TLS_SSL_CTX *ctx;
+    int rc;
 
     NS_NONNULL_ASSERT(interp != NULL);
     NS_NONNULL_ASSERT(ctxPtr != NULL);
@@ -5092,9 +5096,14 @@ Ns_TLS_CtxServerCreate(Tcl_Interp *interp,
         return TCL_ERROR;
     }
 
-    int rc = SSL_CTX_set_cipher_list(ctx, ciphers);
+    rc = SSL_CTX_set_cipher_list(ctx, ciphers);
     if (!rc) {
         Ns_TclPrintfResult(interp, "ctx cipher list failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        return TCL_ERROR;
+    }
+
+    if (cert == NULL && caFile == NULL) {
+        Ns_TclPrintfResult(interp, "At least one of certificate or cafile must be speciied!");
         return TCL_ERROR;
     }
 
