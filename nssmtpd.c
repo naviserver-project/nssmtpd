@@ -143,7 +143,7 @@ typedef struct _smtpdConfig {
     unsigned int id;
     unsigned int flags;
     int debug;
-    int bufsize;
+    size_t bufsize;
     int maxline;
     int maxdata;
     int maxrcpt;
@@ -205,7 +205,7 @@ typedef struct _smtpdConn {
         smtpdHdr *headers;
     } body;
     struct {
-        int pos;
+        ssize_t pos;
         char *ptr;
         char data[1];
     } buf;
@@ -445,6 +445,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
 {
     char *path, *addr2, *portString;
     const char *addr;
+    int bufsize;
     smtpdRelay *relay;
     Ns_DriverInitData init = {0};
     smtpdConfig *serverPtr;
@@ -471,8 +472,10 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     if (!Ns_ConfigGetInt(path, "writetimeout", &serverPtr->writetimeout)) {
         serverPtr->writetimeout = 60;
     }
-    if (!Ns_ConfigGetInt(path, "bufsize", &serverPtr->bufsize)) {
+    if (!Ns_ConfigGetInt(path, "bufsize", &bufsize)) {
         serverPtr->bufsize = 1024 * 4;
+    } else {
+        serverPtr->bufsize = (size_t) bufsize;
     }
     if (!Ns_ConfigGetInt(path, "maxrcpt", &serverPtr->maxrcpt)) {
         serverPtr->maxrcpt = 100;
@@ -981,9 +984,10 @@ static void SmtpdThread(smtpdConn *conn)
 
 #ifdef HAVE_OPENSSL_EVP_H
         if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
-            conn->cmd = SMTP_STARTTLS;
             NS_TLS_SSL_CTX *ctx;
             NS_TLS_SSL *ssl;
+
+            conn->cmd = SMTP_STARTTLS;
 
             if (SmtpdPuts(conn, "220 Go Ahead\r\n") != NS_OK) {
                 goto error;
@@ -1277,7 +1281,6 @@ static void SmtpdThread(smtpdConn *conn)
             continue;
         }
         if (SmtpdPuts(conn, "500 Command unrecognised\r\n") != NS_OK) {
-            Ns_Log(SmtpdDebug, "Unrecognized command: %s", conn->line.string);
             goto error;
         }
     }
@@ -1932,7 +1935,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             if (conn->buf.pos > len) {
                 n = len;
             } else {
-                n = conn->buf.pos;
+                n = (int) conn->buf.pos;
             }
             memcpy(buf, conn->buf.ptr, (unsigned int) n);
             conn->buf.ptr += n;
@@ -1944,7 +1947,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
 
-            conn->buf.pos = (int)SmtpdRecv(conn->sock, conn->buf.data, (size_t)conn->config->bufsize, &timeout);
+            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout);
 
             if (conn->buf.pos <= 0) {
                 return -1;
@@ -1997,7 +2000,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
 #endif
     }
 
-    Ns_Log(Ns_LogTaskDebug, "HttpTaskSend sent %ld bytes (from %lu)", sent, length);
+    Ns_Log(SmtpdDebug, "SmtpdUnixSend sent %ld bytes (from %lu)", sent, length);
     return sent;
 }
 
