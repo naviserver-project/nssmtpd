@@ -173,7 +173,7 @@ typedef struct _smtpdConfig {
     struct cl_limits ClamAvLimits;
 #endif
 #ifdef HAVE_OPENSSL_EVP_H
-    char *certchainfile;
+    char *certificate;
     char *cafile;
     char *capath;
     char *ciphers;
@@ -494,7 +494,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
 
 #ifdef HAVE_OPENSSL_EVP_H
-    serverPtr->certchainfile = ns_strcopy(Ns_ConfigGetValue(path, "certchainfile"));
+    serverPtr->certificate = ns_strcopy(Ns_ConfigGetValue(path, "certificate"));
     serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(path, "cafile"));
     serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(path, "capath"));
     serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(path, "ciphers"));
@@ -991,7 +991,7 @@ static void SmtpdThread(smtpdConn *conn)
 
             int result = Ns_TLS_CtxServerCreate(
                 conn->interp,
-                conn->config->certchainfile,
+                conn->config->certificate,
                 conn->config->cafile,
                 conn->config->capath,
                 0 /*verify*/,
@@ -1536,7 +1536,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         }
         int result = Ns_TLS_CtxClientCreate(
             relay->interp,
-            conn->config->certchainfile,
+            conn->config->certificate,
             conn->config->cafile,
             conn->config->capath,
             0 /*verify*/,
