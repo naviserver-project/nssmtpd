@@ -415,7 +415,7 @@ NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 
 // Free list of connection structures
-static smtpdConn *connList = 0;
+static smtpdConn *connList = NULL;
 static Ns_Mutex connLock;
 static int segvTimeout;
 static char hex[] = "0123456789ABCDEF";
@@ -425,10 +425,10 @@ int dnsDebug = 0;
 int dnsTTL = 86400;
 
 static Ns_Mutex dnsMutex;
-static dnsServer *dnsServers = 0;
+static dnsServer *dnsServers  = NULL;
 static int dnsResolverRetries = 3;
 static int dnsResolverTimeout = 5;
-static int dnsFailureTimeout = 300;
+static int dnsFailureTimeout  = 300;
 
 // Default port
 const static int DEFAULT_PORT = 25;
@@ -502,7 +502,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
         char *n;
         while (addr) {
             if ((n = strchr(addr, ','))) {
-                *n++ = 0;
+                *n++ = '\0';
             }
             serverPtr->flags |= SmtpdFlags(addr);
             addr = n;
@@ -1058,7 +1058,7 @@ static void SmtpdThread(smtpdConn *conn)
                     SmtpdConnReset(conn);
                     continue;
                 }
-                *data = 0;
+                *data = '\0';
             }
             data = Ns_StrTrim(&conn->line.string[10]);
             /* Email address verification */
@@ -1259,7 +1259,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             /* No reply in relay mode */
             if (config->relayhost) {
-                for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+                for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
                     if ((rcpt->flags & SMTPD_VERIFIED) == 0u) {
                         break;
                     }
@@ -1339,14 +1339,15 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     return conn;
 }
 
-static void SmtpdConnReset(smtpdConn *conn)
+static void
+SmtpdConnReset(smtpdConn *conn)
 {
     //Ns_Log(SmtpdDebug,"SmtpdConnReset");
 
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
-    ns_free(conn->from.addr), conn->from.addr = 0;
-    ns_free(conn->from.data), conn->from.data = 0;
+    ns_free(conn->from.addr), conn->from.addr = NULL;
+    ns_free(conn->from.data), conn->from.data = NULL;
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringTrunc(&conn->reply, 0);
     Ns_DStringTrunc(&conn->body.data, 0);
@@ -1385,7 +1386,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "nssmtpd: %d/%d: HOST: %s/%s", conn->id, getpid(), conn->host, Ns_ConnPeer(nsconn));
     Ns_DStringPrintf(&conn->line, ", FLAGS: 0x%X, FROM: %s, RCPT: ", conn->flags, conn->from.addr);
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "%s(0x%X/%.2f), ", rcpt->addr, rcpt->flags, rcpt->spam_score);
     }
     Ns_DStringPrintf(&conn->line, "SIZE: %d/%d", conn->body.data.length, conn->body.offset);
@@ -1396,7 +1397,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
      */
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "SEND /%s SMTP/1.0", conn->from.addr ? conn->from.addr : "Null");
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "/%s", rcpt->addr);
     }
     ns_free((char *)nsconn->request.line);
@@ -1465,12 +1466,12 @@ SmtpdRelayData(smtpdConn *conn, char *host, int port)
      * If we have single recipient use recipient's relay otherwise for
      * different recipients use default relay.
      */
-    for (rcpt = conn->rcpt.list; host && rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; host != NULL && rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_VERIFIED) != 0u
             && rcpt->relay.host != NULL
             && strcmp(rcpt->relay.host, host)
             ) {
-            host = 0;
+            host = NULL;
             break;
         }
     }
@@ -1600,7 +1601,7 @@ SmtpdRelayData(smtpdConn *conn, char *host, int port)
     /* 
      * RCPT TO command 
      */
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_VERIFIED) == 0u) {
             continue;
         }
@@ -1660,7 +1661,7 @@ SmtpdRelayData(smtpdConn *conn, char *host, int port)
         goto error;
     }
     SmtpdConnFree(relay);
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_VERIFIED) != 0u) {
             rcpt->flags |= SMTPD_DELIVERED;
         }
@@ -1869,7 +1870,7 @@ SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
 
     Ns_Log(SmtpdDebug,"SmtpdRcptFree");
 
-    for (rcpt = conn->rcpt.list; rcpt;) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL;) {
         count++;
         if ((flags != 0u && (rcpt->flags & SMTPD_VERIFIED) != 0u)
             || (addr != NULL && !strcmp(rcpt->addr, addr))
@@ -2161,7 +2162,7 @@ static char *SmtpdStrTrim(char *str)
     }
     len = strlen(str);
     while (len-- && (isspace(str[len]) || str[len] == '>')) {
-        str[len] = 0;
+        str[len] = '\0' ;
     }
     return str;
 }
@@ -2169,7 +2170,7 @@ static char *SmtpdStrTrim(char *str)
 static char *SmtpdGetHeader(smtpdConn *conn, char *name)
 {
     smtpdHdr *hdr;
-    for (hdr = conn->body.headers; hdr; hdr = hdr->next) {
+    for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
         if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
             return hdr->value;
         }
@@ -2195,7 +2196,7 @@ static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int all
 static void SmtpdConnParseData(smtpdConn *conn)
 {
     unsigned int len, size;
-    smtpdHdr    *header = 0, *boundary = 0, *fileHdr;
+    smtpdHdr    *header = NULL, *boundary = NULL, *fileHdr;
     char        *body, *end, *line, *hdr, *ptr;
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
     unsigned int encodingSize, contentSize;
@@ -2255,7 +2256,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
             if (!strcasecmp(header->name, "Content-Type")) {
                 if ((ptr = SmtpdStrPos(header->value, "boundary="))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
-                    for (line = ptr; *line && *line != '\n' && *line != '\r' && *line != '"'; line++);
+                    for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     header = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
                     header->name = (char *) ns_calloc(1, (unsigned) (line - ptr) + 3);
                     memcpy(header->name, "--", 2);
@@ -2345,7 +2346,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 hdr += 20;
                 if ((ptr = SmtpdStrNPos(hdr, "filename=", end - hdr))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
-                    for (line = ptr; *line && *line != '\n' && *line != '\r' && *line != '"'; line++);
+                    for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     if (!fileHdr) {
                         fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
                         fileHdr->next = conn->body.headers;
@@ -2374,7 +2375,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
 #endif
                 if ((ptr = SmtpdStrNPos(contentType, "boundary=", end - contentType))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
-                    for (line = ptr; *line && *line != '\n' && *line != '\r' && *line != '"'; line++);
+                    for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     header = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
                     header->name = ns_calloc(1, (unsigned) (line - ptr) + 3);
                     memcpy(header->name, "--", 2);
@@ -2384,7 +2385,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 }
                 if (!fileHdr && (ptr = SmtpdStrNPos(hdr, "name=", end - hdr))) {
                     for (ptr += 5; *ptr == ' ' || *ptr == '"'; ptr++);
-                    for (line = ptr; *line && *line != '\n' && *line != '\r' && *line != '"'; line++);
+                    for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
                     fileHdr->next = conn->body.headers;
                     conn->body.headers = fileHdr;
@@ -2605,7 +2606,7 @@ static int SmtpdCheckDomain(smtpdConn *conn, char *domain)
         return 1;
     }
     if ((reply = dnsLookup(domain, DNS_TYPE_A, 0))) {
-        for (rec = reply->anlist; rec && rec->type != DNS_TYPE_A; rec = rec->next);
+        for (rec = reply->anlist; rec != NULL && rec->type != DNS_TYPE_A; rec = rec->next);
         dnsPacketFree(reply, 0);
         if (rec) {
             return 1;
@@ -2613,7 +2614,7 @@ static int SmtpdCheckDomain(smtpdConn *conn, char *domain)
         reply = 0;
     }
     if (!reply && (reply = dnsLookup(domain, DNS_TYPE_MX, 0))) {
-        for (rec = reply->anlist; rec && rec->type != DNS_TYPE_MX; rec = rec->next);
+        for (rec = reply->anlist; rec != NULL && rec->type != DNS_TYPE_MX; rec = rec->next);
         dnsPacketFree(reply, 0);
         if (rec) {
             return 1;
@@ -2632,7 +2633,7 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, int *
     smtpdRelay *relay;
 
     Ns_MutexLock(&conn->config->relaylock);
-    for (relay = conn->config->relaylist; relay; relay = relay->next) {
+    for (relay = conn->config->relaylist; relay != NULL; relay = relay->next) {
         char *p, *s;
 
         p = &addr->domain[strlen(addr->domain) - 1];
@@ -2685,7 +2686,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     if (!conn->config->spamdhost)
         return 0;
     /* Should have at least one unverified recipient */
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_DELIVERED) == 0u
             && ((rcpt->flag & SMTPD_SPAMCHECK) != 0u)
             ) {
@@ -2733,7 +2734,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     rc = strstr(spamd->line.string, "True") ? SMTPD_GOTSPAM : 0;
     score = atof(++p);
     // Update all recipients with spam score/status
-    for (; rcpt; rcpt = rctp->next) {
+    for (; rcpt != NULL; rcpt = rctp->next) {
         if ((rcpt->flags & SMTPD_DELIVERED) != 0u || (rcpt->flag & SMTPD_SPAMCHECK) == 0u) {
             continue;
         }
@@ -2756,7 +2757,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     smtpdRcpt *rcpt;
 
     /* Check spam for each recipient */
-    for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_DELIVERED) != 0u || (rcpt->flags & SMTPD_SPAMCHECK) == 0u) {
             continue;
         }
@@ -2798,7 +2799,7 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
     CISavi3 *pSAVI;
     unsigned long virusType;
     unsigned long pcFetched;
-    CISweepResults *pResults = 0;
+    CISweepResults *pResults = NULL;
     unsigned long isDisinfectable;
     CISweepClassFactory2 *pFactory;
     CIEnumSweepResults *pEnumResults;
@@ -2873,7 +2874,7 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
         }
         SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, ds.string, 1);
         pResults->pVtbl->Release(pResults);
-        pResults = 0;
+        pResults = NULL;
     }
     Ns_DStringFree(&ds);
     if (pResults) {
@@ -2999,9 +3000,9 @@ static int SmtpdFlags(const char *name)
 
 static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 {
-    char *name = 0;
+    char *name = NULL;
     smtpdRcpt *rcpt;
-    smtpdConn *conn = 0;
+    smtpdConn *conn = NULL;
     Tcl_HashEntry *rec;
     smtpdConfig *config = arg;
     int cmd, id, index = -99, count = 0;
@@ -3220,7 +3221,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 conn = Tcl_GetHashValue(rec);
                 Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(conn->id));
                 Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(conn->from.addr, -1));
-                for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+                for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
                     Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(rcpt->addr, -1));
                     Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(rcpt->flags));
                 }
@@ -3295,7 +3296,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             Tcl_Obj *list = Tcl_NewListObj(0, 0);
             
             Ns_MutexLock(&config->relaylock);
-            for (relay = config->relaylist; relay; relay = relay->next) {
+            for (relay = config->relaylist; relay != NULL; relay = relay->next) {
                 Tcl_Obj *obj = Tcl_NewStringObj(relay->name, -1);
                 
                 if (relay->host) {
@@ -3324,9 +3325,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 relay = ns_calloc(1, sizeof(smtpdRelay));
                 relay->name = ns_strdup(Tcl_GetString(objv[i]));
                 if ((relay->host = strchr(relay->name, ':'))) {
-                    *relay->host++ = 0;
+                    *relay->host++ = '\0';
                     if ((p = strchr(relay->host, ':'))) {
-                        *p++ = 0;
+                        *p++ = '\0';
                         relay->port = atoi(p);
                     }
                 }
@@ -3361,7 +3362,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             }
             Ns_MutexLock(&config->locallock);
             if ((addr = SmtpdParseIpaddr(Tcl_GetString(objv[3])))) {
-                for (end = config->local; end && end->next; end = end->next);
+                for (end = config->local; end != NULL && end->next; end = end->next);
                 if (end)
                     end->next = addr;
                 else
@@ -3409,7 +3410,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             Tcl_Obj     *list = Tcl_NewListObj(0, 0);
             
             Ns_MutexLock(&config->locallock);
-            for (addr = config->local; addr; addr = addr->next) {
+            for (addr = config->local; addr != NULL; addr = addr->next) {
                 char     ipString[NS_IPADDR_SIZE];
                 Tcl_Obj *obj;
                 struct sockaddr *saPtr;
@@ -3429,7 +3430,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
         } else
         if (!strcasecmp("set", Tcl_GetString(objv[2]))) {
             int i;
-            smtpdIpaddr *addr, *end = 0;
+            smtpdIpaddr *addr, *end = NULL;
             
             Ns_MutexLock(&config->locallock);
             while (config->local) {
@@ -3444,7 +3445,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                     } else {
                         config->local = addr;
                     }
-                    for (end = addr; end->next; end = end->next);
+                    for (end = addr; end->next != NULL; end = end->next);
                 }
             }
             Ns_MutexUnlock(&config->locallock);
@@ -3499,7 +3500,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 return TCL_ERROR;
             }
             name = Tcl_GetString(objv[3]);
-            for (hdr = conn->body.headers; hdr; hdr = hdr->next) {
+            for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
                 if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
                     Tcl_SetObjResult(interp, Tcl_NewStringObj(hdr->value, -1));
                     break;
@@ -3514,7 +3515,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             if (objc > 3) {
                 name = Tcl_GetString(objv[3]);
             }
-            for (hdr = conn->body.headers; hdr; hdr = hdr->next) {
+            for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
                 if (objc > 3) {
                     if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
                         Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(hdr->value, -1));
@@ -3547,7 +3548,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             }
             if ((fp = fopen(Tcl_GetString(objv[3]), "a"))) {
                 fprintf(fp, "From: %s\n", conn->from.addr);
-                for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
+                for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
                     fprintf(fp, "To: %s\n", rcpt->addr);
                 }
                 fputs("\n", fp);
@@ -3598,7 +3599,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                     }
                 }
             }
-            for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+            for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
                 if (objc > 3) {
                     if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                         Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(rcpt->addr, -1));
@@ -3627,7 +3628,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 }
             }
         }
-        for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+        for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                 Tcl_SetObjResult(interp, Tcl_NewStringObj(rcpt->data, -1));
                 break;
@@ -3646,7 +3647,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 return TCL_ERROR;
             }
         }
-        for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+        for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                 ns_free(rcpt->data);
                 rcpt->data = ns_strcopy(Tcl_GetString(objv[4]));
@@ -3685,7 +3686,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 break;
             }
             /* Set recipient's flags */
-            for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+            for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
                 if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                     if (flags > 0) {
                         rcpt->flags |= flags;
@@ -3725,7 +3726,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 break;
             }
             /* Set recipient's flags */
-            for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+            for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
                 if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                     rcpt->flags &= ~flags;
                     Tcl_SetObjResult(interp, Tcl_NewIntObj(rcpt->flags));
@@ -3752,7 +3753,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             return TCL_OK;
         }
         /* Recipient's flags */
-        for (count = 0, rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next, count++) {
+        for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                 Tcl_SetObjResult(interp, Tcl_NewIntObj(rcpt->flags));
                 return TCL_OK;
@@ -4073,7 +4074,7 @@ static int parseDomain(char **inp, char **domainp, char **commentp)
     char *src = *inp, *dst, *cdst;
 
     if (commentp) {
-        *commentp = 0;
+        *commentp = NULL;
     }
     src = parseSpace(src);
     *domainp = dst = src;
@@ -4083,7 +4084,7 @@ static int parseDomain(char **inp, char **domainp, char **commentp)
         if (isalnum(c) || c == '-' || c == '[' || c == ']') {
             *dst++ = c;
             if (commentp) {
-                *commentp = 0;
+                *commentp = NULL;
             }
         } else
         if (c == '.') {
@@ -4091,7 +4092,7 @@ static int parseDomain(char **inp, char **domainp, char **commentp)
                 *dst++ = c;
             }
             if (commentp) {
-                *commentp = 0;
+                *commentp = NULL;
             }
         } else
         if (c == '(') {
@@ -4156,7 +4157,7 @@ static int parseRoute(char **inp, char **routep)
             while (dst > *routep && (dst[-1] == '.' || dst[-1] == ',' || dst[-1] == '@')) {
                 dst--;
             }
-            *dst = 0;
+            *dst = '\0';
             *inp = src;
             return c;
         }
@@ -4247,7 +4248,7 @@ static char *decodehex(const char *str, int *len)
     *len = strlen(str) / 2;
 
     t = p = ns_calloc(1, *len);
-    for (s = (char *) str; *s && c < *len; c++) {
+    for (s = (char *) str; *s != '\0' && c < *len; c++) {
         if (!isxdigit(*s) || !isxdigit(*(s + 1))) {
             ns_free(p);
             return 0;
@@ -4462,12 +4463,12 @@ static void dnsInit(char *name, ...)
         while ((s = va_arg(ap, char *))) {
             while (s) {
                 if ((n = strchr(s, ','))) {
-                    *n++ = 0;
+                    *n++ = '\0' ;
                 }
                 server = ns_calloc(1, sizeof(dnsServer));
                 server->name = ns_strdup(s);
                 //server->ipaddr = inet_addr(s);
-                for (next = dnsServers; next && next->next; next = next->next);
+                for (next = dnsServers; next != NULL && next->next != NULL; next = next->next);
                 if (!next) {
                     dnsServers = server;
                 } else {
@@ -4501,7 +4502,7 @@ static dnsPacket *dnsLookup(char *name, int type, int *errcode)
     fd_set fds;
     char buf[DNS_BUFSIZE];
     struct timeval tv;
-    dnsServer *server = 0;
+    dnsServer *server = NULL;
     dnsPacket *req, *reply;
     int sock = NS_INVALID_SOCKET, len;
 
@@ -4675,7 +4676,7 @@ static dnsRecord *dnsRecordAppend(dnsRecord ** list, dnsRecord *pkt)
     if (!list || !pkt) {
         return 0;
     }
-    for (; *list; list = &(*list)->next);
+    for (; *list != '\0'; list = &(*list)->next);
     *list = pkt;
     return *list;
 }
@@ -4717,10 +4718,10 @@ static int dnsParseName(dnsPacket *pkt, char **ptr, char *buf, int buflen, int p
         }
         buf[pos++] = '.';
     }
-    buf[pos] = 0;
+    buf[pos] = '\0';
     // Remove last . in the name
     if (buf[pos - 1] == '.') {
-        buf[pos - 1] = 0;
+        buf[pos - 1] = '\0' ;
     }
     return pos;
 }
@@ -4923,7 +4924,7 @@ static void dnsEncodeName(dnsPacket *pkt, char *name)
                 break;
             }
             // Find already saved domain name
-            for (nm = pkt->nmlist; nm; nm = nm->next) {
+            for (nm = pkt->nmlist; nm != NULL; nm = nm->next) {
                 if (!strcasecmp(nm->name, &name[k])) {
                     dnsEncodePtr(pkt, nm->offset);
                     return;
@@ -4945,7 +4946,7 @@ static void dnsEncodeName(dnsPacket *pkt, char *name)
             }
         }
     }
-    *pkt->buf.ptr++ = 0;
+    *pkt->buf.ptr++ = '\0';
 }
 
 static void dnsEncodeHeader(dnsPacket *pkt)
@@ -4964,7 +4965,7 @@ static void dnsEncodeHeader(dnsPacket *pkt)
 
 static void dnsEncodePtr(dnsPacket *pkt, int offset)
 {
-    *pkt->buf.ptr++ = 0xC0 | (offset >> 8);
+    *pkt->buf.ptr++ = (0xC0 | (offset >> 8));
     *pkt->buf.ptr++ = (offset & 0xFF);
 }
 
@@ -5003,7 +5004,7 @@ static void dnsEncodeRecord(dnsPacket *pkt, dnsRecord *list)
 {
     Ns_Log(SmtpdDebug, "dnsEncodeRecord");
     dnsEncodeGrow(pkt, 12, "pkt:hdr");
-    for (; list; list = list->next) {
+    for (; list != NULL; list = list->next) {
         dnsEncodeName(pkt, list->name);
         dnsEncodeGrow(pkt, 16, "pkt:data");
         dnsEncodeShort(pkt, list->type);
