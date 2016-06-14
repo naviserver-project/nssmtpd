@@ -44,6 +44,12 @@
 #include <dspam/libdspam.h>
 #endif
 
+#ifdef HAVE_OPENSSL_EVP_H
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
@@ -56,6 +62,7 @@
 #define SMTP_HELP           9
 #define SMTP_NOOP           10
 #define SMTP_READ           11
+#define SMTP_STARTTLS       12
 
 /* Server flags */
 #define SMTPD_VERIFIED       0x0000001
@@ -74,6 +81,7 @@
 #define SMTPD_GOTMAIL        0x0040000
 #define SMTPD_GOTSPAM        0x0080000
 #define SMTPD_GOTVIRUS       0x0100000
+#define SMTPD_GOTSTARTTLS    0x0200000
 
 #define SMTPD_VERSION              "2.1"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
@@ -135,7 +143,7 @@ typedef struct _smtpdConfig {
     unsigned int id;
     unsigned int flags;
     int debug;
-    int bufsize;
+    size_t bufsize;
     int maxline;
     int maxdata;
     int maxrcpt;
@@ -164,6 +172,12 @@ typedef struct _smtpdConfig {
     struct cl_node *ClamAvRoot;
     struct cl_limits ClamAvLimits;
 #endif
+#ifdef HAVE_OPENSSL_EVP_H
+    char *certificate;
+    char *cafile;
+    char *capath;
+    char *ciphers;
+#endif
 } smtpdConfig;
 
 typedef struct _smtpdConn {
@@ -191,7 +205,7 @@ typedef struct _smtpdConn {
         smtpdHdr *headers;
     } body;
     struct {
-        int pos;
+        ssize_t pos;
         char *ptr;
         char data[1];
     } buf;
@@ -376,7 +390,9 @@ static char *SmtpdGetHeader(smtpdConn *conn, char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
+static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr);
 static int SmtpdRead(smtpdConn *conn, void *vbuf, int len);
+static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length);
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len);
 static int SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
 static int SmtpdPuts(smtpdConn *conn, char *string);
@@ -414,12 +430,16 @@ static int dnsResolverRetries = 3;
 static int dnsResolverTimeout = 5;
 static int dnsFailureTimeout = 300;
 
+// Default port
+const static int DEFAULT_PORT = 25;
+
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
 NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
 {
     char *path, *addr2, *portString;
     const char *addr;
+    int bufsize;
     smtpdRelay *relay;
     Ns_DriverInitData init = {0};
     smtpdConfig *serverPtr;
@@ -435,7 +455,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
     
     if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
-        serverPtr->port = 25;
+        serverPtr->port = DEFAULT_PORT;
     }
     if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
@@ -446,8 +466,10 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     if (!Ns_ConfigGetInt(path, "writetimeout", &serverPtr->writetimeout)) {
         serverPtr->writetimeout = 60;
     }
-    if (!Ns_ConfigGetInt(path, "bufsize", &serverPtr->bufsize)) {
+    if (!Ns_ConfigGetInt(path, "bufsize", &bufsize)) {
         serverPtr->bufsize = 1024 * 4;
+    } else {
+        serverPtr->bufsize = (size_t) bufsize;
     }
     if (!Ns_ConfigGetInt(path, "maxrcpt", &serverPtr->maxrcpt)) {
         serverPtr->maxrcpt = 100;
@@ -467,6 +489,13 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     serverPtr->dataproc = Ns_ConfigGetValue(path, "dataproc");
     serverPtr->errorproc = Ns_ConfigGetValue(path, "errorproc");
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
+
+#ifdef HAVE_OPENSSL_EVP_H
+    serverPtr->certificate = ns_strcopy(Ns_ConfigGetValue(path, "certificate"));
+    serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(path, "cafile"));
+    serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(path, "capath"));
+    serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(path, "ciphers"));
+#endif
 
     /* Parse flags */
     if ((addr = Ns_ConfigGetValue(path, "flags"))) {
@@ -500,7 +529,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     }
 
     /* SMTP relay support */
-    serverPtr->relayport = 25;
+    serverPtr->relayport = DEFAULT_PORT;
     if (serverPtr->relayhost != NULL) {
         Ns_HttpParseHost(serverPtr->relayhost, &serverPtr->relayhost, &portString);
         if (portString != NULL) {
@@ -535,7 +564,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     init.arg = serverPtr;
     init.path = path;
     init.protocol = "smtp";
-    init.defaultPort = 25;
+    init.defaultPort = DEFAULT_PORT;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
 	ns_free(path);
@@ -928,6 +957,11 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringInit(&conn->line);
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
+#ifdef HAVE_OPENSSL_EVP_H
+                    if (!(conn->flags & SMTPD_GOTSTARTTLS)) {
+                        Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
+                    }
+#endif
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
@@ -941,6 +975,51 @@ static void SmtpdThread(smtpdConn *conn)
             conn->flags |= SMTPD_GOTHELO;
             continue;
         }
+
+#ifdef HAVE_OPENSSL_EVP_H
+        if (!strncasecmp(conn->line.string, "STARTTLS", 8)) {
+            NS_TLS_SSL_CTX *ctx;
+            NS_TLS_SSL *ssl;
+            int result;
+
+            conn->cmd = SMTP_STARTTLS;
+
+            if (SmtpdPuts(conn, "220 Go Ahead\r\n") != NS_OK) {
+                goto error;
+            }
+
+            result = Ns_TLS_CtxServerCreate(
+                conn->interp,
+                conn->config->certificate,
+                conn->config->cafile,
+                conn->config->capath,
+                0 /*verify*/,
+                conn->config->ciphers,
+                &ctx);
+            Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
+
+            if (likely(result == TCL_OK)) {
+                /*
+                 * Establish the SSL/TLS connection.
+                 */
+                result = Ns_TLS_SSLAccept(conn->interp, conn->sock->sock, ctx, &ssl);
+                Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept result=%d", result);
+                if (result != TCL_OK) {
+                    Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept failed");
+                    goto error;
+                }
+                conn->sock->arg = ssl;
+            } else {
+                goto error;
+            }
+            Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
+
+            conn->flags &= ~(SMTPD_GOTHELO);
+            conn->flags |= (SMTPD_GOTSTARTTLS);
+
+            continue;
+        }
+#endif
 
         if (!strncasecmp(conn->line.string, "RSET", 4)) {
             conn->cmd = SMTP_RSET;
@@ -1243,7 +1322,7 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     Ns_CloseOnExec(sock->sock);
     Ns_SockSetNonBlocking(sock->sock);
     conn->sock = sock;
-    conn->sock->arg = conn;
+    conn->sock->arg = NULL;
     conn->flags = config->flags;
 
     Ns_MutexLock(&config->lock);
@@ -1372,7 +1451,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     smtpdRcpt *rcpt;
     smtpdConn *relay;
     Ns_Time timeout = { conn->config->writetimeout, 0 };
-    int size = 0, vcount = 0;
+    int size = 0, vcount = 0, hasStarttls = 0;
     Ns_Conn *nsconn = Ns_GetConn();
 
     Ns_Log(SmtpdDebug,"====== SmtpdRelayData");
@@ -1390,7 +1469,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         port = conn->config->relayport;
     }
     if (!port) {
-        port = 25;
+        port = DEFAULT_PORT;
     }
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
         Ns_Log(Error, "nssmtpd: relay: %d/%d: Unable to connect to %s:%d: %s",
@@ -1414,18 +1493,72 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         return -1;
     }
 
-    /* HELO command */
+    /* EHLO command */
     Ns_DStringTrunc(&conn->line, 0);
-    Ns_DStringPrintf(&conn->line, "HELO %s\r\n", Ns_InfoHostname());
+    Ns_DStringPrintf(&conn->line, "EHLO %s\r\n", Ns_InfoHostname());
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
         goto error421;
     }
-    if (SmtpdReadLine(relay, &relay->line) <= 0) {
-        goto error421;
+    hasStarttls = 0;
+    do {
+        int nread = SmtpdReadLine(relay, &relay->line);
+        if (nread <= 0) {
+            goto error421;
+        }
+        if (strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
+            hasStarttls = 1;
+        }
+        if (relay->line.string[0] != '2') {
+            goto errorrelay;
+        }
+    } while (relay->line.string[3] != ' ');
+
+    /* If STARTTLS available attempt it. */
+#ifdef HAVE_OPENSSL_EVP_H
+    if (hasStarttls) {
+
+        Ns_DStringTrunc(&conn->line, 0);
+        Ns_DStringPrintf(&conn->line, "STARTTLS\r\n");
+        if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
+            goto error421;
+        }
+        if (SmtpdReadLine(relay, &relay->line) <= 0 || relay->line.string[0] != '2') {
+            goto error421;
+        }
+
+        NS_TLS_SSL_CTX *ctx;
+        NS_TLS_SSL     *ssl;
+
+        if (relay->interp == NULL) {
+            relay->interp = conn->interp;
+        }
+        int result = Ns_TLS_CtxClientCreate(
+            relay->interp,
+            conn->config->certificate,
+            conn->config->cafile,
+            conn->config->capath,
+            0 /*verify*/,
+            &ctx);
+
+        if (likely(result == TCL_OK)) {
+            /*
+             * Make sure, the socket is in a writable state.
+             */
+
+            if (Ns_SockTimedWait(relay->sock->sock, NS_SOCK_WRITE|NS_SOCK_READ, &timeout) != NS_OK) {
+                goto error421;
+            };
+            /*
+             * Establish the SSL/TLS connection.
+             */
+            result = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, &ssl);
+            relay->sock->arg = ssl;
+        }
+        if (unlikely(result != TCL_OK)) {
+            goto error421;
+        }
     }
-    if (relay->line.string[0] != '2') {
-        goto errorrelay;
-    }
+#endif
 
     /* MAIL FROM command */
     Ns_DStringTrunc(&conn->line, 0);
@@ -1561,7 +1694,7 @@ static int SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender
         port = config->relayport;
     }
     if (!port) {
-        port = 25;
+        port = DEFAULT_PORT;
     }
 
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
@@ -1730,6 +1863,58 @@ static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int f
     }
 }
 
+static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
+{
+    ssize_t       received;
+
+    NS_NONNULL_ASSERT(sock != NULL);
+    NS_NONNULL_ASSERT(buffer != NULL);
+again:
+    if (sock->arg == NULL) {
+        received = ns_recv(sock->sock, buffer, length, 0);
+    } else {
+#ifdef HAVE_OPENSSL_EVP_H
+        SSL *ssl = (SSL *)sock->arg;
+
+        received = 0;
+        for (;;) {
+            int n = 0, err;
+
+            n = SSL_read(ssl, buffer+received, (int)(length - (size_t)received));
+            err = SSL_get_error(ssl, n);
+            switch (err) {
+            case SSL_ERROR_NONE:
+                if (n < 0) {
+                    Ns_Log(Error, "SSL_read failed but no error, should not happen");
+                    break;
+                }
+                received += n;
+                break;
+
+            case SSL_ERROR_WANT_READ:
+                if (n < 0) {
+                    continue;
+                }
+                received += n;
+                continue;
+            }
+            break;
+        }
+#else
+        received = -1;
+#endif
+    }
+
+    if (received == -1 && errno == EWOULDBLOCK) {
+        if (Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr) == NS_OK) {
+            goto again;
+        }
+    }
+
+    Ns_Log(Ns_LogTaskDebug, "HttpTaskRecv received %ld bytes (from %lu)", received, length);
+    return received;
+}
+
 static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
 {
     int nread, n;
@@ -1745,7 +1930,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             if (conn->buf.pos > len) {
                 n = len;
             } else {
-                n = conn->buf.pos;
+                n = (int) conn->buf.pos;
             }
             memcpy(buf, conn->buf.ptr, (unsigned int) n);
             conn->buf.ptr += n;
@@ -1756,7 +1941,9 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
         if (len > 0) {
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
-            conn->buf.pos = Ns_SockRecv(conn->sock->sock, conn->buf.data, conn->config->bufsize, &timeout);
+
+            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout);
+
             if (conn->buf.pos <= 0) {
                 return -1;
             }
@@ -1765,17 +1952,63 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
     return nread;
 }
 
+static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
+{
+    ssize_t       sent;
+
+    NS_NONNULL_ASSERT(sock != NULL);
+    NS_NONNULL_ASSERT(buffer != NULL);
+
+    if (sock->arg == NULL) {
+        sent = ns_send(sock->sock, buffer, length, 0);
+    } else {
+#ifdef HAVE_OPENSSL_EVP_H
+        struct iovec  iov;
+        (void) Ns_SetVec(&iov, 0, buffer, length);
+
+        SSL *ssl = (SSL *)sock->arg;
+        sent = 0;
+        for (;;) {
+            int     err;
+            ssize_t n;
+
+            n = SSL_write(ssl, iov.iov_base, (int)iov.iov_len);
+            err = SSL_get_error(ssl, n);
+            if (err == SSL_ERROR_WANT_WRITE) {
+                Ns_Time timeout = { 0, 10000 }; /* 10ms */
+
+                Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout);
+                continue;
+            }
+            if (likely(n > -1)) {
+                sent += n;
+
+                if (((size_t)n < iov.iov_len)) {
+                    Ns_ResetVec(&iov, 1, (size_t)n);
+                    continue;
+                }
+            }
+            break;
+        }
+#else
+        sent = -1;
+#endif
+    }
+
+    Ns_Log(SmtpdDebug, "SmtpdUnixSend sent %ld bytes (from %lu)", sent, length);
+    return sent;
+}
+
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
 {
     int nwrote;
     char *buf;
-    Ns_Time timeout = { conn->config->writetimeout, 0 };
 
     nwrote = len;
     buf = vbuf;
     while (len > 0) {
-        int n = Ns_SockSend(conn->sock->sock, buf, len, &timeout);
-	
+        ssize_t n = SmtpdUnixSend(conn->sock, buf, (size_t)len);
+
         if (n < 0) {
             return -1;
         }
@@ -3009,7 +3242,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 if (SmtpdCheckRelay(&conn, &addr, &host, &port)) {
                     char buf[10];
                     
-                    sprintf(buf, ":%d", port ? port : 25);
+                    sprintf(buf, ":%d", port ? port : DEFAULT_PORT);
                     Tcl_AppendResult(interp, host, buf, 0);
                     ns_free(host);
                 }

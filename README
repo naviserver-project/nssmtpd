@@ -38,6 +38,12 @@ section should already exist, so just add nssmtpd line there:
     ns_param	    relaydomains	    "localhost domain.com"
     ns_param	    localdomains	    "localhost domain.com"
 
+# For STARTTLS functionality
+    ns_param certificate "pathToYourCertificateChainFile.pem"
+    ns_param cafile ""
+    ns_param capath ""
+    ns_param ciphers "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!RC4"
+
 Once enabled, smtpd acts as SMTP server forwarding all messages to the
 configured real smtp server via "relay" parameter. For each SMTP command
 it calles configured Tcl handler which performs actual processing.
@@ -89,4 +95,3 @@ nssmptd is covered by Mozilla license.
 
 Vlad Seryakov vlad@crystalballinc.com
 Gustaf Neumann neumann@wu-wien.ac.at
-
