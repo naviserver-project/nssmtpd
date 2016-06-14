@@ -391,13 +391,13 @@ static char *SmtpdGetHeader(smtpdConn *conn, char *name);
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
 static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr);
-static int SmtpdRead(smtpdConn *conn, void *vbuf, int len);
+static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, int len);
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length);
 static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len);
 static int SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
 static int SmtpdPuts(smtpdConn *conn, char *string);
 static int SmtpdWriteData(smtpdConn *conn, char *buf, int len);
-static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr);
+static ssize_t SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr);
 static char *SmtpdStrPos(char *as1, char *as2);
 static char *SmtpdStrNPos(char *as1, char *as2, int len);
 static char *SmtpdStrTrim(char *str);
@@ -572,7 +572,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     }
 
     /* Segv/panic handler */
-    if (serverPtr->flags & SMTPD_SEGV) {
+    if ((serverPtr->flags & SMTPD_SEGV) != 0u) {
         if (!Ns_ConfigGetInt(path, "segvtimeout", &segvTimeout)) {
             segvTimeout = -1;
         }
@@ -839,7 +839,7 @@ static void SmtpdThread(smtpdConn *conn)
     Ns_Log(SmtpdDebug,"SmtpdThread");
 
     Ns_GetHostByAddr(&conn->line, Ns_ConnPeer(nsconn));
-    if (!conn->line.length && conn->flags & SMTPD_RESOLVE) {
+    if ((conn->line.length) > 0 && (conn->flags & SMTPD_RESOLVE) != 0u) {
         SmtpdPuts(conn, "421 Service not available, could not resolve the hostname");
         SmtpdConnFree(conn);
         return;
@@ -921,7 +921,7 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "HELO", 4) || !strncasecmp(conn->line.string, "EHLO", 4)) {
             conn->cmd = SMTP_HELO;
             /* Duplicate HELO RFC 1651 4.2 */
-            if (conn->flags & SMTPD_GOTHELO) {
+            if ((conn->flags & SMTPD_GOTHELO) != 0u) {
                 if (SmtpdPuts(conn, "501 Duplicate HELO\r\n") != NS_OK) {
                     goto error;
                 }
@@ -958,7 +958,7 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringPrintf(&conn->line, "250-%s\r\n", Ns_InfoHostname());
                     Ns_DStringPrintf(&conn->line, "250-SIZE %d\r\n", config->maxdata);
 #ifdef HAVE_OPENSSL_EVP_H
-                    if (!(conn->flags & SMTPD_GOTSTARTTLS)) {
+                    if ((conn->flags & SMTPD_GOTSTARTTLS) == 0u) {
                         Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
                     }
 #endif
@@ -969,7 +969,7 @@ static void SmtpdThread(smtpdConn *conn)
                     }
                 }
             }
-            if (conn->flags & SMTPD_ABORT) {
+            if ((conn->flags & SMTPD_ABORT) != 0u) {
                 break;
             }
             conn->flags |= SMTPD_GOTHELO;
@@ -1033,14 +1033,16 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "MAIL FROM:", 10)) {
             conn->cmd = SMTP_MAIL;
             /* Duplicate MAIL */
-            if (conn->flags & SMTPD_GOTMAIL) {
+            if ((conn->flags & SMTPD_GOTMAIL) != 0u) {
                 if (SmtpdPuts(conn, "501 Duplicate MAIL\r\n") != NS_OK) {
                     goto error;
                 }
                 continue;
             }
             /* HELO is required */
-            if ((config->flags & SMTPD_NEEDHELO) && !(conn->flags & SMTPD_GOTHELO)) {
+            if ((config->flags & SMTPD_NEEDHELO) != 0u
+                && (conn->flags & SMTPD_GOTHELO) == 0u
+                ) {
                 if (SmtpdPuts(conn, "503 Need HELO or EHLO\r\n") != NS_OK) {
                     goto error;
                 }
@@ -1098,7 +1100,7 @@ static void SmtpdThread(smtpdConn *conn)
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 goto error;
             }
-            if (conn->flags & SMTPD_ABORT) {
+            if ((conn->flags & SMTPD_ABORT) != 0u) {
                 break;
             }
             conn->flags |= SMTPD_GOTMAIL;
@@ -1106,13 +1108,14 @@ static void SmtpdThread(smtpdConn *conn)
         }
 
         if (!strncasecmp(conn->line.string, "RCPT TO:", 8)) {
-            char *host = 0;
-            smtpdRcpt *rcpt;
-            smtpdEmail addr;
-            int port = 0, flags = 0;
+            char         *host = NULL;
+            smtpdRcpt    *rcpt;
+            smtpdEmail    addr;
+            int           port = 0;
+            unsigned int  flags = 0u;
 
             conn->cmd = SMTP_RCPT;
-            if (!(conn->flags & SMTPD_GOTMAIL)) {
+            if ((conn->flags & SMTPD_GOTMAIL) == 0u) {
                 if (SmtpdPuts(conn, "503 Need MAIL before RCPT\r\n") != NS_OK) {
                     goto error;
                 }
@@ -1137,7 +1140,7 @@ static void SmtpdThread(smtpdConn *conn)
                 if (SmtpdCheckRelay(conn, &addr, &host, &port)) {
                     flags |= SMTPD_RELAY;
                 } else
-                if (!(conn->flags & SMTPD_LOCAL)) {
+                if ((conn->flags & SMTPD_LOCAL) == 0u) {
                     Ns_DStringPrintf(&conn->reply, "550 %s@%s... Relaying denied\r\n", addr.mailbox, addr.domain);
                     Ns_Log(Error, "nssmtpd: %d: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
                            conn->id, conn->host, Ns_ConnPeer(nsconn), addr.mailbox, addr.domain);
@@ -1179,7 +1182,7 @@ static void SmtpdThread(smtpdConn *conn)
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 goto error;
             }
-            if (conn->flags & SMTPD_ABORT) {
+            if ((conn->flags & SMTPD_ABORT) != 0u) {
                 break;
             }
             continue;
@@ -1202,7 +1205,7 @@ static void SmtpdThread(smtpdConn *conn)
                 for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
                     Ns_Log(SmtpdDebug, "DATA check rcpt <%s> %s %d -> verfied %d", rcpt->addr, rcpt->relay.host, rcpt->relay.port,
                            rcpt->flags & SMTPD_VERIFIED);
-                    if (rcpt->flags & SMTPD_VERIFIED) {
+                    if ((rcpt->flags & SMTPD_VERIFIED) != 0u) {
                         break;
                     }
                 }
@@ -1257,7 +1260,7 @@ static void SmtpdThread(smtpdConn *conn)
             /* No reply in relay mode */
             if (config->relayhost) {
                 for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
-                    if (!(rcpt->flags & SMTPD_VERIFIED)) {
+                    if ((rcpt->flags & SMTPD_VERIFIED) == 0u) {
                         break;
                     }
                 }
@@ -1268,7 +1271,7 @@ static void SmtpdThread(smtpdConn *conn)
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 goto error;
             }
-            if (conn->flags & SMTPD_ABORT) {
+            if ((conn->flags & SMTPD_ABORT) != 0u) {
                 break;
             }
             SmtpdConnPrint(conn);
@@ -1435,8 +1438,8 @@ static void SmtpdConnFree(smtpdConn *conn)
     conn->sock->sock = -1;
     SmtpdConnReset(conn);
     ns_free(conn->host);
-    conn->host = 0;
-    conn->buf.ptr = 0;
+    conn->host = NULL;
+    conn->buf.ptr = NULL;
     conn->buf.pos = 0;
 
     Ns_MutexLock(&connLock);
@@ -1445,21 +1448,28 @@ static void SmtpdConnFree(smtpdConn *conn)
     Ns_MutexUnlock(&connLock);
 }
 
-static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
+static int
+SmtpdRelayData(smtpdConn *conn, char *host, int port)
 {
-    Ns_Sock sock;
+    Ns_Sock    sock;
     smtpdRcpt *rcpt;
     smtpdConn *relay;
-    Ns_Time timeout = { conn->config->writetimeout, 0 };
-    int size = 0, vcount = 0, hasStarttls = 0;
-    Ns_Conn *nsconn = Ns_GetConn();
+    Ns_Time    timeout = { conn->config->writetimeout, 0 };
+    int        size = 0, vcount = 0;
+    bool       hasStarttls;
+    Ns_Conn   *nsconn = Ns_GetConn();
 
     Ns_Log(SmtpdDebug,"====== SmtpdRelayData");
 
-    /* if we have single recipient use recipient's relay
-       otherwise for different recipients use default relay */
+    /* 
+     * If we have single recipient use recipient's relay otherwise for
+     * different recipients use default relay.
+     */
     for (rcpt = conn->rcpt.list; host && rcpt; rcpt = rcpt->next) {
-        if (rcpt->flags & SMTPD_VERIFIED && rcpt->relay.host && strcmp(rcpt->relay.host, host)) {
+        if ((rcpt->flags & SMTPD_VERIFIED) != 0u
+            && rcpt->relay.host != NULL
+            && strcmp(rcpt->relay.host, host)
+            ) {
             host = 0;
             break;
         }
@@ -1478,13 +1488,19 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         return -1;
     }
     sock.driver = conn->sock->driver;
-    /* Allocate relay SMTPD connection */
+
+    /* 
+     * Allocate relay SMTPD connection 
+     */
     if (!(relay = SmtpdConnCreate(conn->config, &sock))) {
         ns_sockclose(sock.sock);
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
     }
-    /* Read greeting line from the relay */
+
+    /* 
+     * Read greeting line from the relay 
+     */
     if (SmtpdReadLine(relay, &relay->line) < 0) {
         Ns_Log(Error, "nssmtpd: relay: %d/%d: %s:%d: Greeting read error: %s",
                conn->id, getpid(), host, port, strerror(errno));
@@ -1493,29 +1509,37 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         return -1;
     }
 
-    /* EHLO command */
+    /* 
+     * EHLO command 
+     */
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "EHLO %s\r\n", Ns_InfoHostname());
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
         goto error421;
     }
-    hasStarttls = 0;
+    hasStarttls = NS_FALSE;
     do {
-        int nread = SmtpdReadLine(relay, &relay->line);
+        ssize_t nread = SmtpdReadLine(relay, &relay->line);
+        
         if (nread <= 0) {
             goto error421;
         }
         if (strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
-            hasStarttls = 1;
+            hasStarttls = NS_TRUE;
         }
         if (relay->line.string[0] != '2') {
             goto errorrelay;
         }
     } while (relay->line.string[3] != ' ');
 
-    /* If STARTTLS available attempt it. */
+    /* 
+     * If STARTTLS available attempt it. 
+     */
 #ifdef HAVE_OPENSSL_EVP_H
     if (hasStarttls) {
+        NS_TLS_SSL_CTX *ctx;
+        NS_TLS_SSL     *ssl;
+        int             result;
 
         Ns_DStringTrunc(&conn->line, 0);
         Ns_DStringPrintf(&conn->line, "STARTTLS\r\n");
@@ -1526,13 +1550,11 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
             goto error421;
         }
 
-        NS_TLS_SSL_CTX *ctx;
-        NS_TLS_SSL     *ssl;
-
         if (relay->interp == NULL) {
             relay->interp = conn->interp;
         }
-        int result = Ns_TLS_CtxClientCreate(
+
+        result = Ns_TLS_CtxClientCreate(
             relay->interp,
             conn->config->certificate,
             conn->config->cafile,
@@ -1560,7 +1582,9 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     }
 #endif
 
-    /* MAIL FROM command */
+    /* 
+     * MAIL FROM command 
+     */
     Ns_DStringTrunc(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "MAIL FROM: <%s>\r\n", !strcmp(conn->from.addr, "<>") ? "" : conn->from.addr);
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
@@ -1573,9 +1597,11 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
         goto errorrelay;
     }
 
-    /* RCPT TO command */
+    /* 
+     * RCPT TO command 
+     */
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
-        if (!(rcpt->flags & SMTPD_VERIFIED)) {
+        if ((rcpt->flags & SMTPD_VERIFIED) == 0u) {
             continue;
         }
         Ns_DStringTrunc(&conn->line, 0);
@@ -1618,7 +1644,9 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
             break;
         }
         size += relay->line.length;
-        if (size < conn->config->maxdata && !(conn->rcpt.count == vcount && conn->flags & SMTPD_FASTPROXY)) {
+        if (size < conn->config->maxdata &&
+            !(conn->rcpt.count == vcount && (conn->flags & SMTPD_FASTPROXY) != 0u)
+            ) {
             Ns_DStringNAppend(&conn->body.data, relay->line.string, relay->line.length);
         }
     } while (relay->line.length > 0);
@@ -1633,7 +1661,7 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     }
     SmtpdConnFree(relay);
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
-        if (rcpt->flags & SMTPD_VERIFIED) {
+        if ((rcpt->flags & SMTPD_VERIFIED) != 0u) {
             rcpt->flags |= SMTPD_DELIVERED;
         }
     }
@@ -1671,7 +1699,8 @@ static int SmtpdRelayData(smtpdConn *conn, char *host, int port)
     return -1;
 }
 
-static int SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const char *rcpt, char *dname, char *host, int port)
+static int
+SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const char *rcpt, char *dname, char *host, int port)
 {
     char *ptr;
     Ns_Sock sock;
@@ -1832,7 +1861,8 @@ static int SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender
     return -1;
 }
 
-static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
+static void
+SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
 {
     int count = -1;
     smtpdRcpt *rcpt, *rcpt2;
@@ -1841,8 +1871,11 @@ static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int f
 
     for (rcpt = conn->rcpt.list; rcpt;) {
         count++;
-        if ((flags && rcpt->flags & SMTPD_VERIFIED) || (addr && !strcmp(rcpt->addr, addr)) || (index >= 0 && count == index)) {
-            if (rcpt->prev) {
+        if ((flags != 0u && (rcpt->flags & SMTPD_VERIFIED) != 0u)
+            || (addr != NULL && !strcmp(rcpt->addr, addr))
+            || (index >= 0 && count == index)
+            ) {
+            if (rcpt->prev != NULL) {
                 rcpt->prev->next = rcpt->next;
             } else {
                 conn->rcpt.list = rcpt->next;
@@ -1863,7 +1896,8 @@ static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int f
     }
 }
 
-static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
+static ssize_t
+SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
 {
     ssize_t       received;
 
@@ -1915,9 +1949,10 @@ again:
     return received;
 }
 
-static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
+static ssize_t
+SmtpdRead(smtpdConn *conn, void *vbuf, int len)
 {
-    int nread, n;
+    ssize_t nread, n;
     char *buf = (char *) vbuf;
     Ns_Time timeout = { conn->config->readtimeout, 0 };
 
@@ -1930,7 +1965,7 @@ static int SmtpdRead(smtpdConn *conn, void *vbuf, int len)
             if (conn->buf.pos > len) {
                 n = len;
             } else {
-                n = (int) conn->buf.pos;
+                n = conn->buf.pos;
             }
             memcpy(buf, conn->buf.ptr, (unsigned int) n);
             conn->buf.ptr += n;
@@ -1964,9 +1999,9 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, char *buffer, size_t length)
     } else {
 #ifdef HAVE_OPENSSL_EVP_H
         struct iovec  iov;
-        (void) Ns_SetVec(&iov, 0, buffer, length);
-
         SSL *ssl = (SSL *)sock->arg;
+
+        (void) Ns_SetVec(&iov, 0, buffer, length);
         sent = 0;
         for (;;) {
             int     err;
@@ -2018,10 +2053,11 @@ static int SmtpdWrite(smtpdConn *conn, void *vbuf, int len)
     return nwrote;
 }
 
-static int SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
+static ssize_t
+SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
 {
-    char buf[1];
-    int len = 0, nread;
+    char    buf[1];
+    ssize_t len = 0, nread;
 
     Ns_DStringTrunc(dsPtr, 0);
     do {
@@ -2383,14 +2419,14 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 }
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                 // Virus scanning
-                if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK)) {
+                if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK) != 0u) {
                     // Check attachement for virus, replace infected file with text message
                     if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, (int*)&len))) ||
                         (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, (int*)&len)))) {
                         SmtpdCheckVirus(conn, ptr, len, fileHdr->value);
                         ns_free(ptr);
                     }
-                    if (conn->flags & SMTPD_GOTVIRUS) {
+                    if ((conn->flags & SMTPD_GOTVIRUS) != 0u) {
                         static char *info = "The attachement has been removed due to virus infection";
                         
                         while (body[size - 1] == '\n' || body[size - 1] == '\r') {
@@ -2432,13 +2468,10 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
 
     snprintf(format, sizeof(format), "%%%lus", sizeof(addr));
 
-    if (sscanf(str, "%[0123456789.]/%[0123456789.]", addr, mask) == 2);
-    else
-    if (sscanf(str, "%[0123456789.:]", addr) == 1);
-    else
-    if (sscanf(str, "%[^/]/%17s", addr, mask) == 2);
-    else
-    if (sscanf(str, format, addr) == 1) {
+    if (sscanf(str, "%[0123456789.]/%[0123456789.]", addr, mask) == 2) {
+    } else if (sscanf(str, "%[0123456789.:]", addr) == 1) {
+    } else if (sscanf(str, "%[^/]/%17s", addr, mask) == 2) {
+    } else if (sscanf(str, format, addr) == 1) {
         smtpdIpaddr *arec;
         Tcl_DString  ds, *dsPtr = &ds;
         Tcl_Obj     *listObj, **objv;
@@ -2568,7 +2601,7 @@ static int SmtpdCheckDomain(smtpdConn *conn, char *domain)
     dnsRecord *rec;
     dnsPacket *reply;
 
-    if (conn && !(conn->flags & SMTPD_NEEDDOMAIN)) {
+    if (conn != NULL && (conn->flags & SMTPD_NEEDDOMAIN) == 0u) {
         return 1;
     }
     if ((reply = dnsLookup(domain, DNS_TYPE_A, 0))) {
@@ -2653,7 +2686,9 @@ static int SmtpdCheckSpam(smtpdConn *conn)
         return 0;
     /* Should have at least one unverified recipient */
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
-        if (!(rcpt->flags & SMTPD_DELIVERED) && (rcpt->flag & SMTPD_SPAMCHECK)) {
+        if ((rcpt->flags & SMTPD_DELIVERED) == 0u
+            && ((rcpt->flag & SMTPD_SPAMCHECK) != 0u)
+            ) {
             break;
         }
     }
@@ -2699,7 +2734,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     score = atof(++p);
     // Update all recipients with spam score/status
     for (; rcpt; rcpt = rctp->next) {
-        if (rcpt->flags & SMTPD_DELIVERED || !(rcpt->flag & SMTPD_SPAMCHECK)) {
+        if ((rcpt->flags & SMTPD_DELIVERED) != 0u || (rcpt->flag & SMTPD_SPAMCHECK) == 0u) {
             continue;
         }
         rcpt->flags |= rc;
@@ -2722,7 +2757,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
 
     /* Check spam for each recipient */
     for (rcpt = conn->rcpt.list; rcpt; rcpt = rcpt->next) {
-        if (rcpt->flags & SMTPD_DELIVERED || !(rcpt->flags & SMTPD_SPAMCHECK)) {
+        if ((rcpt->flags & SMTPD_DELIVERED) != 0u || (rcpt->flags & SMTPD_SPAMCHECK) == 0u) {
             continue;
         }
         if (!(CTX = dspam_init(rcpt->addr, NULL, DSM_PROCESS, DSF_SIGNATURE | DSF_CHAINED | DSF_NOISE))) {
@@ -3817,7 +3852,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             SmtpdCheckSpam(conn);
             sprintf(score, "%.2f", conn->rcpt.list->spam_score);
             Tcl_AppendResult(interp,
-                             ((conn->rcpt.list->flags & SMTPD_GOTSPAM) != 0) ? "Spam" : "Innocent",
+                             ((conn->rcpt.list->flags & SMTPD_GOTSPAM) != 0u) ? "Spam" : "Innocent",
                              " ", score, " ",
                              SmtpdGetHeader(conn, SMTPD_HDR_SIGNATURE), 0);
             SmtpdConnFree(conn);
@@ -3836,8 +3871,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 return TCL_ERROR;
             }
             if (objc > 5) {
-                if ((SIG.data = decodehex(Tcl_GetString(objv[5]), &SIG.length)))
+                if ((SIG.data = decodehex(Tcl_GetString(objv[5]), &SIG.length))) {
                     flags |= DSF_SIGNATURE;
+                }
             }
             if (!(CTX = dspam_init(Tcl_GetString(objv[3]), NULL, DSM_PROCESS, flags)))
                 break;
@@ -3861,10 +3897,10 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
                 else if (!strcmp(Tcl_GetString(objv[7]), "none"))
                     CTX->source = DSS_NONE;
             }
-            if (flags & DSF_SIGNATURE)
+            if ((flags & DSF_SIGNATURE) != 0u)
                 CTX->signature = &SIG;
             dspam_process(CTX, Tcl_GetString(objv[4]));
-            if (flags & DSF_SIGNATURE)
+            if ((flags & DSF_SIGNATURE) != 0u)
                 ns_free(SIG.data);
             Ns_DStringInit(&ds);
             Ns_DStringPrintf(&ds, "Flags: 0x%X, Source: 0x%X, Mode: 0x%X, Probability: %2.4f, Confidence: %2.4f, Result: %s",
@@ -3909,7 +3945,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             } else {
                 SmtpdCheckVirus(conn, Tcl_GetString(objv[2]), Tcl_GetCharLength(objv[2]), 0);
             }
-            if (conn->flags & SMTPD_GOTVIRUS) {
+            if ((conn->flags & SMTPD_GOTVIRUS) != 0u) {
                 Tcl_AppendResult(interp, SmtpdGetHeader(conn, SMTPD_HDR_VIRUS_STATUS), 0);
             }
             SmtpdConnFree(conn);
