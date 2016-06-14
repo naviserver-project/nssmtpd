@@ -523,14 +523,14 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     /* Register SMTP driver */
     init.version = NS_DRIVER_VERSION_4;
     init.name = "nssmtpd";
-    init.listenProc = Ns_DriverSockListen; //SmtpdListenProc;
-    init.acceptProc = SmtpdAcceptProc;
-    init.recvProc = Ns_DriverSockRecv; //SmtpdRecvProc;
-    init.sendProc = Ns_DriverSockSend; // SmtpdSendProc;
-    init.sendFileProc = NULL; // SmtpdSendFileProc;
-    init.keepProc = NULL; // SmtpdKeepProc;
-    init.requestProc = SmtpdRequestProc;
-    init.closeProc = Ns_DriverSockClose;
+    init.listenProc   = Ns_DriverSockListen; //SmtpdListenProc;
+    init.acceptProc   = SmtpdAcceptProc;
+    init.recvProc     = NULL;
+    init.sendProc     = NULL;
+    init.sendFileProc = NULL;
+    init.keepProc     = NULL; 
+    init.requestProc  = SmtpdRequestProc;
+    init.closeProc    = Ns_DriverSockClose;
     init.opts = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
     init.arg = serverPtr;
     init.path = path;
