@@ -36,4 +36,22 @@ MODOBJS     = nssmtpd.o
 TCL       = nssmtpd-procs.tcl
 MODLIBS  += -lnssock
 
+
 include  $(NAVISERVER)/include/Makefile.module
+
+NS_LD_LIBRARY_PATH = LD_LIBRARY_PATH="./:$$LD_LIBRARY_PATH"
+NSD                = $(NAVISERVER)/bin/nsd
+NS_TEST_CFG        = -c -d -t tests/config.tcl -u nsadmin
+NS_TEST_ALL        = all.tcl $(TCLTESTARGS)
+PEM_FILE           = tests/etc/server.pem
+
+$(PEM_FILE):
+	openssl genrsa 1024 > host.key
+	openssl req -new -config tests/etc/openssl.cnf -x509 -nodes -sha1 -days 365 -key host.key > host.cert
+	cat host.cert host.key > server.pem
+	rm -rf host.cert host.key
+	openssl dhparam 1024 >> server.pem
+	mv server.pem $(PEM_FILE)
+
+test: all $(PEM_FILE)
+	export $(NS_LD_LIBRARY_PATH); $(NSD) $(NS_TEST_CFG) $(NS_TEST_ALL)
