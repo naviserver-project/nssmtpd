@@ -1719,11 +1719,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
     if (!(data = Tcl_GetVar2Ex(interp, dname, 0, TCL_LEAVE_ERR_MSG))) {
         return -1;
     }
-    if (!host || !*host) {
+    if (host == NULL || *host == '\0') {
         host = config->relayhost;
         port = config->relayport;
     }
-    if (!port) {
+    if (port == 0) {
         port = DEFAULT_PORT;
     }
 
