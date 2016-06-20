@@ -47,7 +47,7 @@ PEM_FILE           = tests/etc/server.pem
 
 $(PEM_FILE):
 	openssl genrsa 1024 > host.key
-	openssl req -new -config tests/etc/openssl.cnf -x509 -nodes -sha1 -days 365 -key host.key > host.cert
+	openssl req -new -config tests/etc/nssmtpd.cnf -x509 -nodes -sha1 -days 365 -key host.key > host.cert
 	cat host.cert host.key > server.pem
 	rm -rf host.cert host.key
 	openssl dhparam 1024 >> server.pem
