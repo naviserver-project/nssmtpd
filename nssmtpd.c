@@ -514,18 +514,21 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     serverPtr->relaylist = ns_calloc(1, sizeof(smtpdRelay));
     serverPtr->relaylist->name = ns_strdup("localhost");
 
-    path = Ns_InfoHostname();
-    while (path != NULL) {
-        addr2 = strchr(path, '.');
-        if (addr2 != NULL) {
-            relay = ns_calloc(1, sizeof(smtpdRelay));
-            relay->name = ns_strdup(path);
-            relay->next = serverPtr->relaylist;
-            serverPtr->relaylist = relay;
-            Ns_Log(Notice, "ns_smtpd: adding local relay domain: %s", path);
-            addr2++;
+    {
+        const char *host = Ns_InfoHostname();
+        
+        while (host != NULL) {
+            addr2 = strchr(host, '.');
+            if (addr2 != NULL) {
+                relay = ns_calloc(1, sizeof(smtpdRelay));
+                relay->name = ns_strdup(host);
+                relay->next = serverPtr->relaylist;
+                serverPtr->relaylist = relay;
+                Ns_Log(Notice, "ns_smtpd: adding local relay domain: %s", host);
+                addr2++;
+            }
+            host = addr2;
         }
-        path = addr2;
     }
 
     /* SMTP relay support */
@@ -2450,6 +2453,8 @@ static void SmtpdConnParseData(smtpdConn *conn)
                                SmtpdGetHeader(conn, SMTPD_HDR_VIRUS_STATUS));
                     }
                 }
+#else
+                (void)size; /* silence static checker */
 #endif
                 break;
             }
@@ -3978,7 +3983,7 @@ static int parseEmail(smtpdEmail *addr, char *str)
 
         case '%':
         case '@':
-            tok = parseDomain(&str, &domain, &comment);
+            (void) parseDomain(&str, &domain, &comment);
             if (!*phrase || !*domain) {
                 return 0;
             }
@@ -4006,7 +4011,7 @@ static int parseEmail(smtpdEmail *addr, char *str)
                         continue;
                     }
                 }
-                tok = parseDomain(&str, &domain, 0);
+                (void) parseDomain(&str, &domain, 0);
                 if (!*mailbox || !*domain) {
                     return 0;
                 }
