@@ -29,7 +29,6 @@
  */
 
 #include "ns.h"
-#include "nssock.h"
 #include <setjmp.h>
 
 #ifdef USE_SAVI
@@ -334,6 +333,7 @@ typedef struct _dnsPacket {
     } buf;
 } dnsPacket;
 
+
 static int parseEmail(smtpdEmail *addr, char *str);
 static char *encode64(const char *in, int len);
 static char *decode64(const char *in, int len, int *outlen);
@@ -369,8 +369,10 @@ static void dnsEncodePacket(dnsPacket *pkt);
 static void dnsPacketFree(dnsPacket *pkt, int type);
 static dnsPacket *dnsLookup(char *name, int type, int *errcode);
 
+static Ns_DriverListenProc SmtpdListenProc;
 static Ns_DriverAcceptProc SmtpdAcceptProc;
 static Ns_DriverRequestProc SmtpdRequestProc;
+static Ns_DriverCloseProc SmtpdCloseProc;
 
 static void SmtpdInit(void *arg);
 static int SmtpdRequestProc(void *arg, Ns_Conn *conn);
@@ -555,14 +557,14 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     /* Register SMTP driver */
     init.version = NS_DRIVER_VERSION_4;
     init.name = "nssmtpd";
-    init.listenProc   = Ns_DriverSockListen; //SmtpdListenProc;
+    init.listenProc   = SmtpdListenProc;
     init.acceptProc   = SmtpdAcceptProc;
     init.recvProc     = NULL;
     init.sendProc     = NULL;
     init.sendFileProc = NULL;
     init.keepProc     = NULL; 
     init.requestProc  = SmtpdRequestProc;
-    init.closeProc    = Ns_DriverSockClose;
+    init.closeProc    = SmtpdCloseProc;
     init.opts = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
     init.arg = serverPtr;
     init.path = path;
@@ -711,6 +713,68 @@ static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
     return NS_OK;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdListenProc --
+ *
+ *      Open a listening TCP socket in non-blocking mode.
+ *
+ * Results:
+ *      The open socket or NS_INVALID_SOCKET on error.
+ *
+ * Side effects:
+ *      Enable TCP_DEFER_ACCEPT if available.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static NS_SOCKET
+SmtpdListenProc(Ns_Driver *driver, const char *address, int port, int backlog)
+{
+    NS_SOCKET sock;
+
+    sock = Ns_SockListenEx((char*)address, port, backlog);
+    if (sock != NS_INVALID_SOCKET) {
+	smtpdConfig *cfg = driver->arg;
+
+        (void) Ns_SockSetNonBlocking(sock);
+	if (cfg->deferaccept != 0) {
+	    Ns_SockSetDeferAccept(sock, driver->recvwait);
+	}
+    }
+    return sock;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdCloseProc --
+ *
+ *      Close the connection socket.
+ *
+ * Results:
+ *      None.
+ *
+ * Side effects:
+ *      Ignore any errors.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static void
+SmtpdCloseProc(Ns_Sock *sock)
+{
+    NS_NONNULL_ASSERT(sock != NULL);
+    
+    if (sock->sock != NS_INVALID_SOCKET) {
+        ns_sockclose(sock->sock);
+        sock->sock = NS_INVALID_SOCKET;
+    }
 }
 
 /*

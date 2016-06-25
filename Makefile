@@ -34,8 +34,6 @@ MODOBJS     = nssmtpd.o
 #MODLIBS  += -lclamav
 
 TCL       = nssmtpd-procs.tcl
-MODLIBS  += -lnssock
-
 
 include  $(NAVISERVER)/include/Makefile.module
 
