@@ -426,7 +426,7 @@ static char hex[] = "0123456789ABCDEF";
 int dnsDebug = 0;
 int dnsTTL = 86400;
 
-static Ns_Mutex dnsMutex;
+static Ns_Mutex dnsMutex = NULL;
 static dnsServer *dnsServers  = NULL;
 static int dnsResolverRetries = 3;
 static int dnsResolverTimeout = 5;
@@ -445,11 +445,29 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     smtpdRelay *relay;
     Ns_DriverInitData init = {0};
     smtpdConfig *serverPtr;
+    static bool globalInit = NS_FALSE;
 
     SmtpdDebug = Ns_CreateLogSeverity("Debug(smtpd)");
     path = ns_strdup(Ns_ConfigGetPath(server, module, (char *)0));
     
     serverPtr = ns_calloc(1, sizeof(smtpdConfig));
+
+    /*
+     * Initialize and name mutexes
+     */
+    Ns_MutexInit(&serverPtr->lock);
+    Ns_MutexSetName2(&serverPtr->lock, "smtp:lock", module);
+    Ns_MutexInit(&serverPtr->relaylock);
+    Ns_MutexSetName2(&serverPtr->relaylock, "smtp:relaylock", module);
+    Ns_MutexInit(&serverPtr->locallock);
+    Ns_MutexSetName2(&serverPtr->locallock, "smtp:locallock", module);
+
+    if (!globalInit) {
+        Ns_MutexInit(&dnsMutex);
+        Ns_MutexSetName(&dnsMutex, "smtp:dns");
+        globalInit = NS_TRUE;
+    }
+
     serverPtr->deferaccept = Ns_ConfigBool(path, "deferaccept", NS_FALSE);
     serverPtr->nodelay = Ns_ConfigBool(path, "nodelay", NS_FALSE);
     serverPtr->server = server;
@@ -3263,7 +3281,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             Tcl_AppendResult(interp, SMTPD_VERSION, 0);
         } else
         if (!strcasecmp("address", Tcl_GetString(objv[2]))) {
-            if (config->driver && config->driver->location) {
+            if (config->driver != NULL && config->driver->location != NULL) {
                 const char *address = strstr(config->driver->location, "://");
                 if (address) {
                     address += 3;
@@ -3380,9 +3398,10 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONS
             Tcl_SetObjResult(interp, list);
         } else
         if (!strcasecmp("set", Tcl_GetString(objv[2]))) {
-            int i;
-            char *p;
+            int         i;
+            char       *p;
             smtpdRelay *relay;
+            
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
