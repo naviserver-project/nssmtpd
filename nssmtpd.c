@@ -751,7 +751,7 @@ static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
  */
 
 static NS_SOCKET
-SmtpdListenProc(Ns_Driver *driver, const char *address, int port, int backlog)
+SmtpdListenProc(Ns_Driver *driver, const char *address, unsigned short port, int backlog)
 {
     NS_SOCKET sock;
 
