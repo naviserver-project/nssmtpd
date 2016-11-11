@@ -351,12 +351,12 @@ static void dnsInit(char *name, ...);
 static void dnsRecordFree(dnsRecord *pkt);
 static void dnsRecordDestroy(dnsRecord **pkt);
 static dnsRecord *dnsRecordAppend(dnsRecord **list, dnsRecord *pkt);
-static dnsPacket *dnsParseHeader(void *packet, int size);
+static dnsPacket *dnsParseHeader(void *packet, size_t size);
 static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query);
-static dnsPacket *dnsParsePacket(unsigned char *packet, int size);
+static dnsPacket *dnsParsePacket(unsigned char *packet, size_t size);
 static int dnsParseName(dnsPacket *pkt, char **ptr, char *buf, int len, int pos, int level);
 static void dnsEncodeName(dnsPacket *pkt, char *name);
-static void dnsEncodeGrow(dnsPacket *pkt, unsigned int size, char *proc);
+static void dnsEncodeGrow(dnsPacket *pkt, size_t size, char *proc);
 static void dnsEncodeHeader(dnsPacket *pkt);
 static void dnsEncodePtr(dnsPacket *pkt, int offset);
 static void dnsEncodeShort(dnsPacket *pkt, int num);
@@ -4814,7 +4814,7 @@ static int dnsParseName(dnsPacket *pkt, char **ptr, char *buf, int buflen, int p
     return pos;
 }
 
-static dnsPacket *dnsParseHeader(void *buf, int size)
+static dnsPacket *dnsParseHeader(void *buf, size_t size)
 {
     unsigned short *p;
     dnsPacket *pkt;
@@ -4830,7 +4830,7 @@ static dnsPacket *dnsParseHeader(void *buf, int size)
     /* First two bytes are reserved for packet length
        in TCP mode plus some overhead in case we compress worse
        than it was */
-    pkt->buf.allocated = size + 128;
+    pkt->buf.allocated = (unsigned short)size + 128u;
     pkt->buf.data = ns_malloc(pkt->buf.allocated);
     pkt->buf.size = size;
     memcpy(pkt->buf.data + 2, buf, (unsigned) size);
@@ -4954,7 +4954,7 @@ err:
 
 }
 
-static dnsPacket *dnsParsePacket(unsigned char *packet, int size)
+static dnsPacket *dnsParsePacket(unsigned char *packet, size_t size)
 {
     int i;
     dnsPacket *pkt;
@@ -5005,7 +5005,7 @@ static void dnsEncodeName(dnsPacket *pkt, char *name)
 
         while (name[k]) {
             int i;
-            unsigned int c;
+            char c;
             
             for (len = 0; (c = name[k + len]) != 0 && c != '.'; len++);
             if (!len || len > 63) {
@@ -5023,9 +5023,9 @@ static void dnsEncodeName(dnsPacket *pkt, char *name)
             nm->next = pkt->nmlist;
             pkt->nmlist = nm;
             nm->name = ns_strdup(&name[k]);
-            nm->offset = (pkt->buf.ptr - pkt->buf.data) - 2;
+            nm->offset = (short)(pkt->buf.ptr - pkt->buf.data) - 2;
             // Encode name part inline
-            *pkt->buf.ptr++ = (u_char) (len & 0x3F);
+            *pkt->buf.ptr++ = (char) (len & 0x3F);
             for (i = 0; i < len; i++) {
                 *pkt->buf.ptr++ = name[k++];
             }
@@ -5041,7 +5041,7 @@ static void dnsEncodeHeader(dnsPacket *pkt)
 {
     unsigned short *p = (unsigned short *) pkt->buf.data;
 
-    pkt->buf.size = (pkt->buf.ptr - pkt->buf.data) - 2;
+    pkt->buf.size = (unsigned short)(pkt->buf.ptr - pkt->buf.data) - 2u;
     p[0] = htons(pkt->buf.size);
     p[1] = htons(pkt->id);
     p[2] = htons(pkt->u);
@@ -5053,8 +5053,8 @@ static void dnsEncodeHeader(dnsPacket *pkt)
 
 static void dnsEncodePtr(dnsPacket *pkt, int offset)
 {
-    *pkt->buf.ptr++ = (0xC0 | (offset >> 8));
-    *pkt->buf.ptr++ = (offset & 0xFF);
+    *pkt->buf.ptr++ = (char)(0xC0 | (offset >> 8));
+    *pkt->buf.ptr++ = (char)(offset & 0xFF);
 }
 
 static void dnsEncodeShort(dnsPacket *pkt, int num)
@@ -5084,7 +5084,7 @@ static void dnsEncodeBegin(dnsPacket *pkt)
 
 static void dnsEncodeEnd(dnsPacket *pkt)
 {
-    unsigned short len = pkt->buf.ptr - pkt->buf.rec;
+    unsigned short len = (unsigned short)(pkt->buf.ptr - pkt->buf.rec);
     *((unsigned short *) pkt->buf.rec) = htons(len - 2);
 }
 
@@ -5144,10 +5144,10 @@ static void dnsEncodePacket(dnsPacket *pkt)
     dnsEncodeHeader(pkt);
 }
 
-static void dnsEncodeGrow(dnsPacket *pkt, unsigned int size, char *proc)
+static void dnsEncodeGrow(dnsPacket *pkt, size_t size, char *proc)
 {
-    int offset = pkt->buf.ptr - pkt->buf.data;
-    int roffset = pkt->buf.rec - pkt->buf.data;
+    size_t offset = (size_t)pkt->buf.ptr - (size_t)pkt->buf.data;
+    long roffset = pkt->buf.rec - pkt->buf.data;
     if (offset + size >= pkt->buf.allocated) {
         pkt->buf.allocated += 256;
         pkt->buf.data = ns_realloc(pkt->buf.data, pkt->buf.allocated);
