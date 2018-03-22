@@ -1657,9 +1657,11 @@ SmtpdRelayData(smtpdConn *conn, char *host, int port)
                 goto error421;
             };
             /*
-             * Establish the SSL/TLS connection.
+             * Establish the SSL/TLS connection.  The second last argument is
+             * the sni_hostname, which might be used via configuration in
+             * future versions.
              */
-            result = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, &ssl);
+            result = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, NULL, &ssl);
             relay->sock->arg = ssl;
         }
         if (unlikely(result != TCL_OK)) {
