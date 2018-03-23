@@ -2577,7 +2577,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         listObj = Tcl_NewStringObj(Tcl_DStringValue(dsPtr), Tcl_DStringLength(dsPtr));
         rc = Tcl_ListObjGetElements(NULL, listObj, &objc, &objv);
         if (rc != TCL_OK) {
-            Ns_Log(Error, "invalid list of ip adresses '%s'", Tcl_GetString(listObj));
+            Ns_Log(Error, "invalid list of ip addresses '%s'", Tcl_GetString(listObj));
             return 0;
         }
 
@@ -2586,7 +2586,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
             saPtr = (struct sockaddr *)&(arec->addr);
             rc = Ns_GetSockAddr(saPtr, Tcl_GetString(objv[i]), 0);
             if (rc != TCL_OK) {
-                Ns_Log(Error, "invalid ip adresses '%s'", Tcl_GetString(objv[i]));
+                Ns_Log(Error, "invalid ip addresses '%s'", Tcl_GetString(objv[i]));
                 return 0;
             }
             addr_saPtr = saPtr;
@@ -2618,7 +2618,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     saPtr = (struct sockaddr *)&(alist->addr);
     rc = Ns_GetSockAddr(saPtr, addr, 0);
     if (rc != TCL_OK) {
-        Ns_Log(Error, "invalid ip adresses '%s'", addr);
+        Ns_Log(Error, "invalid ip addresses '%s'", addr);
         return 0;
     }
 
@@ -2651,7 +2651,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
             Ns_SockaddrMaskBits(saPtr, maskBits);
             have_ipmask = NS_TRUE;
         } else {
-            Ns_Log(Error, "invalid mask bits %d for ip adresses '%s'", maskBits, addr);
+            Ns_Log(Error, "invalid mask bits %d for ip addresses '%s'", maskBits, addr);
         }
     }
     if (have_ipmask == NS_TRUE) {
