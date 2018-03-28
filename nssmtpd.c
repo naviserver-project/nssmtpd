@@ -342,7 +342,7 @@ static char *decodeqp(const char *in, int len, int *outlen);
 static char *encodehex(const char *buf, int len);
 static char *decodehex(const char *str, int *len);
 static int parsePhrase(char **inp, char **phrasep, char *specials);
-static int parseDomain(char **inp, char **domainp, char **commmentp);
+static int parseDomain(char **inp, char **domainp, char **commentp);
 static int parseRoute(char **inp, char **routep);
 static char *parseSpace(char *s);
 static int parseInt(char *val);
