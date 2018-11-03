@@ -627,7 +627,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
         }
         pFactory->pVtbl->Release(pFactory);
         if ((hr = pSAVI->pVtbl->InitialiseWithMoniker(pSAVI, "ns_savi")) < 0) {
-            Ns_Log(Error, "nssmtpd: sophos: Failed to initialise SAVI: %x", hr);
+            Ns_Log(Error, "nssmtpd: sophos: Failed to initialize SAVI: %x", hr);
             pSAVI->pVtbl->Release(pSAVI);
 	    ns_free(path);
             return NS_ERROR;
@@ -1152,7 +1152,7 @@ static void SmtpdThread(smtpdConn *conn)
             else {
                 smtpdEmail addr;
                 /* Prepare error reply because address parser modifies the buffer */
-                Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognised\r\n", data);
+                Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognized\r\n", data);
                 if (parseEmail(&addr, data)) {
                     Ns_DStringSetLength(&conn->reply, 0);
                     if (SmtpdCheckDomain(conn, addr.domain)) {
@@ -1164,7 +1164,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             if (!conn->from.addr) {
                 if (!conn->reply.length) {
-                    Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognised\r\n", data);
+                    Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognized\r\n", data);
                 }
                 if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                     goto error;
@@ -1217,7 +1217,7 @@ static void SmtpdThread(smtpdConn *conn)
                 data++;
             }
             /* Prepare error reply because address parser modifies the buffer */
-            Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognised\r\n", data);
+            Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognized\r\n", data);
             /* Email address verification */
             if (parseEmail(&addr, data)) {
                 Ns_DStringSetLength(&conn->reply, 0);
@@ -1363,7 +1363,7 @@ static void SmtpdThread(smtpdConn *conn)
             SmtpdConnReset(conn);
             continue;
         }
-        if (SmtpdPuts(conn, "500 Command unrecognised\r\n") != NS_OK) {
+        if (SmtpdPuts(conn, "500 Command unrecognized\r\n") != NS_OK) {
             goto error;
         }
     }
@@ -2713,7 +2713,7 @@ static int SmtpdCheckDomain(smtpdConn *conn, char *domain)
         return 0;
     }
     Ns_Log(Error, "nssmtpd: checkdomain: %d: HOST: %s, FLAGS: 0x%X, %s", conn->id, conn->host, conn->flags, domain);
-    Ns_DStringPrintf(&conn->reply, "553 %s... Domain unrecognised\r\n", domain);
+    Ns_DStringPrintf(&conn->reply, "553 %s... Domain unrecognized\r\n", domain);
     return 0;
 }
 
