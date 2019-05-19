@@ -205,7 +205,7 @@ proc smtpd::data { id } {
 	set users($deliver_email) $spam_score
     }
     if { [array size users] > 0 } {
-      # Build attachements list
+      # Build attachments list
       foreach file [ns_smtpd gethdrs $id X-Smtpd-File] {
         append attachments $file " "
       }

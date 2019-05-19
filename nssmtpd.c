@@ -2514,14 +2514,14 @@ static void SmtpdConnParseData(smtpdConn *conn)
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                 // Virus scanning
                 if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK) != 0u) {
-                    // Check attachement for virus, replace infected file with text message
+                    // Check attachment for virus, replace infected file with text message
                     if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, (int*)&len))) ||
                         (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, (int*)&len)))) {
                         SmtpdCheckVirus(conn, ptr, len, fileHdr->value);
                         ns_free(ptr);
                     }
                     if ((conn->flags & SMTPD_GOTVIRUS) != 0u) {
-                        static char *info = "The attachement has been removed due to virus infection";
+                        static char *info = "The attachment has been removed due to virus infection";
 
                         while (body[size - 1] == '\n' || body[size - 1] == '\r') {
                             size--;
