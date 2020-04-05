@@ -53,3 +53,5 @@ $(PEM_FILE):
 
 test: all $(PEM_FILE)
 	export $(NS_LD_LIBRARY_PATH); $(NSD) $(NS_TEST_CFG) $(NS_TEST_ALL)
+lldbtest: all $(PEM_FILE)
+	$(NS_LD_LIBRARY_PATH) lldb -- $(NSD) $(NS_TEST_CFG) $(NS_TEST_ALL)
