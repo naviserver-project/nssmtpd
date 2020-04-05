@@ -89,9 +89,9 @@
 
 // Email address
 typedef struct _smtpdEmail {
-    char *name;
-    char *domain;
-    char *mailbox;
+    const char *name;
+    const char *domain;
+    const char *mailbox;
 } smtpdEmail;
 
 // IP access list
@@ -111,7 +111,7 @@ typedef struct _smtpdHdr {
 // Relay list
 typedef struct _smtpdRelay {
     struct _smtpdRelay *next;
-    char *name;
+    const char *name;
     char *host;
     unsigned short port;
 } smtpdRelay;
@@ -119,12 +119,12 @@ typedef struct _smtpdRelay {
 // Recipient list
 typedef struct _smtpdRcpt {
     struct _smtpdRcpt *next, *prev;
-    char *addr;
+    const char *addr;
     unsigned int flags;
-    char *data;
+    const char *data;
     struct {
         unsigned short port;
-        char *host;
+        const char *host;
     } relay;
     float spam_score;
 } smtpdRcpt;
@@ -150,7 +150,7 @@ typedef struct _smtpdConfig {
     int writetimeout;
     char *relayhost;
     unsigned short relayport;
-    char *address;
+    const char *address;
     unsigned short port;
     char *spamdhost;
     unsigned short spamdport;
@@ -172,10 +172,10 @@ typedef struct _smtpdConfig {
     struct cl_limits ClamAvLimits;
 #endif
 #ifdef HAVE_OPENSSL_EVP_H
-    char *certificate;
-    char *cafile;
-    char *capath;
-    char *ciphers;
+    const char *certificate;
+    const char *cafile;
+    const char *capath;
+    const char *ciphers;
 #endif
 } smtpdConfig;
 
@@ -184,7 +184,7 @@ typedef struct _smtpdConn {
     unsigned int id;
     int cmd;
     unsigned int flags;
-    char *host;
+    const char *host;
     Ns_Sock *sock;
     Ns_DString line;
     Ns_DString reply;
@@ -192,7 +192,7 @@ typedef struct _smtpdConn {
     smtpdConfig *config;
     struct {
         char *addr;
-        char *data;
+        const char *data;
     } from;
     struct {
         int count;
@@ -268,15 +268,15 @@ typedef struct _smtpdConn {
 
 typedef struct _dnsServer {
     struct _dnsServer *next;
-    char *name;
+    const char *name;
     //unsigned long ipaddr;
     time_t fail_time;
     unsigned long fail_count;
 } dnsServer;
 
 typedef struct _dnsSOA {
-    char *mname;
-    char *rname;
+    const char *mname;
+    const char *rname;
     unsigned long serial;
     unsigned long refresh;
     unsigned long retry;
@@ -285,25 +285,25 @@ typedef struct _dnsSOA {
 } dnsSOA;
 
 typedef struct _dnsMX {
-    char *name;
+    const char *name;
     unsigned short preference;
 } dnsMX;
 
 typedef struct _dnsName {
     struct _dnsName *next;
-    char *name;
+    const char *name;
     short offset;
 } dnsName;
 
 typedef struct _dnsRecord {
     struct _dnsRecord *next, *prev;
-    char *name;
+    const char *name;
     unsigned short type;
     unsigned short class;
     unsigned long ttl;
     short len;
     union {
-        char *name;
+        const char *name;
         struct in_addr ipaddr;
         dnsMX *mx;
         dnsSOA *soa;
@@ -327,7 +327,7 @@ typedef struct _dnsPacket {
     struct {
         unsigned short allocated;
         unsigned short size;
-        char *rec;
+        const char *rec;
         char *ptr;
         char *data;
     } buf;
@@ -355,7 +355,7 @@ static dnsPacket *dnsParseHeader(void *packet, size_t size);
 static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query);
 static dnsPacket *dnsParsePacket(unsigned char *packet, size_t size);
 static int dnsParseName(dnsPacket *pkt, char **ptr, char *buf, int len, int pos, int level);
-static void dnsEncodeName(dnsPacket *pkt, char *name);
+static void dnsEncodeName(dnsPacket *pkt, const char *name);
 static void dnsEncodeGrow(dnsPacket *pkt, size_t size, const char *proc);
 static void dnsEncodeHeader(dnsPacket *pkt);
 static void dnsEncodePtr(dnsPacket *pkt, int offset);
@@ -367,7 +367,7 @@ static void dnsEncodeEnd(dnsPacket *pkt);
 static void dnsEncodeRecord(dnsPacket *pkt, dnsRecord *list);
 static void dnsEncodePacket(dnsPacket *pkt);
 static void dnsPacketFree(dnsPacket *pkt, int type);
-static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode);
+static dnsPacket *dnsLookup(const char *name, unsigned short type, int *errcode);
 
 static Ns_DriverListenProc SmtpdListenProc;
 static Ns_DriverAcceptProc SmtpdAcceptProc;
@@ -379,7 +379,7 @@ static int SmtpdRequestProc(void *arg, Ns_Conn *conn);
 static Ns_TclTraceProc SmtpdInterpInit;
 static Tcl_ObjCmdProc SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
-static int SmtpdRelayData(smtpdConn *conn, char *host, unsigned short port);
+static int SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
 static int SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender, const char *rcpt, char *data, char *host, unsigned short port);
 static smtpdConn *SmtpdConnCreate(smtpdConfig *server, Ns_Sock *sock);
 static void SmtpdConnReset(smtpdConn *conn);
@@ -405,7 +405,7 @@ static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
 static char *SmtpdStrTrim(char *str);
 static smtpdIpaddr *SmtpdParseIpaddr(char *str);
 static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
-static int SmtpdCheckDomain(smtpdConn *conn, char *domain);
+static int SmtpdCheckDomain(smtpdConn *conn, const char *domain);
 static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port);
 static int SmtpdCheckSpam(smtpdConn *conn);
 static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location);
@@ -482,7 +482,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
             serverPtr->port = DEFAULT_PORT;
         }
     }
-if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
+    if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
     }
     if (!Ns_ConfigGetInt(path, "readtimeout", &serverPtr->readtimeout)) {
@@ -1443,7 +1443,7 @@ SmtpdConnReset(smtpdConn *conn)
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
     ns_free(conn->from.addr), conn->from.addr = NULL;
-    ns_free(conn->from.data), conn->from.data = NULL;
+    ns_free((char *)conn->from.data), conn->from.data = NULL;
     Ns_DStringSetLength(&conn->line, 0);
     Ns_DStringSetLength(&conn->reply, 0);
     Ns_DStringSetLength(&conn->body.data, 0);
@@ -1459,9 +1459,9 @@ SmtpdConnReset(smtpdConn *conn)
 
     while (conn->rcpt.list) {
         smtpdRcpt *next = conn->rcpt.list->next;
-        ns_free(conn->rcpt.list->addr);
-        ns_free(conn->rcpt.list->data);
-        ns_free(conn->rcpt.list->relay.host);
+        ns_free((char*)conn->rcpt.list->addr);
+        ns_free((char*)conn->rcpt.list->data);
+        ns_free((char*)conn->rcpt.list->relay.host);
         ns_free(conn->rcpt.list);
         conn->rcpt.list = next;
     }
@@ -1535,7 +1535,7 @@ static void SmtpdConnFree(smtpdConn *conn)
     ns_sockclose(conn->sock->sock);
     conn->sock->sock = -1;
     SmtpdConnReset(conn);
-    ns_free(conn->host);
+    ns_free((char *)conn->host);
     conn->host = NULL;
     conn->buf.ptr = NULL;
     conn->buf.pos = 0;
@@ -1547,7 +1547,7 @@ static void SmtpdConnFree(smtpdConn *conn)
 }
 
 static int
-SmtpdRelayData(smtpdConn *conn, char *host, unsigned short port)
+SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 {
     Ns_Sock    sock;
     smtpdRcpt *rcpt;
@@ -1988,9 +1988,9 @@ SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
             }
             rcpt2 = rcpt;
             rcpt = rcpt->next;
-            ns_free(rcpt2->addr);
-            ns_free(rcpt2->data);
-            ns_free(rcpt2->relay.host);
+            ns_free((char*)rcpt2->addr);
+            ns_free((char*)rcpt2->data);
+            ns_free((char*)rcpt2->relay.host);
             ns_free(rcpt2);
             conn->rcpt.count--;
             continue;
@@ -2709,7 +2709,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     return alist;
 }
 
-static int SmtpdCheckDomain(smtpdConn *conn, char *domain)
+static int SmtpdCheckDomain(smtpdConn *conn, const char *domain)
 {
     dnsRecord *rec;
     dnsPacket *reply;
@@ -2746,7 +2746,7 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsig
 
     Ns_MutexLock(&conn->config->relaylock);
     for (relay = conn->config->relaylist; relay != NULL; relay = relay->next) {
-        char *p, *s;
+        const char *p, *s;
 
         p = &addr->domain[strlen(addr->domain) - 1];
         s = &relay->name[strlen(relay->name) - 1];
@@ -3478,7 +3478,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
-                ns_free(config->relaylist->name);
+                ns_free((char *)config->relaylist->name);
                 ns_free(config->relaylist);
                 config->relaylist = relay;
             }
@@ -3502,7 +3502,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
-                ns_free(config->relaylist->name);
+                ns_free((char *)config->relaylist->name);
                 ns_free(config->relaylist);
                 config->relaylist = relay;
             }
@@ -3740,7 +3740,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_WrongNumArgs(interp, 2, objv, "address");
             return TCL_ERROR;
         }
-        ns_free(conn->from.addr);
+        ns_free((char *)conn->from.addr);
         conn->from.addr = ns_strcopy(Tcl_GetString(objv[3]));
         break;
 
@@ -3749,7 +3749,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_WrongNumArgs(interp, 2, objv, "data");
             return TCL_ERROR;
         }
-        ns_free(conn->from.data);
+        ns_free((char *)conn->from.data);
         conn->from.data = ns_strcopy(Tcl_GetString(objv[3]));
         break;
 
@@ -3813,7 +3813,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
         }
         for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
-                ns_free(rcpt->data);
+                ns_free((char *)rcpt->data);
                 rcpt->data = ns_strcopy(Tcl_GetString(objv[4]));
                 break;
             }
@@ -4665,7 +4665,7 @@ static void dnsInit(const char *name, ...)
     Ns_MutexUnlock(&dnsMutex);
 }
 
-static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
+static dnsPacket *dnsLookup(const char *name, unsigned short type, int *errcode)
 {
     char       buf[DNS_BUFSIZE];
     dnsServer *server = NULL;
@@ -4811,29 +4811,29 @@ static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
 
 static void dnsRecordFree(dnsRecord *pkt)
 {
-    if (!pkt) {
+    if (pkt != NULL) {
         return;
     }
-    ns_free(pkt->name);
+    ns_free((char *)pkt->name);
     switch (pkt->type) {
     case DNS_TYPE_MX:
         if (!pkt->data.mx) {
             break;
         }
-        ns_free(pkt->data.mx->name);
+        ns_free((char *)pkt->data.mx->name);
         ns_free(pkt->data.mx);
         break;
     case DNS_TYPE_NS:
     case DNS_TYPE_CNAME:
     case DNS_TYPE_PTR:
-        ns_free(pkt->data.name);
+        ns_free((char*)pkt->data.name);
         break;
     case DNS_TYPE_SOA:
         if (!pkt->data.soa) {
             break;
         }
-        ns_free(pkt->data.soa->mname);
-        ns_free(pkt->data.soa->rname);
+        ns_free((char*)pkt->data.soa->mname);
+        ns_free((char*)pkt->data.soa->rname);
         ns_free(pkt->data.soa);
         break;
     }
@@ -5089,7 +5089,7 @@ static dnsPacket *dnsParsePacket(unsigned char *packet, size_t size)
 
 }
 
-static void dnsEncodeName(dnsPacket *pkt, char *name)
+static void dnsEncodeName(dnsPacket *pkt, const char *name)
 {
     dnsName *nm;
 
@@ -5261,11 +5261,11 @@ static void dnsPacketFree(dnsPacket *pkt, int UNUSED(type))
     dnsRecordDestroy(&pkt->anlist);
     while (pkt->nmlist) {
         dnsName *next = pkt->nmlist->next;
-        ns_free(pkt->nmlist->name);
+        ns_free((char *)pkt->nmlist->name);
         ns_free(pkt->nmlist);
         pkt->nmlist = next;
     }
-    ns_free(pkt->buf.data);
+    ns_free((char*)pkt->buf.data);
     ns_free(pkt);
 }
 
