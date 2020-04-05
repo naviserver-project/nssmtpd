@@ -22,7 +22,7 @@
  */
 
 /*
- *   Naviserver SMTP server/proxy
+ *   NaviServer SMTP server/proxy
  *
  *   Author Vlad Seryakov vlad@crystalballinc.com
  *
@@ -199,7 +199,7 @@ typedef struct _smtpdConn {
         smtpdRcpt *list;
     } rcpt;
     struct {
-        int offset;
+        size_t offset;
         Ns_DString data;
         smtpdHdr *headers;
     } body;
@@ -336,11 +336,11 @@ typedef struct _dnsPacket {
 
 static int parseEmail(smtpdEmail *addr, char *str);
 static char *encode64(const char *in, int len);
-static char *decode64(const char *in, int len, int *outlen);
-static char *encodeqp(const char *in, int len);
-static char *decodeqp(const char *in, int len, int *outlen);
-static char *encodehex(const char *buf, int len);
-static char *decodehex(const char *str, int *len);
+static char *decode64(const char *in, int len, size_t *outlen);
+static char *encodeqp(const char *in, size_t len);
+static char *decodeqp(const char *in, int len, size_t *outlen);
+static char *encodehex(const char *buf, size_t len);
+static char *decodehex(const char *str, size_t *len);
 static int parsePhrase(char **inp, char **phrasep, const char *specials);
 static int parseDomain(char **inp, char **domainp, char **commentp);
 static int parseRoute(char **inp, char **routep);
@@ -388,7 +388,7 @@ static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
 static void SmtpdConnParseData(smtpdConn *conn);
-static char *SmtpdGetHeader(smtpdConn *conn, const char *name);
+static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
@@ -401,7 +401,7 @@ static int SmtpdPuts(smtpdConn *conn, const char *string);
 static int SmtpdWriteData(smtpdConn *conn, const char *buf, int len);
 static ssize_t SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr);
 static char *SmtpdStrPos(char *as1, const char *as2);
-static char *SmtpdStrNPos(char *as1, char *as2, int len);
+static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
 static char *SmtpdStrTrim(char *str);
 static smtpdIpaddr *SmtpdParseIpaddr(char *str);
 static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
@@ -424,7 +424,7 @@ static char hex[] = "0123456789ABCDEF";
 
 // Static DNS stuff
 int dnsDebug = 0;
-int dnsTTL = 86400;
+unsigned long dnsTTL = 86400;
 
 static Ns_Mutex dnsMutex = NULL;
 static dnsServer *dnsServers  = NULL;
@@ -766,7 +766,11 @@ SmtpdListenProc(Ns_Driver *driver, const char *address, unsigned short port, int
 
         (void) Ns_SockSetNonBlocking(sock);
         if (cfg->deferaccept != 0) {
+#if ((NS_MAJOR_VERSION <= 4) && (NS_MINOR_VERSION <= 99) && (NS_RELEASE_SERIAL <= 19))
             Ns_SockSetDeferAccept(sock, driver->recvwait);
+#else
+            Ns_SockSetDeferAccept(sock, driver->recvwait.sec);
+#endif
         }
     }
     return sock;
@@ -1480,7 +1484,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
     for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "%s(0x%X/%.2f), ", rcpt->addr, rcpt->flags, rcpt->spam_score);
     }
-    Ns_DStringPrintf(&conn->line, "SIZE: %d/%d", conn->body.data.length, conn->body.offset);
+    Ns_DStringPrintf(&conn->line, "SIZE: %d/%lu", conn->body.data.length, conn->body.offset);
     Ns_Log(Notice, "%s", conn->line.string);
 
     /*
@@ -2102,7 +2106,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
             ssize_t n;
 
             n = SSL_write(ssl, iov.iov_base, (int)iov.iov_len);
-            err = SSL_get_error(ssl, n);
+            err = SSL_get_error(ssl, (int)n);
             if (err == SSL_ERROR_WANT_WRITE) {
                 Ns_Time timeout = { 0, 10000 }; /* 10ms */
 
@@ -2209,7 +2213,8 @@ static int SmtpdPuts(smtpdConn *conn, const char *string)
 
 static char *SmtpdStrPos(char *as1, const char *as2)
 {
-    register char *s1 = as1, *s2 = as2, *ptr, c;
+    register char *s1 = as1, *ptr, c;
+    const char    *s2 = as2;
 
     c = *s2;
     while (*s1)
@@ -2226,7 +2231,7 @@ static char *SmtpdStrPos(char *as1, const char *as2)
     return 0;
 }
 
-static char *SmtpdStrNPos(char *as1, char *as2, int len)
+static char *SmtpdStrNPos(char *as1, char *as2, size_t len)
 {
     register char *s1 = as1, *s2 = as2, *ptr, *end, c;
 
@@ -2248,7 +2253,7 @@ static char *SmtpdStrNPos(char *as1, char *as2, int len)
 
 static char *SmtpdStrTrim(char *str)
 {
-    int len;
+    size_t len;
 
     while (*str == '<' || isspace(*str)) {
         str++;
@@ -2260,7 +2265,7 @@ static char *SmtpdStrTrim(char *str)
     return str;
 }
 
-static char *SmtpdGetHeader(smtpdConn *conn, const char *name)
+static const char *SmtpdGetHeader(smtpdConn *conn, const char *name)
 {
     smtpdHdr *hdr;
     for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
@@ -2382,7 +2387,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
             end++;
         }
         if (end == body) {
-            conn->body.offset = end - conn->body.data.string;
+            conn->body.offset = (size_t)(end - conn->body.data.string);
             break;
         }
         // Next header
@@ -2437,7 +2442,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
             // Check for specific headers
             if (!strncasecmp(hdr, "Content-Disposition:", 20)) {
                 hdr += 20;
-                if ((ptr = SmtpdStrNPos(hdr, (char*)"filename=", end - hdr))) {
+                if ((ptr = SmtpdStrNPos(hdr, (char*)"filename=", (size_t)(end - hdr)))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     if (!fileHdr) {
@@ -2466,7 +2471,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                 contentSize = end - contentType;
 #endif
-                if ((ptr = SmtpdStrNPos(contentType, (char*)"boundary=", end - contentType))) {
+                if ((ptr = SmtpdStrNPos(contentType, (char*)"boundary=", (size_t)(end - contentType)))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     header = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
@@ -2476,7 +2481,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
                     header->next = boundary;
                     boundary = header;
                 }
-                if (!fileHdr && (ptr = SmtpdStrNPos(hdr, (char*)"name=", end - hdr))) {
+                if (!fileHdr && (ptr = SmtpdStrNPos(hdr, (char*)"name=", (size_t)(end - hdr)))) {
                     for (ptr += 5; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
@@ -2515,8 +2520,11 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 // Virus scanning
                 if (fileHdr && encodingType && (conn->flags & SMTPD_VIRUSCHECK) != 0u) {
                     // Check attachment for virus, replace infected file with text message
-                    if ((!strncasecmp(encodingType, "base64", 6) && (ptr = decode64(body, size, (int*)&len))) ||
-                        (!strncasecmp(encodingType, "quoted-printable", 16) && (ptr = decodeqp(body, size, (int*)&len)))) {
+                    if ((!strncasecmp(encodingType, "base64", 6)
+                         && (ptr = decode64(body, size, &len))) ||
+                        (!strncasecmp(encodingType, "quoted-printable", 16)
+                         && (ptr = decodeqp(body, size, &len)))
+                        ) {
                         SmtpdCheckVirus(conn, ptr, len, fileHdr->value);
                         ns_free(ptr);
                     }
@@ -2760,7 +2768,7 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsig
 }
 
 /* CHECK command returns just a header (terminated by "\r\n\r\n") with the first
- * line as for PROCESS (ie a response code and message), and then a header called
+ * line as for PROCESS (i.e. a response code and message), and then a header called
  * "Spam:" with value of either "True" or "False", then a semi-colon, and then the
  * score for this message, " / " then the threshold.  So the entire response looks
  * like either:
@@ -2768,9 +2776,16 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsig
  * SPAMD/1.1 0 EX_OK
  * Spam: True ; 15 / 5
  */
+#if !defined(USE_SPAMASSASSIN) && !defined(USE_DSPAM)
+static int SmtpdCheckSpam(smtpdConn *UNUSED(conn))
+{
+    return 0;
+}
+
+#else
 static int SmtpdCheckSpam(smtpdConn *conn)
 {
-#ifdef USE_SPAMASSASSIN
+# ifdef USE_SPAMASSASSIN
     int rc;
     char *p;
     float score;
@@ -2844,9 +2859,9 @@ static int SmtpdCheckSpam(smtpdConn *conn)
            strerror(errno));
     SmtpdConnFree(spamd);
     return -1;
-#endif
+# endif
 
-#ifdef USE_DSPAM
+# ifdef USE_DSPAM
     char *sig;
     int rc = -1;
     DSPAM_CTX *CTX;
@@ -2882,13 +2897,24 @@ static int SmtpdCheckSpam(smtpdConn *conn)
         _ds_destroy_message(CTX->message), dspam_destroy(CTX);
     }
     return -1;
-#endif
+# endif
     return 0;
 }
+#endif
 
-static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location)
+
+#if !defined(USE_SAVI) && !defined(USE_CLAMAV)
+static int
+SmtpdCheckVirus(smtpdConn *UNUSED(conn), char *UNUSED(data),
+                int UNUSED(datalen), char *UNUSED(location))
 {
-#ifdef USE_SAVI
+    return TCL_OK;
+}
+#else
+static int
+SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location)
+{
+# ifdef USE_SAVI
     HRESULT hr;
     char buf[81];
     Ns_DString ds;
@@ -2903,28 +2929,36 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
     if (!location) {
         location = datalen ? "buffer" : data;
     }
-    if ((hr = DllGetClassObject((REFIID) & SOPHOS_CLASSID_SAVI, (REFIID) & SOPHOS_IID_CLASSFACTORY2, (void **) &pFactory)) < 0) {
+    if ((hr = DllGetClassObject((REFIID) & SOPHOS_CLASSID_SAVI, (REFIID)
+                                & SOPHOS_IID_CLASSFACTORY2, (void **) &pFactory)) < 0) {
         sprintf(buf, "%lx", hr);
-        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to get class factory interface: %s", location, buf, 0);
+        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to get class factory interface: %s",
+                         location, buf, 0);
         return TCL_ERROR;
     }
     hr = pFactory->pVtbl->CreateInstance(pFactory, NULL, (REFIID) & SOPHOS_IID_SAVI3, (void **) &pSAVI);
     pFactory->pVtbl->Release(pFactory);
     if (hr < 0) {
         sprintf(buf, "%lx", hr);
-        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to get a CSAVI3 interface: %s", location, buf, 0);
+        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to get a CSAVI3 interface: %s",
+                         location, buf, 0);
         return TCL_ERROR;
     }
     if ((hr = pSAVI->pVtbl->InitialiseWithMoniker(pSAVI, "ns_savi")) < 0) {
         sprintf(buf, "%lx", hr);
-        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to initialize SAVI: %s", location, buf, 0);
+        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to initialize SAVI: %s",
+                         location, buf, 0);
         pSAVI->pVtbl->Release(pSAVI);
         return TCL_ERROR;
     }
     if (datalen) {
-        hr = pSAVI->pVtbl->SweepBuffer(pSAVI, location, datalen, data, (REFIID) & SOPHOS_IID_ENUM_SWEEPRESULTS, (void **) &pEnumResults);
+        hr = pSAVI->pVtbl->SweepBuffer(pSAVI, location, datalen, data,
+                                       (REFIID) & SOPHOS_IID_ENUM_SWEEPRESULTS,
+                                       (void **) &pEnumResults);
     } else {
-        hr = pSAVI->pVtbl->SweepFile(pSAVI, data, (REFIID) & SOPHOS_IID_ENUM_SWEEPRESULTS, (void **) &pEnumResults);
+        hr = pSAVI->pVtbl->SweepFile(pSAVI, data,
+                                     (REFIID) & SOPHOS_IID_ENUM_SWEEPRESULTS,
+                                     (void **) &pEnumResults);
     }
     if (hr < 0) {
         sprintf(buf, "%lx", hr);
@@ -2935,7 +2969,8 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
     }
     if ((hr = pEnumResults->pVtbl->Reset(pEnumResults)) < 0) {
         sprintf(buf, "%lx", hr);
-        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to reset results enumerator: %s", location, buf, 0);
+        Tcl_AppendResult(conn->interp, "nssavi: %s: Failed to reset results enumerator: %s",
+                         location, buf, 0);
         pSAVI->pVtbl->Terminate(pSAVI);
         pSAVI->pVtbl->Release(pSAVI);
         return TCL_ERROR;
@@ -2979,9 +3014,9 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
     pEnumResults->pVtbl->Release(pEnumResults);
     pSAVI->pVtbl->Terminate(pSAVI);
     pSAVI->pVtbl->Release(pSAVI);
-#endif
+# endif
 
-#ifdef USE_CLAMAV
+# ifdef USE_CLAMAV
     const char *virname;
     unsigned long size = 0;
 
@@ -2997,19 +3032,22 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
         }
         write(fd, data, datalen);
         unlink(tmpfile);
-        if (cl_scandesc(fd, &virname, &size, conn->config->ClamAvRoot, &conn->config->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
+        if (cl_scandesc(fd, &virname, &size, conn->config->ClamAvRoot,
+                        &conn->config->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
             conn->flags |= SMTPD_GOTVIRUS;
             SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, (char*)virname, 1);
         }
     } else {
-        if (cl_scanfile(data, &virname, &size, conn->config->ClamAvRoot, &conn->config->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
+        if (cl_scanfile(data, &virname, &size, conn->config->ClamAvRoot,
+                        &conn->config->ClamAvLimits, CL_SCAN_STDOPT) == CL_VIRUS) {
             conn->flags |= SMTPD_GOTVIRUS;
             SmtpdConnAddHeader(conn, SMTPD_HDR_VIRUS_STATUS, (char*)virname, 1);
         }
     }
-#endif
+# endif
     return TCL_OK;
 }
+#endif
 
 static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString)
 {
@@ -3096,12 +3134,13 @@ static unsigned int SmtpdFlags(const char *name)
 
 static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * const objv[])
 {
-    char *name = NULL;
-    smtpdRcpt *rcpt;
-    smtpdConn *conn = NULL;
+    char          *name = NULL;
+    smtpdRcpt     *rcpt;
+    smtpdConn     *conn = NULL;
     Tcl_HashEntry *rec;
-    smtpdConfig *config = arg;
-    int cmd, id, index = -99, count = 0;
+    smtpdConfig   *config = arg;
+    int            cmd, index = -99, count = 0;
+    unsigned int   id;
 
     enum {
         cmdInfo,
@@ -3183,9 +3222,13 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
     if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *) &cmd) != TCL_OK) {
         return TCL_ERROR;
     }
+
     if (cmd > cmdSessions) {
-        if (Tcl_GetIntFromObj(interp, objv[2], &id) != TCL_OK) {
+        int i;
+        if (Tcl_GetIntFromObj(interp, objv[2], &i) != TCL_OK) {
             return TCL_ERROR;
+        } else {
+            id = (unsigned int)i;
         }
         Ns_MutexLock(&config->lock);
         rec = Tcl_FindHashEntry(&config->sessions, (char *)(long) id);
@@ -3203,11 +3246,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_WrongNumArgs(interp, 1, objv, "name");
             return TCL_ERROR;
         }
-        if (!(id = SmtpdFlags(Tcl_GetString(objv[2])))) {
+        id = SmtpdFlags(Tcl_GetString(objv[2]));
+        if (id == 0) {
             Tcl_AppendResult(interp, "nssmtpd: invalid flag name ", Tcl_GetString(objv[2]), 0);
             return TCL_ERROR;
         }
-        Tcl_SetObjResult(interp, Tcl_NewIntObj(id));
+        Tcl_SetObjResult(interp, Tcl_NewIntObj((int)id));
         break;
 
     case cmdEncode:
@@ -3215,26 +3259,30 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_WrongNumArgs(interp, 1, objv, "type text");
             return TCL_ERROR;
         }
+
         if (!strcmp(Tcl_GetString(objv[2]), "base64")) {
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
             if (!(name = encode64(name, count))) {
                 break;
             }
             Tcl_SetResult(interp, name, (Tcl_FreeProc *) ns_free);
-        } else
-        if (!strcmp(Tcl_GetString(objv[2]), "hex")) {
+
+        } else if (!strcmp(Tcl_GetString(objv[2]), "hex")) {
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
-            if (!(name = encodehex(name, count))) {
+            name = encodehex(name, (size_t)count);
+            if (name == NULL) {
                 break;
             }
             Tcl_SetResult(interp, name, (Tcl_FreeProc *) ns_free);
-        } else
-        if (!strcmp(Tcl_GetString(objv[2]), "qprint")) {
+
+        } else if (!strcmp(Tcl_GetString(objv[2]), "qprint")) {
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
-            if (!(name = encodeqp(name, count))) {
+            name = encodeqp(name, (size_t)count);
+            if (name == NULL) {
                 break;
             }
             Tcl_SetResult(interp, name, (Tcl_FreeProc *) ns_free);
+
         } else {
             Tcl_AppendResult(interp, "unknown encode type", 0);
             return TCL_ERROR;
@@ -3247,31 +3295,35 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             return TCL_ERROR;
         }
         if (!strcmp(Tcl_GetString(objv[2]), "base64")) {
-            int len;
+            size_t len;
+
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
             if (!(name = decode64(name, count, &len))) {
                 break;
             }
-            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, len));
+            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, (int)len));
             ns_free(name);
-        } else
-        if (!strcmp(Tcl_GetString(objv[2]), "hex")) {
-            int len;
+
+        } else if (!strcmp(Tcl_GetString(objv[2]), "hex")) {
+            size_t len;
+
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
             if (!(name = decodehex(name, &len))) {
                 break;
             }
-            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, len));
+            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, (int)len));
             ns_free(name);
-        } else
-        if (!strcmp(Tcl_GetString(objv[2]), "qprint")) {
-            int len;
+
+        } else if (!strcmp(Tcl_GetString(objv[2]), "qprint")) {
+            size_t len;
+
             name = (char *) Tcl_GetByteArrayFromObj(objv[3], &count);
             if (!(name = decodeqp(name, count, &len))) {
                 break;
             }
-            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, len));
+            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *) name, (int)len));
             ns_free(name);
+
         } else {
             Tcl_AppendResult(interp, "unknown decode type", 0);
             return TCL_ERROR;
@@ -3315,11 +3367,11 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             rec = Tcl_FirstHashEntry(&config->sessions, &search);
             while (rec) {
                 conn = Tcl_GetHashValue(rec);
-                Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(conn->id));
+                Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj((int)conn->id));
                 Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(conn->from.addr, -1));
                 for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
                     Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(rcpt->addr, -1));
-                    Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(rcpt->flags));
+                    Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj((int)rcpt->flags));
                 }
                 rec = Tcl_NextHashEntry(&search);
             }
@@ -3633,7 +3685,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
     case cmdGetBody:{
             Tcl_Obj *obj = Tcl_NewListObj(0, 0);
             Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(conn->body.data.string, conn->body.data.length));
-            Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(conn->body.offset));
+            Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj((int)conn->body.offset));
             Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(conn->body.data.length));
             Tcl_SetObjResult(interp, obj);
             break;
@@ -3702,14 +3754,14 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                 if (objc > 3) {
                     if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                         Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(rcpt->addr, -1));
-                        Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(rcpt->flags));
+                        Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj((int)rcpt->flags));
                         Tcl_ListObjAppendElement(interp, list, Tcl_NewDoubleObj(rcpt->spam_score));
                         break;
                     }
                 } else {
                     item = Tcl_NewListObj(0, 0);
                     Tcl_ListObjAppendElement(interp, item, Tcl_NewStringObj(rcpt->addr, -1));
-                    Tcl_ListObjAppendElement(interp, item, Tcl_NewIntObj(rcpt->flags));
+                    Tcl_ListObjAppendElement(interp, item, Tcl_NewIntObj((int)rcpt->flags));
                     Tcl_ListObjAppendElement(interp, item, Tcl_NewDoubleObj(rcpt->spam_score));
                     Tcl_ListObjAppendElement(interp, list, item);
                 }
@@ -3757,6 +3809,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
     case cmdSetFlag:{
             unsigned int flags;
+            int          i;
 
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
@@ -3769,20 +3822,22 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                 }
             }
             /* Flag can be name or integer */
-            if (Tcl_GetIntFromObj(0, objv[4], &flags) != TCL_OK) {
+            if (Tcl_GetIntFromObj(0, objv[4], &i) != TCL_OK) {
                 if (!(flags = SmtpdFlags(Tcl_GetString(objv[4])))) {
                     Tcl_AppendResult(interp, "nssmtpd: invalid flag:", Tcl_GetString(objv[4]), 0);
                     return TCL_ERROR;
                 }
+            } else {
+                flags = (unsigned int)i;
             }
             /* Set global connection's flags */
             if (index == -1) {
                 if (flags > 0) {
                     conn->flags |= flags;
                 } else {
-                    conn->flags &= ~(flags * -1);
+                    conn->flags &= (unsigned int)(~((int)flags * -1));
                 }
-                Tcl_SetObjResult(interp, Tcl_NewIntObj(conn->flags));
+                Tcl_SetObjResult(interp, Tcl_NewIntObj((int)(conn->flags)));
                 break;
             }
             /* Set recipient's flags */
@@ -3791,9 +3846,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                     if (flags > 0) {
                         rcpt->flags |= flags;
                     } else {
-                        rcpt->flags &= ~(flags * -1);
+                        rcpt->flags &= (unsigned int)(~((int)flags * -1));
                     }
-                    Tcl_SetObjResult(interp, Tcl_NewIntObj(rcpt->flags));
+                    Tcl_SetObjResult(interp, Tcl_NewIntObj((int)(rcpt->flags)));
                     break;
                 }
             }
@@ -3802,6 +3857,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
     case cmdUnsetFlag:{
             unsigned int flags;
+            int          i;
+
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 2, objv, "address|index flag");
                 return TCL_ERROR;
@@ -3813,23 +3870,25 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                 }
             }
             /* Flag can be name or integer */
-            if (Tcl_GetIntFromObj(0, objv[4], &flags) != TCL_OK) {
+            if (Tcl_GetIntFromObj(0, objv[4], &i) != TCL_OK) {
                 if (!(flags = SmtpdFlags(Tcl_GetString(objv[4])))) {
                     Tcl_AppendResult(interp, "nssmtpd: invalid flag:", Tcl_GetString(objv[4]), 0);
                     return TCL_ERROR;
                 }
+            } else {
+                flags = (unsigned int)i;
             }
             /* Set global connection's flags */
             if (index == -1) {
                 conn->flags &= ~flags;
-                Tcl_SetObjResult(interp, Tcl_NewIntObj(conn->flags));
+                Tcl_SetObjResult(interp, Tcl_NewIntObj((int)(conn->flags)));
                 break;
             }
             /* Set recipient's flags */
             for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
                 if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
                     rcpt->flags &= ~flags;
-                    Tcl_SetObjResult(interp, Tcl_NewIntObj(rcpt->flags));
+                    Tcl_SetObjResult(interp, Tcl_NewIntObj((int)(rcpt->flags)));
                     break;
                 }
             }
@@ -3849,13 +3908,13 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
         }
         /* Global connection's flags */
         if (index == -1) {
-            Tcl_SetObjResult(interp, Tcl_NewIntObj(conn->flags));
+            Tcl_SetObjResult(interp, Tcl_NewIntObj((int)(conn->flags)));
             return TCL_OK;
         }
         /* Recipient's flags */
         for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
-                Tcl_SetObjResult(interp, Tcl_NewIntObj(rcpt->flags));
+                Tcl_SetObjResult(interp, Tcl_NewIntObj((int)rcpt->flags));
                 return TCL_OK;
             }
         }
@@ -4321,25 +4380,27 @@ static int parseInt(char *val)
     return 1;
 }
 
-static char *encodehex(const char *buf, int len)
+static char *encodehex(const char *buf, size_t len)
 {
     char *s;
-    int i, j;
 
     if (!buf || !*buf || !len) {
-        return 0;
-    }
-    s = ns_calloc(2, len + 1);
-    for (j = 0, i = 0; i < len; i++) {
-        s[j++] = hex[(buf[i] >> 4) & 0x0F];
-        s[j++] = hex[buf[i] & 0x0F];
+        s = NULL;
+    } else {
+        size_t i, j;
+
+        s = ns_calloc(2, len + 1);
+        for (j = 0, i = 0; i < len; i++) {
+            s[j++] = hex[(buf[i] >> 4) & 0x0F];
+            s[j++] = hex[buf[i] & 0x0F];
+        }
     }
     return s;
 }
 
-static char *decodehex(const char *str, int *len)
+static char *decodehex(const char *str, size_t *len)
 {
-    int c = 0;
+    size_t count = 0u;
     char *p, *t, *s, code[] = "00";
 
     if (!str || !*str || !len) {
@@ -4348,7 +4409,7 @@ static char *decodehex(const char *str, int *len)
     *len = strlen(str) / 2;
 
     t = p = ns_calloc(1, *len);
-    for (s = (char *) str; *s != '\0' && c < *len; c++) {
+    for (s = (char *) str; *s != '\0' && count < *len; count++) {
         if (!isxdigit(*s) || !isxdigit(*(s + 1))) {
             ns_free(p);
             return 0;
@@ -4392,7 +4453,7 @@ static char *encode64(const char *in, int len)
     return (char *) buf;
 }
 
-static char *decode64(const char *in, int len, int *outlen)
+static char *decode64(const char *in, int len, size_t *outlen)
 {
     char *out, *buf;
     int i, d = 0, dlast = 0, phase = 0;
@@ -4429,15 +4490,15 @@ static char *decode64(const char *in, int len, int *outlen)
                 ++phase;
                 break;
             case 1:
-                *out++ = ((dlast << 2) | ((d & 0x30) >> 4));
+                *out++ = (char)((dlast << 2) | ((d & 0x30) >> 4));
                 ++phase;
                 break;
             case 2:
-                *out++ = (((dlast & 0xf) << 4) | ((d & 0x3c) >> 2));
+                *out++ = (char)(((dlast & 0xf) << 4) | ((d & 0x3c) >> 2));
                 ++phase;
                 break;
             case 3:
-                *out++ = (((dlast & 0x03) << 6) | d);
+                *out++ = (char)(((dlast & 0x03) << 6) | d);
                 phase = 0;
                 break;
             }
@@ -4445,11 +4506,11 @@ static char *decode64(const char *in, int len, int *outlen)
         }
     }
     *out = 0;
-    *outlen = out - buf;
+    *outlen = (size_t)(out - buf);
     return buf;
 }
 
-static char *encodeqp(const char *in, int len)
+static char *encodeqp(const char *in, size_t len)
 {
     int i = 0;
     char *buf, *out;
@@ -4490,7 +4551,7 @@ static char *encodeqp(const char *in, int len)
     return buf;
 }
 
-static char *decodeqp(const char *in, int len, int *outlen)
+static char *decodeqp(const char *in, int len, size_t *outlen)
 {
     char c2, *out, *buf, *ptr, *s;
 
@@ -4529,7 +4590,7 @@ static char *decodeqp(const char *in, int len, int *outlen)
                     } else {
                         c2 -= (isupper(c2) ? 'A' - 10 : 'a' - 10);
                     }
-                    *out++ = c2 + (c << 4);
+                    *out++ = (char)(c2 + (c << 4));
                     ptr = out;
                     break;
                 }
@@ -4546,7 +4607,7 @@ static char *decodeqp(const char *in, int len, int *outlen)
         }
     }
     *out = 0;
-    *outlen = out - buf;
+    *outlen = (size_t)(out - buf);
     return buf;
 }
 
@@ -4591,7 +4652,7 @@ static void dnsInit(const char *name, ...)
         dnsFailureTimeout = va_arg(ap, int);
     } else
      if (!strcmp(name, "ttl")) {
-        dnsTTL = va_arg(ap, int);
+         dnsTTL = va_arg(ap, unsigned long);
     }
     va_end(ap);
     Ns_MutexUnlock(&dnsMutex);
@@ -4599,13 +4660,13 @@ static void dnsInit(const char *name, ...)
 
 static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
 {
-    fd_set fds;
-    char buf[DNS_BUFSIZE];
+    fd_set     fds;
+    char       buf[DNS_BUFSIZE];
     struct timeval tv;
     dnsServer *server = NULL;
     dnsPacket *req, *reply;
-    int sock = NS_INVALID_SOCKET;
-    socklen_t socklen;
+    int        sock = NS_INVALID_SOCKET;
+    socklen_t  socklen;
 
     if (!name) {
         return 0;
@@ -4613,12 +4674,13 @@ static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
 
     // Prepare DNS request packet
     req = ns_calloc(1, sizeof(dnsPacket));
-    req->id = (unsigned long) req % (unsigned long) name;
+    req->id = (unsigned short)((unsigned long) req % (unsigned long) name);
     DNS_SET_RD(req->u, 1);
     req->buf.allocated = DNS_REPLY_SIZE;
     req->buf.data = ns_calloc(1, req->buf.allocated);
     if (name) {
         dnsRecord *rec = ns_calloc(1, sizeof(dnsRecord));
+
         rec->name = ns_strcopy(name);
         rec->type = type;
         rec->class = DNS_CLASS_INET;
@@ -4788,16 +4850,17 @@ static dnsRecord *dnsRecordAppend(dnsRecord ** list, dnsRecord *pkt)
 static int dnsParseName(dnsPacket *pkt, char **ptr, char *buf, int buflen, int pos, int level)
 {
     unsigned short i, len, offset;
-    char *p;
+    char          *p;
 
     if (level > 15) {
         Ns_Log(Error, "nsdns: infinite loop %ld: %d", (*ptr - pkt->buf.data) - 2, level);
         return -9;
     }
-    while ((len = *((*ptr)++)) != 0) {
+    while ((len = (unsigned short)*((*ptr)++)) != 0) {
         switch (len & 0xC0) {
         case 0xC0:
-            if ((offset = (((len & ~0xC0) << 8) + (u_char) ** ptr)) >= pkt->buf.size) {
+            offset = (unsigned short)(((len & ~0xC0) << 8) + (u_char) **ptr);
+            if (offset >= pkt->buf.size) {
                 return -1;
             }
             (*ptr)++;
