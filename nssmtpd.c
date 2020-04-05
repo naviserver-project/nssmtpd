@@ -315,10 +315,10 @@ typedef struct _dnsRecord {
 typedef struct _dnsPacket {
     unsigned short id;
     unsigned short u;
-    short qdcount;
-    short ancount;
-    short nscount;
-    short arcount;
+    unsigned short qdcount;
+    unsigned short ancount;
+    unsigned short nscount;
+    unsigned short arcount;
     dnsName *nmlist;
     dnsRecord *qdlist;
     dnsRecord *anlist;
@@ -393,12 +393,12 @@ static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
 static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr);
-static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, int len);
+static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len);
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length);
-static int SmtpdWrite(smtpdConn *conn, const void *vbuf, int len);
-static int SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
-static int SmtpdPuts(smtpdConn *conn, const char *string);
-static int SmtpdWriteData(smtpdConn *conn, const char *buf, int len);
+static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len);
+static ssize_t SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
+static ssize_t SmtpdPuts(smtpdConn *conn, const char *string);
+static ssize_t SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len);
 static ssize_t SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr);
 static char *SmtpdStrPos(char *as1, const char *as2);
 static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
@@ -433,7 +433,7 @@ static int dnsResolverTimeout = 5;
 static int dnsFailureTimeout  = 300;
 
 // Default port
-const static int DEFAULT_PORT = 25;
+static const unsigned short DEFAULT_PORT = 25;
 
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
@@ -1901,7 +1901,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
             }
             Tcl_SetObjLength(data, Tcl_GetCharLength(data) + 1);
             ptr = Tcl_GetString(data) + offset;
-            memmove(ptr + 1, ptr, (unsigned) Tcl_GetCharLength(data) - offset);
+            memmove(ptr + 1, ptr, (size_t)(Tcl_GetCharLength(data) - offset));
             *(ptr++) = '.';
         }
     }
@@ -2053,7 +2053,7 @@ again:
 }
 
 static ssize_t
-SmtpdRead(smtpdConn *conn, void *vbuf, int len)
+SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len)
 {
     ssize_t nread, n;
     char *buf = (char *) vbuf;
@@ -2137,9 +2137,9 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
     return sent;
 }
 
-static int SmtpdWrite(smtpdConn *conn, const void *vbuf, int len)
+static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len)
 {
-    int nwrote;
+    ssize_t     nwrote;
     const char *buf;
 
     nwrote = len;
@@ -2183,19 +2183,19 @@ SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
     return (nread > 0 ? len : nread);
 }
 
-static int SmtpdWriteData(smtpdConn *conn, const char *buf, int len)
+static ssize_t SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
 {
     if (Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         Tcl_DString ds;
 
         Tcl_DStringInit(&ds);
-        Tcl_DStringAppend(&ds, buf, len-2);
+        Tcl_DStringAppend(&ds, buf, (int)(len-2));
         Ns_Log(SmtpdDebug, "nssmtpd: %d: >>> %s", conn->id, ds.string);
         Tcl_DStringFree(&ds);
     }
 
     while (len > 0) {
-        int nwrote = SmtpdWrite(conn, buf, len);
+        ssize_t nwrote = SmtpdWrite(conn, buf, len);
 
         if (nwrote < 0) {
             return NS_ERROR;
@@ -2206,12 +2206,12 @@ static int SmtpdWriteData(smtpdConn *conn, const char *buf, int len)
     return NS_OK;
 }
 
-static int SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr)
+static ssize_t SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr)
 {
     return SmtpdWriteData(conn, dsPtr->string, dsPtr->length);
 }
 
-static int SmtpdPuts(smtpdConn *conn, const char *string)
+static ssize_t SmtpdPuts(smtpdConn *conn, const char *string)
 {
     return SmtpdWriteData(conn, string, (int) strlen(string));
 }
@@ -4453,7 +4453,7 @@ static char *encode64(const char *in, int len)
         *out++ = basis_64[in[0] >> 2];
         oval = (in[0] << 4) & 0x30;
         if (len > 1) {
-            oval |= in[1] >> 4;
+            oval |= (unsigned char)(in[1] >> 4);
         }
         *out++ = basis_64[oval];
         *out++ = (len < 2) ? '=' : basis_64[(in[1] << 2) & 0x3c];
@@ -4581,6 +4581,7 @@ static char *decodeqp(const char *in, int len, size_t *outlen)
                     if (s - in < len && *s == '\n') {
                         s++;
                     }
+                    NS_FALL_THROUGH;
                 case '\n':
                     ptr = out;
                     break;
@@ -4590,14 +4591,14 @@ static char *decodeqp(const char *in, int len, size_t *outlen)
                         return 0;
                     }
                     if (isdigit(c)) {
-                        c -= '0';
+                        c = (char)(c - '0');
                     } else {
-                        c -= (isupper(c) ? 'A' - 10 : 'a' - 10);
+                        c = (char) (c - (isupper(c) ? 'A' - 10 : 'a' - 10));
                     }
                     if (isdigit(c2)) {
-                        c2 -= '0';
+                        c2 = (char)(c2 - '0');
                     } else {
-                        c2 -= (isupper(c2) ? 'A' - 10 : 'a' - 10);
+                        c2 = (char)(c2 - (isupper(c2) ? 'A' - 10 : 'a' - 10));
                     }
                     *out++ = (char)(c2 + (c << 4));
                     ptr = out;
@@ -4607,9 +4608,10 @@ static char *decodeqp(const char *in, int len, size_t *outlen)
         case ' ':
             *out++ = c;
             break;
-        case '\r':
+        case '\r': NS_FALL_THROUGH;
         case '\n':
             out = ptr;
+            NS_FALL_THROUGH;
         default:
             *out++ = c;
             ptr = out;
@@ -4715,7 +4717,8 @@ static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
         }
         while (server) {
             if (server->fail_time != 0 && ((int)(now - server->fail_time) > dnsFailureTimeout)) {
-                server->fail_count = server->fail_time = 0;
+                server->fail_count = 0;
+                server->fail_time = 0;
                 Ns_Log(Error, "dnsLookup: %s: nameserver re-enabled", server->name);
             }
             if (server->fail_time == 0) {
@@ -4790,7 +4793,8 @@ static dnsPacket *dnsLookup(char *name, unsigned short type, int *errcode)
                 ns_sockclose(sock);
                 dnsPacketFree(req, 0);
                 Ns_MutexLock(&dnsMutex);
-                server->fail_count = server->fail_time = 0;
+                server->fail_count = 0;
+                server->fail_time = 0;
                 Ns_MutexUnlock(&dnsMutex);
                 return reply;
             }
@@ -4850,10 +4854,10 @@ static void dnsRecordDestroy(dnsRecord **pkt)
 
 static dnsRecord *dnsRecordAppend(dnsRecord ** list, dnsRecord *pkt)
 {
-    if (!list || !pkt) {
-        return 0;
+    if (list == NULL || pkt == NULL) {
+        return NULL;
     }
-    for (; *list != '\0'; list = &(*list)->next);
+    for (; *list != NULL; list = &(*list)->next);
     *list = pkt;
     return *list;
 }
@@ -4913,14 +4917,14 @@ static dnsPacket *dnsParseHeader(void *buf, size_t size)
     p = (unsigned short *) buf;
     pkt->id = ntohs(p[0]);
     pkt->u = ntohs(p[1]);
-    pkt->qdcount = (short)ntohs(p[2]);
-    pkt->ancount = (short)ntohs(p[3]);
-    pkt->nscount = (short)ntohs(p[4]);
-    pkt->arcount = (short)ntohs(p[5]);
+    pkt->qdcount = ntohs(p[2]);
+    pkt->ancount = ntohs(p[3]);
+    pkt->nscount = ntohs(p[4]);
+    pkt->arcount = ntohs(p[5]);
     /* First two bytes are reserved for packet length
        in TCP mode plus some overhead in case we compress worse
        than it was */
-    pkt->buf.allocated = (unsigned short)size + 128u;
+    pkt->buf.allocated = (unsigned short)(size + 128u);
     pkt->buf.data = ns_malloc(pkt->buf.allocated);
     pkt->buf.size = (unsigned short)size;
     memcpy(pkt->buf.data + 2, buf, (unsigned) size);
@@ -4968,7 +4972,7 @@ static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query)
         strcpy(name, "invalid TTL position");
         goto err;
     }
-    y->ttl = ntohl(*((unsigned long *) pkt->buf.ptr));
+    y->ttl = ntohl(*((unsigned *) pkt->buf.ptr));
     pkt->buf.ptr += 4;
     // Fetch the resource data.
     if (pkt->buf.ptr + 2 > pkt->buf.data + pkt->buf.allocated) {
@@ -5025,15 +5029,15 @@ static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query)
             strcpy(name, "invalid SOA data len");
             goto err;
         }
-        y->data.soa->serial = ntohl(*((unsigned long *) pkt->buf.ptr));
+        y->data.soa->serial = ntohl(*((unsigned *) pkt->buf.ptr));
         pkt->buf.ptr += 4;
-        y->data.soa->refresh = ntohl(*((unsigned long *) pkt->buf.ptr));
+        y->data.soa->refresh = ntohl(*((unsigned *) pkt->buf.ptr));
         pkt->buf.ptr += 4;
-        y->data.soa->retry = ntohl(*((unsigned long *) pkt->buf.ptr));
+        y->data.soa->retry = ntohl(*((unsigned *) pkt->buf.ptr));
         pkt->buf.ptr += 4;
-        y->data.soa->expire = ntohl(*((unsigned long *) pkt->buf.ptr));
+        y->data.soa->expire = ntohl(*((unsigned *) pkt->buf.ptr));
         pkt->buf.ptr += 4;
-        y->data.soa->ttl = ntohl(*((unsigned long *) pkt->buf.ptr));
+        y->data.soa->ttl = ntohl(*((unsigned *) pkt->buf.ptr));
         pkt->buf.ptr += 4;
     }
 rec:
@@ -5113,7 +5117,7 @@ static void dnsEncodeName(dnsPacket *pkt, char *name)
             nm->next = pkt->nmlist;
             pkt->nmlist = nm;
             nm->name = ns_strdup(&name[k]);
-            nm->offset = (short)(pkt->buf.ptr - pkt->buf.data) - 2;
+            nm->offset = (short)((pkt->buf.ptr - pkt->buf.data) - 2);
             // Encode name part inline
             *pkt->buf.ptr++ = (char) (len & 0x3F);
             for (i = 0; i < len; i++) {
@@ -5131,7 +5135,7 @@ static void dnsEncodeHeader(dnsPacket *pkt)
 {
     unsigned short *p = (unsigned short *) pkt->buf.data;
 
-    pkt->buf.size = (unsigned short)(pkt->buf.ptr - pkt->buf.data) - 2u;
+    pkt->buf.size = (unsigned short)((pkt->buf.ptr - pkt->buf.data) - 2u);
     p[0] = htons(pkt->buf.size);
     p[1] = htons(pkt->id);
     p[2] = htons(pkt->u);
@@ -5155,7 +5159,7 @@ static void dnsEncodeShort(dnsPacket *pkt, int num)
 
 static void dnsEncodeLong(dnsPacket *pkt, unsigned long num)
 {
-    *((unsigned long *) pkt->buf.ptr) = htonl((unsigned long) num);
+    *((unsigned long *) pkt->buf.ptr) = htonl((unsigned) num);
     pkt->buf.ptr += 4;
 }
 
@@ -5175,7 +5179,7 @@ static void dnsEncodeBegin(dnsPacket *pkt)
 static void dnsEncodeEnd(dnsPacket *pkt)
 {
     unsigned short len = (unsigned short)(pkt->buf.ptr - pkt->buf.rec);
-    *((unsigned short *) pkt->buf.rec) = htons(len - 2);
+    *((unsigned short *) pkt->buf.rec) = htons((unsigned short)(len - 2));
 }
 
 static void dnsEncodeRecord(dnsPacket *pkt, dnsRecord *list)
@@ -5239,7 +5243,7 @@ static void dnsEncodeGrow(dnsPacket *pkt, size_t size, const char *UNUSED(proc))
     size_t offset = (size_t)pkt->buf.ptr - (size_t)pkt->buf.data;
     long roffset = pkt->buf.rec - pkt->buf.data;
     if (offset + size >= pkt->buf.allocated) {
-        pkt->buf.allocated += 256;
+        pkt->buf.allocated = (unsigned short)(pkt->buf.allocated + 256u);
         pkt->buf.data = ns_realloc(pkt->buf.data, pkt->buf.allocated);
         pkt->buf.ptr = &pkt->buf.data[offset];
         if (pkt->buf.rec)
