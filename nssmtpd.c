@@ -338,7 +338,7 @@ typedef struct _dnsPacket {
 } dnsPacket;
 
 
-static int parseEmail(smtpdEmail *addr, char *str);
+static bool parseEmail(smtpdEmail *addr, char *str);
 static char *encode64(const char *in, int len);
 static char *decode64(const char *in, int len, size_t *outlen);
 static char *encodeqp(const char *in, size_t len);
@@ -384,7 +384,9 @@ static Ns_TclTraceProc SmtpdInterpInit;
 static Tcl_ObjCmdProc SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
 static int SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
-static int SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender, const char *rcpt, char *data, char *host, unsigned short port);
+static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
+                               const char *rcpt, const char *data, const char *host,
+                               unsigned short port);
 static smtpdConn *SmtpdConnCreate(smtpdConfig *server, Ns_Sock *sock);
 static void SmtpdConnReset(smtpdConn *conn);
 static void SmtpdConnFree(smtpdConn *conn);
@@ -400,17 +402,17 @@ static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *ti
 static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len);
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length);
 static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len);
-static ssize_t SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
-static ssize_t SmtpdPuts(smtpdConn *conn, const char *string);
-static ssize_t SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len);
+static Ns_ReturnCode SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr);
+static Ns_ReturnCode SmtpdPuts(smtpdConn *conn, const char *string);
+static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len);
 static ssize_t SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr);
 static char *SmtpdStrPos(char *as1, const char *as2);
 static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
 static char *SmtpdStrTrim(char *str);
 static smtpdIpaddr *SmtpdParseIpaddr(char *str);
 static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
-static int SmtpdCheckDomain(smtpdConn *conn, const char *domain);
-static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port);
+static bool SmtpdCheckDomain(smtpdConn *conn, const char *domain);
+static bool SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port);
 static int SmtpdCheckSpam(smtpdConn *conn);
 static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location);
 static void SmtpdPanic(const char *fmt, ...);
@@ -427,8 +429,8 @@ static int segvTimeout;
 static const char hex[] = "0123456789ABCDEF";
 
 // Static DNS stuff
-int dnsDebug = 0;
-unsigned long dnsTTL = 86400;
+static int dnsDebug = 0;
+static unsigned long dnsTTL = 86400;
 
 static Ns_Mutex dnsMutex = NULL;
 static dnsServer *dnsServers  = NULL;
@@ -441,7 +443,7 @@ static const unsigned short DEFAULT_PORT = 25;
 
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
-NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
+NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
     char *path, *addr2, *portString;
     const char *addr;
@@ -583,8 +585,8 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
-    init.version = NS_DRIVER_VERSION_4;
-    init.name = "nssmtpd";
+    init.version      = NS_DRIVER_VERSION_4;
+    init.name         = "nssmtpd";
     init.listenProc   = SmtpdListenProc;
     init.acceptProc   = SmtpdAcceptProc;
     init.recvProc     = NULL;
@@ -593,11 +595,11 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     init.keepProc     = NULL;
     init.requestProc  = SmtpdRequestProc;
     init.closeProc    = SmtpdCloseProc;
-    init.opts = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
-    init.arg = serverPtr;
-    init.path = path;
-    init.protocol = "smtp";
-    init.defaultPort = DEFAULT_PORT;
+    init.opts         = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
+    init.arg          = serverPtr;
+    init.path         = path;
+    init.protocol     = "smtp";
+    init.defaultPort  = DEFAULT_PORT;
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
         ns_free(path);
@@ -740,7 +742,7 @@ static void SmtpdSegv(int UNUSED(sig))
 static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
-    return NS_OK;
+    return TCL_OK;
 }
 
 
@@ -761,7 +763,8 @@ static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
  */
 
 static NS_SOCKET
-SmtpdListenProc(Ns_Driver *driver, const char *address, unsigned short port, int backlog, bool reuseport)
+SmtpdListenProc(Ns_Driver *driver, const char *address, unsigned short port,
+                int backlog, bool reuseport)
 {
     NS_SOCKET sock;
 
@@ -876,7 +879,7 @@ SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listensock, struct sockaddr *sockaddrPt
  *----------------------------------------------------------------------
  */
 
-static int SmtpdRequestProc(void *arg, Ns_Conn *conn)
+static Ns_ReturnCode SmtpdRequestProc(void *arg, Ns_Conn *conn)
 {
   smtpdConfig *server = arg;
 
@@ -961,7 +964,7 @@ static void SmtpdThread(smtpdConn *conn)
     Ns_DStringPrintf(&conn->line, "220 %s SMTP nssmtpd %s ", Ns_InfoHostname(), SMTPD_VERSION);
     Ns_HttpTime(&conn->line, 0);
     Ns_DStringAppend(&conn->line, "\r\n");
-    if (SmtpdWriteDString(conn, &conn->line)) {
+    if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
         goto error;
     }
 
@@ -1187,7 +1190,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             /* Call Tcl callback */
             if (SmtpdConnEval(conn, config->mailproc) != TCL_OK) {
-                if (SmtpdPuts(conn, "421 Service not available\r\n")) {
+                if (SmtpdPuts(conn, "421 Service not available\r\n") != NS_OK) {
                     goto error;
                 }
                 break;
@@ -1803,24 +1806,26 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     return -1;
 }
 
-static int
-SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const char *rcpt, char *dname, char *host, unsigned short port)
+static Ns_ReturnCode
+SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
+          const char *rcpt, const char *dname, const char *host,
+          unsigned short port)
 {
-    char *ptr;
-    Ns_Sock sock;
-    Tcl_Obj *data;
+    char      *ptr;
+    Ns_Sock    sock;
+    Tcl_Obj   *data;
     smtpdConn *conn;
-    Ns_Time timeout = { config->writetimeout, 0 };
-    int duplicated = 0;
+    Ns_Time    timeout = { config->writetimeout, 0 };
+    int        duplicated = 0;
 
     Ns_Log(SmtpdDebug,"SmtpdSend");
 
-    if (!sender || !rcpt || !dname) {
+    if (sender == NULL || rcpt == NULL || dname == NULL) {
         Tcl_AppendResult(interp, "nssmtpd: send: empty arguments", (char *)0L);
-        return -1;
+        return NS_ERROR;
     }
     if (!(data = Tcl_GetVar2Ex(interp, dname, 0, TCL_LEAVE_ERR_MSG))) {
-        return -1;
+        return NS_ERROR;
     }
     if (host == NULL || *host == '\0') {
         host = config->relayhost;
@@ -1833,20 +1838,20 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
         Tcl_AppendResult(interp, "nssmtpd: send: unable to connect to ", host, ": ",
                          strerror(errno), (char *)0L);
-        return -1;
+        return NS_ERROR;
     }
     sock.driver = config->driver;
     /* Allocate virtual SMTPD connection */
     if (!(conn = SmtpdConnCreate(config, &sock))) {
         Tcl_AppendResult(interp, strerror(errno), (char *)0L);
         ns_sockclose(sock.sock);
-        return -1;
+        return NS_ERROR;
     }
     /* Read greeting line from the conn */
     if (SmtpdReadLine(conn, &conn->line) < 0) {
         Tcl_AppendResult(interp, "greeting read error: ", strerror(errno), (char *)0L);
         SmtpdConnFree(conn);
-        return -1;
+        return NS_ERROR;
     }
 
     /* HELO command */
@@ -1945,7 +1950,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
     if (duplicated) {
         Tcl_DecrRefCount(data);
     }
-    return 0;
+    return NS_OK;
 
   ioerror:
     if (errno) {
@@ -1956,7 +1961,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
     if (duplicated) {
         Tcl_DecrRefCount(data);
     }
-    return -1;
+    return NS_ERROR;
 
   error:
     Tcl_AppendResult(interp, "nssmtpd: send: unexpected status from ", host, ": ",
@@ -1965,7 +1970,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender, const cha
     if (duplicated) {
         Tcl_DecrRefCount(data);
     }
-    return -1;
+    return NS_ERROR;
 }
 
 static void
@@ -2187,7 +2192,7 @@ SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
     return (nread > 0 ? len : nread);
 }
 
-static ssize_t SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
+static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
 {
     if (Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         Tcl_DString ds;
@@ -2210,12 +2215,12 @@ static ssize_t SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
     return NS_OK;
 }
 
-static ssize_t SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr)
+static Ns_ReturnCode SmtpdWriteDString(smtpdConn *conn, Ns_DString *dsPtr)
 {
     return SmtpdWriteData(conn, dsPtr->string, dsPtr->length);
 }
 
-static ssize_t SmtpdPuts(smtpdConn *conn, const char *string)
+static Ns_ReturnCode SmtpdPuts(smtpdConn *conn, const char *string)
 {
     return SmtpdWriteData(conn, string, (int) strlen(string));
 }
@@ -2713,19 +2718,19 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     return alist;
 }
 
-static int SmtpdCheckDomain(smtpdConn *conn, const char *domain)
+static bool SmtpdCheckDomain(smtpdConn *conn, const char *domain)
 {
     dnsRecord *rec;
     dnsPacket *reply;
 
     if (conn != NULL && (conn->flags & SMTPD_NEEDDOMAIN) == 0u) {
-        return 1;
+        return NS_TRUE;
     }
     if ((reply = dnsLookup(domain, DNS_TYPE_A, 0))) {
         for (rec = reply->anlist; rec != NULL && rec->type != DNS_TYPE_A; rec = rec->next);
         dnsPacketFree(reply, 0);
         if (rec) {
-            return 1;
+            return NS_TRUE;
         }
         reply = 0;
     }
@@ -2733,18 +2738,18 @@ static int SmtpdCheckDomain(smtpdConn *conn, const char *domain)
         for (rec = reply->anlist; rec != NULL && rec->type != DNS_TYPE_MX; rec = rec->next);
         dnsPacketFree(reply, 0);
         if (rec) {
-            return 1;
+            return NS_TRUE;
         }
     }
     if (!conn) {
-        return 0;
+        return NS_FALSE;
     }
     Ns_Log(Error, "nssmtpd: checkdomain: %d: HOST: %s, FLAGS: 0x%X, %s", conn->id, conn->host, conn->flags, domain);
     Ns_DStringPrintf(&conn->reply, "553 %s... Domain unrecognized\r\n", domain);
-    return 0;
+    return NS_FALSE;
 }
 
-static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port)
+static bool SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port)
 {
     smtpdRelay *relay;
 
@@ -2765,7 +2770,7 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsig
                         *port = relay->port;
                     }
                     Ns_MutexUnlock(&conn->config->relaylock);
-                    return 1;
+                    return NS_TRUE;
                 }
                 break;
             }
@@ -2776,7 +2781,7 @@ static int SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsig
     }
     Ns_MutexUnlock(&conn->config->relaylock);
 
-    return 0;
+    return NS_FALSE;
 }
 
 /* CHECK command returns just a header (terminated by "\r\n\r\n") with the first
@@ -2806,8 +2811,9 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     smtpdConn *spamd;
     Ns_Time timeout = { conn->config->writetimeout, 0 };
 
-    if (!conn->config->spamdhost)
+    if (conn->config->spamdhost == NULL) {
         return 0;
+    }
     /* Should have at least one unverified recipient */
     for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         if ((rcpt->flags & SMTPD_DELIVERED) == 0u
@@ -3030,7 +3036,7 @@ SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location)
 # endif
 
 # ifdef USE_CLAMAV
-    const char *virname;
+    const char   *virname;
     unsigned long size = 0;
 
     if (datalen) {
@@ -3360,7 +3366,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
         } else if (!strcasecmp("address", Tcl_GetString(objv[2]))) {
             if (config->driver != NULL && config->driver->location != NULL) {
                 const char *address = strstr(config->driver->location, "://");
-                if (address) {
+
+                if (address != NULL) {
                     address += 3;
                 } else {
                     address = config->driver->location;
@@ -3370,6 +3377,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
         } else if (!strcasecmp("relay", Tcl_GetString(objv[2]))) {
             Tcl_Obj *obj = Tcl_NewStringObj(config->relayhost, -1);
+
             Tcl_AppendToObj(obj, ":", -1);
             Tcl_AppendObjToObj(obj, Tcl_NewIntObj(config->relayport));
             Tcl_SetObjResult(interp, obj);
@@ -3378,7 +3386,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
     case cmdSessions:{
             Tcl_HashSearch search;
-            Tcl_Obj *list = Tcl_NewListObj(0, 0);
+            Tcl_Obj       *list = Tcl_NewListObj(0, 0);
+
             Ns_MutexLock(&config->lock);
             rec = Tcl_FirstHashEntry(&config->sessions, &search);
             while (rec) {
@@ -3435,12 +3444,12 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             name = ns_strdup(Tcl_GetString(objv[3]));
             if (parseEmail(&addr, name)) {
                 unsigned short port;
-                smtpdConn sconn;
-                char *host;
+                smtpdConn      sconn;
+                char          *host;
 
                 sconn.config = config;
                 if (SmtpdCheckRelay(&sconn, &addr, &host, &port)) {
-                    char buf[10];
+                    char buf[TCL_INTEGER_SPACE+1];
 
                     sprintf(buf, ":%d", port ? port : DEFAULT_PORT);
                     Tcl_AppendResult(interp, host, buf, (char *)0L);
@@ -3503,6 +3512,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
         } else if (!strcasecmp("clear", Tcl_GetString(objv[2]))) {
             smtpdRelay *relay;
+
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
@@ -3655,7 +3665,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                 }
                 ns_free(email);
             }
-            if (SmtpdSend(config, interp, Tcl_GetString(objv[2]), Tcl_GetString(objv[3]), Tcl_GetString(objv[4]), host, port)) {
+            if (SmtpdSend(config, interp, Tcl_GetString(objv[2]), Tcl_GetString(objv[3]),
+                          Tcl_GetString(objv[4]), host, port) != NS_OK) {
                 return TCL_ERROR;
             }
             break;
@@ -4134,7 +4145,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
     return TCL_OK;
 }
 
-static int parseEmail(smtpdEmail *addr, char *str)
+static bool parseEmail(smtpdEmail *addr, char *str)
 {
     int tok = ' ', ingroup = 0;
     char *phrase, *mailbox, *domain, *comment;
@@ -4158,12 +4169,12 @@ static int parseEmail(smtpdEmail *addr, char *str)
         case '@':
             (void) parseDomain(&str, &domain, &comment);
             if (!*phrase || !*domain) {
-                return 0;
+                return NS_FALSE;
             }
             addr->name = comment;
             addr->mailbox = phrase;
             addr->domain = domain;
-            return 1;
+            return NS_TRUE;
 
         case '<':
             tok = parsePhrase(&str, &mailbox, "%@>");
@@ -4186,16 +4197,16 @@ static int parseEmail(smtpdEmail *addr, char *str)
                 }
                 (void) parseDomain(&str, &domain, 0);
                 if (!*mailbox || !*domain) {
-                    return 0;
+                    return NS_FALSE;
                 }
                 addr->name = phrase;
                 addr->mailbox = mailbox;
                 addr->domain = domain;
-                return 1;
+                return NS_TRUE;
             }
         }
     }
-    return 0;
+    return NS_FALSE;
 }
 
 /*
