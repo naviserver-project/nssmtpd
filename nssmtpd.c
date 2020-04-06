@@ -49,6 +49,10 @@
 #include <openssl/evp.h>
 #endif
 
+#ifndef NS_FALL_THROUGH
+# define NS_FALL_THROUGH
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
