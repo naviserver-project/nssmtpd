@@ -53,6 +53,14 @@
 # define NS_FALL_THROUGH
 #endif
 
+#ifndef NS_INLINE
+# define NS_INLINE
+#endif
+
+#ifndef NS_EAGAIN
+# define NS_EAGAIN EAGAIN
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
