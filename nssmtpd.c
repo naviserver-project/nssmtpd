@@ -418,6 +418,8 @@ static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *locat
 static void SmtpdPanic(const char *fmt, ...);
 static void SmtpdSegv(int sig);
 static unsigned int SmtpdFlags(const char *name);
+static NS_INLINE bool Retry(int errorCode);
+
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
@@ -2192,6 +2194,22 @@ SmtpdReadLine(smtpdConn *conn, Ns_DString *dsPtr)
     return (nread > 0 ? len : nread);
 }
 
+static NS_INLINE bool Retry(int errorCode)
+{
+    return (errorCode == NS_EAGAIN
+            || errorCode == NS_EINTR
+#if defined(__APPLE__)
+            /*
+             * Due to a possible kernel bug at least in OS X 10.10 "Yosemite",
+             * EPROTOTYPE can be returned while trying to write to a socket
+             * that is shutting down. If we retry the write, we should get
+             * the expected EPIPE instead.
+             */
+            || errorCode == EPROTOTYPE
+#endif
+            || errorCode == NS_EWOULDBLOCK);
+}
+
 static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
 {
     if (Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
@@ -2207,6 +2225,15 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
         ssize_t nwrote = SmtpdWrite(conn, buf, len);
 
         if (nwrote < 0) {
+            if (Retry(ns_sockerrno)) {
+                Ns_Time timeout = {1, 0};
+
+                Ns_Log(Notice, "nssmtpd retry");
+                Ns_SockTimedWait(conn->sock->sock,
+                                 (unsigned int)NS_SOCK_WRITE,
+                                 &timeout);
+                continue;
+            }
             return NS_ERROR;
         }
         len -= nwrote;
