@@ -2236,7 +2236,7 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
             if (Retry(ns_sockerrno)) {
                 Ns_Time timeout = {1, 0};
 
-                Ns_Log(Notice, "nssmtpd retry");
+                Ns_Log(SmtpdDebug, "nssmtpd retry");
                 Ns_SockTimedWait(conn->sock->sock,
                                  (unsigned int)NS_SOCK_WRITE,
                                  &timeout);
