@@ -61,6 +61,10 @@
 # define NS_EAGAIN EAGAIN
 #endif
 
+#ifndef MIN
+# define MIN(a,b) (((a)<(b))?(a):(b))
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
@@ -2232,16 +2236,16 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
     }
 
     while (len > 0) {
-        ssize_t nwrote;
+        ssize_t nwrote, want_write = MIN(65536, len);
 
-        nwrote = SmtpdWrite(conn, buf, len);
+        nwrote = SmtpdWrite(conn, buf, want_write);
         Ns_Log(SmtpdDebug, "nssmtpd: %d want to write %ld wrote %ld",
                conn->id, len, nwrote);
 
         if (nwrote < 0) {
             int error_code = ns_sockerrno;
 
-            if (Retry(errno) && retry_count < 500) {
+            if (Retry(errno) && retry_count < 10) {
                 Ns_Time timeout = {1, 0};
 
                 Ns_Log(Notice, "nssmtpd retry %d error code %d: %s",
@@ -2254,6 +2258,7 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
             }
             return NS_ERROR;
         }
+        retry_count = 0;
         len -= nwrote;
         buf += nwrote;
     }
