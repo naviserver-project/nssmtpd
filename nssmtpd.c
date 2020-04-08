@@ -2220,6 +2220,8 @@ static NS_INLINE bool Retry(int errorCode)
 
 static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
 {
+    int retry_count = 0;
+
     if (Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         Tcl_DString ds;
 
@@ -2230,16 +2232,24 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
     }
 
     while (len > 0) {
-        ssize_t nwrote = SmtpdWrite(conn, buf, len);
+        ssize_t nwrote;
+
+        nwrote = SmtpdWrite(conn, buf, len);
+        Ns_Log(SmtpdDebug, "nssmtpd: %d want to write %ld wrote %ld",
+               conn->id, len, nwrote);
 
         if (nwrote < 0) {
-            if (Retry(ns_sockerrno)) {
+            int error_code = ns_sockerrno;
+
+            if (Retry(errno) && retry_count < 500) {
                 Ns_Time timeout = {1, 0};
 
-                Ns_Log(SmtpdDebug, "nssmtpd retry");
+                Ns_Log(Notice, "nssmtpd retry %d error code %d: %s",
+                       retry_count, error_code, strerror(error_code));
                 Ns_SockTimedWait(conn->sock->sock,
                                  (unsigned int)NS_SOCK_WRITE,
                                  &timeout);
+                retry_count++;
                 continue;
             }
             return NS_ERROR;
