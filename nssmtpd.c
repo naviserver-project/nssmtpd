@@ -2113,6 +2113,8 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len)
     return nread;
 }
 
+//static int FID = 0;
+
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
 {
     ssize_t       sent;
@@ -2121,7 +2123,43 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
     NS_NONNULL_ASSERT(buffer != NULL);
 
     if (sock->arg == NULL) {
-        sent = ns_send(sock->sock, buffer, length, 0);
+        int         retry_count = 0;
+        const char *buf = buffer;
+
+        sent = 0;
+        while (length > 0) {
+            ssize_t n;
+            size_t  want_write = MIN(65536, length);
+
+            n = ns_send(sock->sock, buf, want_write, 0);
+
+            if (n < 0) {
+                int error_code = ns_sockerrno;
+
+                if (Retry(error_code) && retry_count < 10) {
+                    Ns_Time timeout = {1, 0};
+
+                    Ns_Log(SmtpdDebug, "nssmtpd retry %d error code %d: %s",
+                           retry_count, error_code, strerror(error_code));
+
+                    Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout);
+                    retry_count++;
+                    continue;
+                }
+                return n;
+            } else {
+                //if (FID == 0) {
+                //    FID = open("/tmp/SEND", O_CREAT|O_WRONLY|O_TRUNC);
+                //}
+                //write(FID, buf, n);
+            }
+
+            retry_count = 0;
+            sent += n;
+            length -= (size_t)n;
+            buf += n;
+        }
+
     } else {
 #ifdef HAVE_OPENSSL_EVP_H
         struct iovec  iov;
@@ -2156,27 +2194,13 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
 #endif
     }
 
-    Ns_Log(SmtpdDebug, "SmtpdUnixSend sent %ld bytes (from %lu)", sent, length);
+    Ns_Log(SmtpdDebug, "SmtpdUnixSend sent %ld of %lu bytes", sent, length);
     return sent;
 }
 
-static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len)
+static ssize_t SmtpdWrite(smtpdConn *conn, const void *buf, ssize_t len)
 {
-    ssize_t     nwrote;
-    const char *buf;
-
-    nwrote = len;
-    buf = vbuf;
-    while (len > 0) {
-        ssize_t n = SmtpdUnixSend(conn->sock, buf, (size_t)len);
-
-        if (n < 0) {
-            return -1;
-        }
-        len -= n;
-        buf += n;
-    }
-    return nwrote;
+    return SmtpdUnixSend(conn->sock, buf, (size_t)len);
 }
 
 static ssize_t
@@ -2224,8 +2248,6 @@ static NS_INLINE bool Retry(int errorCode)
 
 static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len)
 {
-    int retry_count = 0;
-
     if (Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
         Tcl_DString ds;
 
@@ -2238,29 +2260,11 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
     Ns_Log(SmtpdDebug, "nssmtpd: %d want to send %ld bytes in total", conn->id, len);
 
     while (len > 0) {
-        ssize_t nwrote, want_write = MIN(65536, len);
-
-        nwrote = SmtpdWrite(conn, buf, want_write);
-        Ns_Log(SmtpdDebug, "nssmtpd: %d want to write %ld wrote %ld",
-               conn->id, len, nwrote);
+        ssize_t nwrote = SmtpdWrite(conn, buf, len);
 
         if (nwrote < 0) {
-            int error_code = ns_sockerrno;
-
-            if (Retry(errno) && retry_count < 10) {
-                Ns_Time timeout = {1, 0};
-
-                Ns_Log(SmtpdDebug, "nssmtpd retry %d error code %d: %s",
-                       retry_count, error_code, strerror(error_code));
-                Ns_SockTimedWait(conn->sock->sock,
-                                 (unsigned int)NS_SOCK_WRITE,
-                                 &timeout);
-                retry_count++;
-                continue;
-            }
             return NS_ERROR;
         }
-        retry_count = 0;
         len -= nwrote;
         buf += nwrote;
     }
