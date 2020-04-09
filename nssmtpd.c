@@ -2235,6 +2235,8 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
         Tcl_DStringFree(&ds);
     }
 
+    Ns_Log(SmtpdDebug, "nssmtpd: %d want to send %ld bytes in total", conn->id, len);
+
     while (len > 0) {
         ssize_t nwrote, want_write = MIN(65536, len);
 
@@ -2248,7 +2250,7 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
             if (Retry(errno) && retry_count < 10) {
                 Ns_Time timeout = {1, 0};
 
-                Ns_Log(Notice, "nssmtpd retry %d error code %d: %s",
+                Ns_Log(SmtpdDebug, "nssmtpd retry %d error code %d: %s",
                        retry_count, error_code, strerror(error_code));
                 Ns_SockTimedWait(conn->sock->sock,
                                  (unsigned int)NS_SOCK_WRITE,
