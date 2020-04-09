@@ -2125,13 +2125,14 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
     if (sock->arg == NULL) {
         int         retry_count = 0;
         const char *buf = buffer;
+        size_t      tosend = length;
 
         sent = 0;
-        while (length > 0) {
+        while (tosend > 0) {
             ssize_t n;
-            size_t  want_write = MIN(65536, length);
+            size_t  want_send = MIN(65536, tosend);
 
-            n = ns_send(sock->sock, buf, want_write, 0);
+            n = ns_send(sock->sock, buf, want_send, 0);
 
             if (n < 0) {
                 int error_code = ns_sockerrno;
@@ -2156,7 +2157,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
 
             retry_count = 0;
             sent += n;
-            length -= (size_t)n;
+            tosend -= (size_t)n;
             buf += n;
         }
 
