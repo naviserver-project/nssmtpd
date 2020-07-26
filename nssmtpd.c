@@ -192,6 +192,8 @@ typedef struct _smtpdConfig {
     const char *cafile;
     const char *capath;
     const char *ciphers;
+    const char *ciphersuites;
+    const char *protocols;
 #endif
 } smtpdConfig;
 
@@ -540,6 +542,8 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(path, "cafile"));
     serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(path, "capath"));
     serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(path, "ciphers"));
+    serverPtr->ciphersuites = ns_strcopy(Ns_ConfigGetValue(path, "ciphersuites"));
+    serverPtr->protocols = ns_strcopy(Ns_ConfigGetValue(path, "protocols"));
 #endif
 
     /* Parse flags */
@@ -1111,6 +1115,8 @@ static void SmtpdThread(smtpdConn *conn)
                 conn->config->capath,
                 0 /*verify*/,
                 conn->config->ciphers,
+                conn->config->ciphersuites,
+                conn->config->protocols,
                 &ctx);
             Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
 
