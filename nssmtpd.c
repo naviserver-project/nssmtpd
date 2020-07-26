@@ -769,7 +769,7 @@ static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
  *
  * SmtpdListenProc --
  *
- *      Open a listening TCP socket in non-blocking mode.
+ *      Open a listening TCP socket in nonblocking mode.
  *
  * Results:
  *      The open socket or NS_INVALID_SOCKET on error.
@@ -835,7 +835,7 @@ SmtpdCloseProc(Ns_Sock *sock)
  *
  * SmtpdAcceptProc --
  *
- *      Accept a new socket in non-blocking mode.
+ *      Accept a new socket in nonblocking mode.
  *
  * Results:
  *      possible results:
