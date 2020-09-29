@@ -1649,7 +1649,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (nread <= 0) {
             goto error421;
         }
-        if (strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
+        if (!strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
             hasStarttls = NS_TRUE;
         }
         if (relay->line.string[0] != '2') {
