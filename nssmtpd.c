@@ -1841,7 +1841,6 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Tcl_Obj    *data;
     smtpdConn  *conn;
     Ns_Time     timeout = { config->writetimeout, 0 };
-    bool        duplicated = NS_FALSE;
     int         dataLength;
     Tcl_DString dataDString;
 
@@ -1942,12 +1941,9 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
 
         ptr += 2;
         offset = ptr - dataString;
-        if (!duplicated) {
-            duplicated = NS_TRUE;
-        }
         /*
-         * Copy the data to the DString and insert an additional single period
-         * ('.').
+         * Copy the data to the Tcl_DString and insert an additional single
+         * period ('.').
          */
 
         Tcl_DStringAppend(&dataDString, dataString, (int)offset);
@@ -1955,9 +1951,10 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         dataString += offset;
         ptr = dataString;
     }
-    if (duplicated) {
+    if (dataDString.length > 0) {
         /*
-         * Append the final chunk.
+         * Only when we have found a line starting with a dot, we are useing
+         * the Tcl_DString. Append the final chunk in such cases.
          */
         Tcl_DStringAppend(&dataDString, dataString, -1);
         dataString = dataDString.string;
