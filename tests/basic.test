@@ -10,7 +10,7 @@
 # under the License.
 #
 # Copyright 2006 (C) Stephen Deasey <sdeasey@gmail.com>
-# Copyright 2015 (C) Gustaf Neumann <neumann@wu-wien.ac.at>
+# Copyright 2015-2020 (C) Gustaf Neumann <neumann@wu-wien.ac.at>
 #
 # Alternatively, the contents of this file may be used under the terms
 # of the GNU General Public License (the "GPL"), in which case the
@@ -29,6 +29,7 @@
 #
 package require tcltest 2.2
 namespace import -force ::tcltest::*
+ns_logctl severity Debug(smtpd) on
 
 ::tcltest::configure {*}$argv
 
@@ -38,15 +39,13 @@ if {[ns_config ns/server/test/module/nssmtpd port] ne ""} {
 
 test nssmtpd-1.1 {check if a basic request works} -constraints {serverListen} -setup {
     ns_register_proc GET /get {
-	set cmd {ns_sendmail -to neumann@wu.ac.at -from neumann@wu.ac.at -subject "hi" -body "some text"}
-
-	if {[catch {
-	    eval $cmd
-	} result]} {
-	    ns_log warning "$::errorInfo"
-	} else {
-	    set result "OK"
-	}
+      if {[catch {
+          ns_sendmail -to neumann@wu.ac.at -from neumann@wu.ac.at -subject "hi" -body "some text"
+      } result]} {
+          ns_log warning "$::errorInfo"
+      } else {
+          set result "OK"
+      }
         ns_return 200 text/plain $result
     }
 } -body {
@@ -55,6 +54,46 @@ test nssmtpd-1.1 {check if a basic request works} -constraints {serverListen} -s
     ns_unregister_op GET /get
 } -result "200 OK"
 
+test nssmtpd-1.2 {check if a basic request works} -constraints {serverListen} -setup {
+    ns_register_proc GET /get {
+        if {[catch {
+            set fullMailMessage "some text\n.and more\nnext line single dot\n.\nend\nof everything."
+            ns_sendmail -to neumann@wu.ac.at -from neumann@wu.ac.at -subject "hi" -body $fullMailMessage
+        } result]} {
+            ns_log warning "$::errorInfo"
+        } else {
+            set result "OK"
+        }
+        ns_return 200 text/plain $result
+    }
+} -body {
+    nstest::http -http 1.0 -getbody 1 GET /get
+} -cleanup {
+    ns_unregister_op GET /get
+} -result "200 OK"
+
+# test nssmtpd-1.3 {check if a basic request works} -constraints {serverListen} -setup {
+#     ns_register_proc GET /get {
+#         if {[catch {
+#             set fullMailMessage "some text\n.and more\nnext line single dot\n.\nend.\n"
+#             #set port [ns_config ns/server/test/module/nssmtpd port]
+#             #set addr [ns_config ns/server/test/module/nssmtpd address]
+#             set port 25
+#             set addr 137.208.116.20
+#             ns_log notice "ns_smtpd send neumann@wu.ac.at neumann@wu.ac.at fullMailMessage $addr $port"
+#             ns_smtpd send neumann@wu.ac.at neumann@wu.ac.at fullMailMessage $addr $port
+#         } result]} {
+#             ns_log warning "$::errorInfo"
+#         } else {
+#             set result "OK"
+#         }
+#         ns_return 200 text/plain $result
+#     }
+# } -body {
+#     nstest::http -http 1.0 -getbody 1 GET /get
+# } -cleanup {
+#     ns_unregister_op GET /get
+# } -result "200 OK"
 
 
 

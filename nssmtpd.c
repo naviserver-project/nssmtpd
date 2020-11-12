@@ -98,7 +98,7 @@
 #define SMTPD_GOTVIRUS       0x0100000u
 #define SMTPD_GOTSTARTTLS    0x0200000u
 
-#define SMTPD_VERSION              "2.1"
+#define SMTPD_VERSION              "2.2"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"
@@ -1447,6 +1447,7 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     }
     Ns_CloseOnExec(sock->sock);
     Ns_SockSetNonBlocking(sock->sock);
+
     conn->sock = sock;
     conn->sock->arg = NULL;
     conn->flags = config->flags;
@@ -1459,6 +1460,7 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
                               &new);
     Tcl_SetHashValue(rec, conn);
     Ns_MutexUnlock(&config->lock);
+
     return conn;
 }
 
@@ -1626,6 +1628,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     /*
      * Read greeting line from the relay
      */
+    Ns_Log(SmtpdDebug,"SmtpdRelayData read greeting");
+
     if (SmtpdReadLine(relay, &relay->line) < 0) {
         Ns_Log(Error, "nssmtpd: relay: %d/%d: %s:%d: Greeting read error: %s",
                conn->id, getpid(), host, port, strerror(errno));
@@ -1633,6 +1637,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
     }
+    Ns_Log(SmtpdDebug,"SmtpdRelayData got greeting");
 
     /*
      * EHLO command
@@ -1831,14 +1836,16 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
           const char *rcpt, const char *dname, const char *host,
           unsigned short port)
 {
-    char      *ptr;
-    Ns_Sock    sock;
-    Tcl_Obj   *data;
-    smtpdConn *conn;
-    Ns_Time    timeout = { config->writetimeout, 0 };
-    int        duplicated = 0;
+    char       *ptr, *dataString;
+    Ns_Sock     sock;
+    Tcl_Obj    *data;
+    smtpdConn  *conn;
+    Ns_Time     timeout = { config->writetimeout, 0 };
+    bool        duplicated = NS_FALSE;
+    int         dataLength;
+    Tcl_DString dataDString;
 
-    Ns_Log(SmtpdDebug,"SmtpdSend");
+    Ns_Log(SmtpdDebug,"SmtpdSend rcpt %s host %s port %hu", rcpt, host, port);
 
     if (sender == NULL || rcpt == NULL || dname == NULL) {
         Tcl_AppendResult(interp, "nssmtpd: send: empty arguments", (char *)0L);
@@ -1861,18 +1868,25 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         return NS_ERROR;
     }
     sock.driver = config->driver;
-    /* Allocate virtual SMTPD connection */
+    /*
+     * Allocate virtual SMTPD connection
+     */
     if (!(conn = SmtpdConnCreate(config, &sock))) {
         Tcl_AppendResult(interp, strerror(errno), (char *)0L);
         ns_sockclose(sock.sock);
         return NS_ERROR;
     }
-    /* Read greeting line from the conn */
+    /*
+     * Read greeting line from the conn
+     */
+    Ns_Log(SmtpdDebug,"SmtpdSend wait for greeting");
+
     if (SmtpdReadLine(conn, &conn->line) < 0) {
         Tcl_AppendResult(interp, "greeting read error: ", strerror(errno), (char *)0L);
         SmtpdConnFree(conn);
         return NS_ERROR;
     }
+    Ns_Log(SmtpdDebug,"SmtpdSend got greeting");
 
     /* HELO command */
     Ns_DStringSetLength(&conn->line, 0);
@@ -1916,23 +1930,38 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         goto error;
     }
 
-    /* Process data for line with single dot */
-    ptr = Tcl_GetString(data);
+    /*
+     * Process data for line starting with a dot and duplicate it.
+     * See: rfc5321#section-4.5.2
+     */
+    dataString = ptr = Tcl_GetStringFromObj(data, &dataLength);
+    Tcl_DStringInit(&dataDString);
+
     while ((ptr = strstr(ptr, "\n."))) {
+        long offset;
+
         ptr += 2;
-        if (*ptr == '\r' || *ptr == '\n') {
-            long offset = ptr - Tcl_GetString(data);
-            /* Copy the object only if we have single line with dot
-               and the object is shared */
-            if (Tcl_IsShared(data) && !duplicated) {
-                data = Tcl_DuplicateObj(data);
-                duplicated = 1;
-            }
-            Tcl_SetObjLength(data, Tcl_GetCharLength(data) + 1);
-            ptr = Tcl_GetString(data) + offset;
-            memmove(ptr + 1, ptr, (size_t)(Tcl_GetCharLength(data) - offset));
-            *(ptr++) = '.';
+        offset = ptr - dataString;
+        if (!duplicated) {
+            duplicated = NS_TRUE;
         }
+        /*
+         * Copy the data to the DString and insert an additional single period
+         * ('.').
+         */
+
+        Tcl_DStringAppend(&dataDString, dataString, (int)offset);
+        Tcl_DStringAppend(&dataDString, ".", 1);
+        dataString += offset;
+        ptr = dataString;
+    }
+    if (duplicated) {
+        /*
+         * Append the final chunk.
+         */
+        Tcl_DStringAppend(&dataDString, dataString, -1);
+        dataString = dataDString.string;
+        dataLength = dataDString.length;
     }
 
     /* DATA command */
@@ -1945,7 +1974,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     if (strncmp(conn->line.string, "354", 3)) {
         goto error;
     }
-    if (SmtpdWriteData(conn, Tcl_GetString(data), (int) Tcl_GetCharLength(data)) != NS_OK) {
+    if (SmtpdWriteData(conn, dataString, dataLength) != NS_OK) {
         goto ioerror;
     }
     if (SmtpdWriteData(conn, "\r\n.\r\n", 5) != NS_OK) {
@@ -1965,11 +1994,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     if (SmtpdReadLine(conn, &conn->line) <= 0) {
         goto ioerror;
     }
+    Ns_Log(Notice, "nssmtpd: send: from %s to %s via %s:%d %d bytes",
+           sender, rcpt, host, port, dataLength);
+
     SmtpdConnFree(conn);
-    Ns_Log(Notice, "nssmtpd: send: from %s to %s via %s:%d %d bytes", sender, rcpt, host, port, Tcl_GetCharLength(data));
-    if (duplicated) {
-        Tcl_DecrRefCount(data);
-    }
+    Tcl_DStringFree(&dataDString);
     return NS_OK;
 
   ioerror:
@@ -1978,18 +2007,14 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
                          strerror(errno), (char *)0L);
     }
     SmtpdConnFree(conn);
-    if (duplicated) {
-        Tcl_DecrRefCount(data);
-    }
+    Tcl_DStringFree(&dataDString);
     return NS_ERROR;
 
   error:
     Tcl_AppendResult(interp, "nssmtpd: send: unexpected status from ", host, ": ",
                      conn->line.string, (char *)0L);
     SmtpdConnFree(conn);
-    if (duplicated) {
-        Tcl_DecrRefCount(data);
-    }
+    Tcl_DStringFree(&dataDString);
     return NS_ERROR;
 }
 
