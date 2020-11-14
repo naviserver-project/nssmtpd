@@ -1886,6 +1886,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         return NS_ERROR;
     }
     Ns_Log(SmtpdDebug,"SmtpdSend got greeting");
+    Tcl_DStringInit(&dataDString);
 
     /* HELO command */
     Ns_DStringSetLength(&conn->line, 0);
@@ -1934,7 +1935,6 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
      * See: rfc5321#section-4.5.2
      */
     dataString = ptr = Tcl_GetStringFromObj(data, &dataLength);
-    Tcl_DStringInit(&dataDString);
 
     while ((ptr = strstr(ptr, "\n."))) {
         long offset;
