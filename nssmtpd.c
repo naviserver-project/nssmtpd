@@ -913,7 +913,7 @@ static Ns_ReturnCode SmtpdRequestProc(void *arg, Ns_Conn *conn)
  *
  * SmtpdInit --
  *
- *      Initialize Smtpd via tcl script
+ *      Initialize Smtpd via Tcl script
  *
  * Results:
  *      None
@@ -1953,7 +1953,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     }
     if (dataDString.length > 0) {
         /*
-         * Only when we have found a line starting with a dot, we are useing
+         * Only when we have found a line starting with a dot, we are using
          * the Tcl_DString. Append the final chunk in such cases.
          */
         Tcl_DStringAppend(&dataDString, dataString, -1);
@@ -2692,7 +2692,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         listObj = Tcl_NewStringObj(Tcl_DStringValue(dsPtr), Tcl_DStringLength(dsPtr));
         rc = Tcl_ListObjGetElements(NULL, listObj, &objc, &objv);
         if (rc != TCL_OK) {
-            Ns_Log(Error, "invalid list of ip addresses '%s'", Tcl_GetString(listObj));
+            Ns_Log(Error, "invalid list of IP addresses '%s'", Tcl_GetString(listObj));
             return 0;
         }
 
@@ -2701,7 +2701,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
             saPtr = (struct sockaddr *)&(arec->addr);
             rc = Ns_GetSockAddr(saPtr, Tcl_GetString(objv[i]), 0);
             if (rc != TCL_OK) {
-                Ns_Log(Error, "invalid ip addresses '%s'", Tcl_GetString(objv[i]));
+                Ns_Log(Error, "invalid IP addresses '%s'", Tcl_GetString(objv[i]));
                 return 0;
             }
             addr_saPtr = saPtr;
@@ -2733,7 +2733,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
     saPtr = (struct sockaddr *)&(alist->addr);
     rc = Ns_GetSockAddr(saPtr, addr, 0);
     if (rc != TCL_OK) {
-        Ns_Log(Error, "invalid ip addresses '%s'", addr);
+        Ns_Log(Error, "invalid IP addresses '%s'", addr);
         return 0;
     }
 
@@ -2766,7 +2766,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
             Ns_SockaddrMaskBits(saPtr, maskBits);
             have_ipmask = NS_TRUE;
         } else {
-            Ns_Log(Error, "invalid mask bits %d for ip addresses '%s'", maskBits, addr);
+            Ns_Log(Error, "invalid mask bits %d for IP addresses '%s'", maskBits, addr);
         }
     }
     if (have_ipmask == NS_TRUE) {
@@ -3161,14 +3161,14 @@ static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString)
 
     rc = ns_inet_pton(sa_ipPtr, ipString);
     if (unlikely(rc <= 0)) {
-        Ns_Log(Error, "nssmtpd: invalid incoming ip address '%s'", ipString);
+        Ns_Log(Error, "nssmtpd: invalid incoming IP address '%s'", ipString);
     } else {
         while (list) {
             struct NS_SOCKADDR_STORAGE sa;
             struct sockaddr *maskPtr = (struct sockaddr *)&list->mask, *saPtr = (struct sockaddr *)&sa;
 
             /*
-             * Obtain a copy of the incoming ip address and mask it. Then check
+             * Obtain a copy of the incoming IP address and mask it. Then check
              * the masked result with our entry.
              */
             memcpy(&sa, sa_ipPtr, sizeof (struct NS_SOCKADDR_STORAGE));
