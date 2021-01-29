@@ -54,42 +54,42 @@ processing. The package can as well be used via "ns_nsmp
 
 *Usage*
 
-There is ns_smtpd command available in called Tcl handlers
+The behavior is controlled by the single Tcl command "ns_smtpd":
 
 ns_smtpd usage:
 
-  ns_smtpd flag
-  ns_smtpd send
-  ns_smtpd relay
-  ns_smtpd local
-  ns_smtpd encode
-  ns_smtpd decode
-  ns_smtpd checkemail - parses email and returns as name@domain if valid
-  ns_smtpd checkdomain
-  ns_smtpd virusversion - returns version of anti-virus tool used
-  ns_smtpd spamversion - returns version of anti-spam tool used
-  ns_smtpd checkspam
-  ns_smtpd trainspam
-  ns_smtpd checkvirus
-  ns_smtpd sessions
-  ns_smtpd gethdr
-  ns_smtpd gethdrs
-  ns_smtpd getbody
-  ns_smtpd getfrom
-  ns_smtpd getfromdata
-  ns_smtpd setfrom
-  ns_smtpd setfromdata
-  ns_smtpd getrcpt
-  ns_smtpd getrcptdata
-  ns_smtpd addrcpt
-  ns_smtpd setrcptdata
-  ns_smtpd delrcpt
-  ns_smtpd setflag
-  ns_smtpd unsetflag
-  ns_smtpd getflag
-  ns_smtpd setreply
-  ns_smtpd getline
-  ns_smtpd dump
+    ns_smtpd flag
+    ns_smtpd send
+    ns_smtpd relay
+    ns_smtpd local
+    ns_smtpd encode
+    ns_smtpd decode
+    ns_smtpd checkemail - parses email and returns as name@domain if valid
+    ns_smtpd checkdomain
+    ns_smtpd virusversion - returns version of anti-virus tool used
+    ns_smtpd spamversion - returns version of anti-spam tool used
+    ns_smtpd checkspam
+    ns_smtpd trainspam
+    ns_smtpd checkvirus
+    ns_smtpd sessions
+    ns_smtpd gethdr
+    ns_smtpd gethdrs
+    ns_smtpd getbody
+    ns_smtpd getfrom
+    ns_smtpd getfromdata
+    ns_smtpd setfrom
+    ns_smtpd setfromdata
+    ns_smtpd getrcpt
+    ns_smtpd getrcptdata
+    ns_smtpd addrcpt
+    ns_smtpd setrcptdata
+    ns_smtpd delrcpt
+    ns_smtpd setflag
+    ns_smtpd unsetflag
+    ns_smtpd getflag
+    ns_smtpd setreply
+    ns_smtpd getline
+    ns_smtpd dump
 
 *Licensing*
 
