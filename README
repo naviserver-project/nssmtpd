@@ -2,7 +2,8 @@ SMTPD server/proxy for NaviServer
 Release 2.2
 vlad@crystalballinc.com
 
-    SMTPD proxy/server for Naviserver
+SMTPD proxy/server for NaviServer
+----------------------------------
 
 This NaviServer module implements the SMTP protocol and acts as SMTP
 proxy with anti-spam and anti-virus capabilities.
