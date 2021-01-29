@@ -399,7 +399,7 @@ static Tcl_ObjCmdProc SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
 static int SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
 static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
-                               const char *rcpt, const char *data, const char *host,
+                               Tcl_Obj *rcptObj, const char *data, const char *host,
                                unsigned short port);
 static smtpdConn *SmtpdConnCreate(smtpdConfig *server, Ns_Sock *sock);
 static void SmtpdConnReset(smtpdConn *conn);
@@ -1833,7 +1833,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 
 static Ns_ReturnCode
 SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
-          const char *rcpt, const char *dname, const char *host,
+          Tcl_Obj *rcptObj, const char *dname, const char *host,
           unsigned short port)
 {
     char       *ptr, *dataString;
@@ -1844,9 +1844,10 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     int         dataLength;
     Tcl_DString dataDString;
 
-    Ns_Log(SmtpdDebug,"SmtpdSend rcpt %s host %s port %hu", rcpt, host, port);
+    Ns_Log(SmtpdDebug,"SmtpdSend rcpt %s host %s port %hu",
+           Tcl_GetString(rcptObj), host, port);
 
-    if (sender == NULL || rcpt == NULL || dname == NULL) {
+    if (sender == NULL || rcptObj == NULL || dname == NULL) {
         Tcl_AppendResult(interp, "nssmtpd: send: empty arguments", (char *)0L);
         return NS_ERROR;
     }
@@ -1915,19 +1916,35 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         goto error;
     }
 
-    /* RCPT TO command */
-    Ns_DStringSetLength(&conn->line, 0);
-    Ns_DStringSetLength(&conn->reply, 0);
-    Ns_DStringAppend(&conn->reply, (char *) rcpt);
-    Ns_DStringPrintf(&conn->line, "RCPT TO:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
-    if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
-        goto ioerror;
-    }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
-        goto ioerror;
-    }
-    if (conn->line.string[0] != '2') {
-        goto error;
+    /*
+     * RCPT TO command
+     *
+     * It is possible to send a mail to multiple recipients, but this requires
+     * als multiple "RCPT TO" lines.
+     */
+    {
+        int objc, i;
+        Tcl_Obj **objv;
+
+        if (Tcl_ListObjGetElements(NULL, rcptObj, &objc, &objv) != TCL_OK) {
+            goto error;
+        }
+
+        for (i = 0; i < objc; i++) {
+            Ns_DStringSetLength(&conn->line, 0);
+            Ns_DStringSetLength(&conn->reply, 0);
+            Ns_DStringAppend(&conn->reply, (char *) Tcl_GetString(objv[i]));
+            Ns_DStringPrintf(&conn->line, "RCPT TO:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
+            if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
+                goto ioerror;
+            }
+            if (SmtpdReadLine(conn, &conn->line) <= 0) {
+                goto ioerror;
+            }
+            if (conn->line.string[0] != '2') {
+                goto error;
+            }
+        }
     }
 
     /*
@@ -1992,7 +2009,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         goto ioerror;
     }
     Ns_Log(Notice, "nssmtpd: send: from %s to %s via %s:%d %d bytes",
-           sender, rcpt, host, port, dataLength);
+           sender, Tcl_GetString(rcptObj), host, port, dataLength);
 
     SmtpdConnFree(conn);
     Tcl_DStringFree(&dataDString);
@@ -3750,7 +3767,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
                 }
                 ns_free(email);
             }
-            if (SmtpdSend(config, interp, Tcl_GetString(objv[2]), Tcl_GetString(objv[3]),
+            if (SmtpdSend(config, interp, Tcl_GetString(objv[2]), objv[3],
                           Tcl_GetString(objv[4]), host, port) != NS_OK) {
                 return TCL_ERROR;
             }
