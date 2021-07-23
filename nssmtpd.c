@@ -584,7 +584,8 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     /* SMTP relay support */
     serverPtr->relayport = DEFAULT_PORT;
     if (serverPtr->relayhost != NULL) {
-        Ns_HttpParseHost(serverPtr->relayhost, &serverPtr->relayhost, &portString);
+        char *end;
+        Ns_HttpParseHost2(serverPtr->relayhost, NS_TRUE, &serverPtr->relayhost, &portString, &end);
         if (portString != NULL) {
             *portString = '\0';
             serverPtr->relayport = (unsigned short) strtol(portString + 1, NULL, 10);
@@ -594,7 +595,8 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     /* SpamAssassin support */
     serverPtr->spamdport = 783;
     if (serverPtr->spamdhost != NULL) {
-        Ns_HttpParseHost(serverPtr->spamdhost, &serverPtr->spamdhost, &portString);
+        char *end;
+        Ns_HttpParseHost2(serverPtr->spamdhost, NS_TRUE, &serverPtr->spamdhost, &portString, &end);
         if (portString != NULL) {
             *portString = '\0';
             serverPtr->spamdport = (unsigned short) strtol(portString + 1, NULL, 10);
@@ -885,7 +887,7 @@ SmtpdAcceptProc(Ns_Sock *sock, NS_SOCKET listensock, struct sockaddr *sockaddrPt
  *
  * SmtpdRequestProc --
  *
- *      Process an smtp request. This proc start a thread for handling
+ *      Process an SMTP request. This proc starts a thread for handling
  *      the request.
  *
  * Results:
@@ -901,7 +903,7 @@ static Ns_ReturnCode SmtpdRequestProc(void *arg, Ns_Conn *conn)
 {
   smtpdConfig *server = arg;
 
-  Ns_Log(SmtpdDebug, "======================= SmtpdRequestProc");
+  Ns_Log(SmtpdDebug, "SmtpdRequestProc");
 
   SmtpdThread(SmtpdConnCreate(server, Ns_ConnSockPtr(conn)));
   return NS_OK;
@@ -1586,10 +1588,10 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     bool       hasStarttls;
     Ns_Conn   *nsconn = Ns_GetConn();
 
-    Ns_Log(SmtpdDebug,"====== SmtpdRelayData");
+    Ns_Log(SmtpdDebug,"SmtpdRelayData");
 
     /*
-     * If we have single recipient use recipient's relay otherwise for
+     * If we have single recipient, use recipient's relay otherwise for
      * different recipients use default relay.
      */
     for (rcpt = conn->rcpt.list; host != NULL && rcpt != NULL; rcpt = rcpt->next) {
@@ -1597,6 +1599,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             && rcpt->relay.host != NULL
             && strcmp(rcpt->relay.host, host)
             ) {
+            Ns_Log(SmtpdDebug,"SmtpdRelayData set HOST NULL relay.host '%s' provide host '%s'", rcpt->relay.host, host);
             host = NULL;
             break;
         }
@@ -1604,6 +1607,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (!host) {
         host = conn->config->relayhost;
         port = conn->config->relayport;
+        Ns_Log(SmtpdDebug,"SmtpdRelayData set host from config %s:%hu", host, port);
     }
     if (!port) {
         port = DEFAULT_PORT;
