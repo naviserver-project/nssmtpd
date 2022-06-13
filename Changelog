@@ -1,0 +1,877 @@
+commit 563944a32fc6354fd8084d6f4446fb110e50a564
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2021-07-23
+
+    modernize code
+
+M	nssmtpd.c
+
+commit ccd4f623f85ec3074f5073096d42ed4127bef2c3
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2021-01-29
+
+    Added support to send a single "ns_smtpd send" to multiple recipients
+    
+    The multiple recipients are specified as Tcl list. This change
+    makes the command more similar to plain tcllib "smtp", such it can
+    be used as a replacement in OpenACS with little effort.
+
+M	nssmtpd.c
+M	tests/basic.test
+
+commit 12c0e339eb790bb4cb5d5ed8b229068b768cb525
+Author: Gustaf Neumann <neumann@wu.ac.at>
+Date:   2021-01-29
+
+    README edited online with Bitbucket
+
+M	README
+
+commit daa90698dda936fb33f029cda0946984c0ece315
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2021-01-29
+
+    change indentation to prettify display on Bitbucket
+
+M	README
+
+commit c20a5b03957ac02596daa607b66b63bf15ceb94b
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2021-01-10
+
+    Improve spelling
+
+M	nssmtpd.c
+
+commit bbfd4ec5f8830496a70fb06b129d578ac423cb92
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-11-14
+
+    move Tcl_DStringInit before the first jump to error/ioerror to ensure proper cleanup
+
+M	nssmtpd.c
+
+commit 75bdc354417ee565e0076d87c704c527dbb23eb8
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-11-12
+
+    simplify the code slightly
+
+M	nssmtpd.c
+
+commit d484ba5d41364c1a0ab8e2437c5311a6d5d7e986
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-11-12
+
+    Escape all leading dots according to RFC 5321 section 4.5.2 in mail bodies
+    
+    extend regression test
+
+M	README
+M	nssmtpd.c
+M	tests/basic.test
+M	tests/modules/testhttp.tcl
+
+commit dd323eef8c09dd35d84d186f0beb8ea4c8917f45
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-11-12
+
+    modernize tcl, whitespace changes
+    
+    use range expressions where applicable
+    prefer lassign over foreach hack
+
+M	nssmtpd-procs.tcl
+
+commit 9a9616d6feeecbf742f67c0bfe6fb66ab36e163d
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-09-29
+
+    fix check, if relay host announced STARTTLS
+
+M	nssmtpd.c
+
+commit 59bc4bc97394673f884bcadf1b1bdbeec6c53eed
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-07-26
+
+    align spelling with LDP
+
+M	nssmtpd.c
+
+commit eab4f77f8e5d58ff32c335f02f572f3e99d76cc2
+Merge: d9b158f 1f50cac
+Author: Hector Romojaro <hector.romojaro@gmail.com>
+Date:   2020-07-26
+
+    Merged in hromojaro/nssmtpd/build-fix (pull request #1)
+    
+    Use the new 'ciphersuites' and 'protocols' parameters of 'Ns_TLS_CtxServerCreate', fixing build errors with newest NaviServer development code
+    
+    Approved-by: Gustaf Neumann <neumann@wu.ac.at>
+
+commit 1f50cac7d41863cde078fd22f61fac150145fc10
+Author: Hector Romojaro Gomez <hector.romojaro.gomez@wu.ac.at>
+Date:   2020-07-20
+
+    Use the new 'ciphersuites' and 'protocols' parameters of 'Ns_TLS_CtxServerCreate', fixing build errors with newest NaviServer development code.
+    
+    The parameters were added in https://bitbucket.org/naviserver/naviserver/commits/4662b12c3c548db4b2d0ed6625c66260662d2089
+
+M	nssmtpd.c
+
+commit d9b158fb1cab6d9b65097fccfcd76f2c0d708e02
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-09
+
+    improve variable names
+
+M	nssmtpd.c
+
+commit 3f388ddf4c4f6870435711c853bcfcb9954206de
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-09
+
+    push handling uf EAGAIN etc. to the lowest level
+    remove one layer of partial write handling
+
+M	nssmtpd.c
+
+commit 83b202ce0924af7178eeff120b3ea03bc4917a1c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-09
+
+    remove debug level for retries
+
+M	nssmtpd.c
+
+commit bda32de8c7751583843322863178a678634c3b36
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-08
+
+    avoid huge send buffer attempts, since these seem to be rejected sometimes
+
+M	nssmtpd.c
+
+commit efc214c2eac7a17f1910dae637567e7b8776035f
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-08
+
+    improve robustness (never go into an infinite retry loop)
+
+M	nssmtpd.c
+
+commit 30d4e3579c8373f77948d1cb0e78c7f37842c57f
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-08
+
+    reduce verbosity
+
+M	nssmtpd.c
+
+commit ce1791a4bfc71acccbea43c09429e8f0c792416c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-07
+
+    improve compatibility with older versions of NaviServer
+
+M	nssmtpd.c
+
+commit 94d20f40920b333e618b75f84e391773a9b4b65e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-07
+
+    handle potential "resource is not available" while sending SMTP data
+
+M	nssmtpd.c
+
+commit 37a40194b7bd455bef00d00443f9af120862c071
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-06
+
+    more type cleanup
+
+M	nssmtpd.c
+
+commit eafe84872c4b5a4905e31a7101f9e3e8ae414e00
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-06
+
+    Provide compatibility for versions before 4.99.19, when NS_FALL_THROUGH was not defined yet
+
+M	nssmtpd.c
+
+commit b2007543dd1ca6c90e4370b4c4f1ff3af497a146
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-05
+
+    add "const" declarations
+
+M	nssmtpd.c
+
+commit 35180c812d9dcf399e0b245db0de207d1c0abb1e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-05
+
+    provide clean compile with gcc 9
+
+M	nssmtpd.c
+
+commit 49499d9e5cb98e8b0271de81e0d2a6773672f42c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-05
+
+    replaced select() call by poll() to ensure scalability
+
+M	nssmtpd.c
+
+commit 8501ed9cb42371ecefee141f009a1d35ad3e13aa
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-05
+
+    added Makefile target: lldbtest
+
+M	Makefile
+
+commit 507ee069856cf02e12bb4cb4e36dc68c37039944
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2020-04-05
+
+    - improved cleanness of compilation
+    - handled interface changes in post 4.99.19 (time resolution)
+    - improved documentation
+
+M	README
+M	nssmtpd.c
+M	tests/modules/testhttp.tcl
+
+commit 3c2791a80b7ef86db3b86780c1c2df4a262447eb
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2019-05-19
+
+    improve spelling
+
+M	nssmtpd-procs.tcl
+M	nssmtpd.c
+M	tests/modules/testhttp.tcl
+
+commit 25275a647e67a9fed4e28002e5cd17650e691e4c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2019-05-19
+
+    - remove deprecated calls
+    - fix compilation with TCL_NO_DEPRECATED
+    - reduce implicit conversions
+
+M	nssmtpd.c
+
+commit ba075c908a52f7c94fa3ce82c9a066838019ca40
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2018-11-03
+
+    improve spelling
+
+M	nssmtpd.c
+
+commit 6e6ed5d59275ee245b6d41c5c788defafbfe0bad
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2018-03-28
+
+    fix typo
+
+M	nssmtpd.c
+
+commit 0d9fe20bd438ca671e5086d893787bf21e67fe5c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2018-03-23
+
+    fix typos found by lintian
+
+M	nssmtpd.c
+
+commit a9e6b57e6bb5d343bfbb3d97a6fe00912d1557c1
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2018-03-22
+
+    Bring in sync with current code-base
+
+M	nssmtpd.c
+
+commit bc12fd1150e994946c920a09e3be5eb6b3a27b28
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2017-09-12
+
+    Replace calls to decpreacted function Tcl_DStringTrunc() by Tcl_DStringSetLength()
+
+M	nssmtpd.c
+
+commit 0740d88371ecc09296bfc78d188c18ba7757cdbe
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-12-30
+
+    - adjust to interface changes
+
+M	nssmtpd.c
+
+commit 4984cda6ce74bf04a54654abf409c65081cfb340
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-11-11
+
+    - reduce implicit conversions
+
+M	nssmtpd.c
+
+commit 0a8f1aba0deee1a66e8996c345fa0832cbde40fd
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-07-27
+
+    - align to current version of NaviServer
+
+M	nssmtpd.c
+
+commit dc35b4c8368c7c697f5d5d3da99fb5bbd02eb4d6
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-07-09
+
+    - provide name for mutexes
+
+M	nssmtpd.c
+
+commit 5977d116ae6c5d57e5998fbedee9a6b6e0f9a255
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-25
+
+    - remove dependencies of libnssock.dylib
+
+M	Makefile
+M	nssmtpd.c
+
+commit b1040780c2872aff90e54fe155dd8ebb002da461
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-24
+
+    - don't clobber path variable
+    - silence clang static checker
+
+M	nssmtpd.c
+
+commit 9b9ce7d763d2ae72cd012433c29d314afb8cc637
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-20
+
+    - autogenerated .pem file for testing
+
+M	Makefile
+A	tests/etc/nssmtpd.cnf
+
+commit 37e6e079166e91150e2bc49ca2c159ede58a482a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-17
+
+    - add basic test case
+
+M	Makefile
+A	tests/all.tcl
+A	tests/basic.test
+A	tests/config.tcl
+A	tests/modules/testhttp.tcl
+A	tests/modules/testhttps.tcl
+
+commit 3230d72ceca1dad44b995435c2e580864904d08a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-17
+
+    - prefer boolean tests
+
+M	nssmtpd.c
+
+commit bff78c4788278adb6d8c921746bf19487346aa1a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-14
+
+    - reduce implicit type conversions
+    - use boolean expressions
+
+M	nssmtpd.c
+
+commit 0e8cc692641c84662f5b5486d561562fc47b3988
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-14
+
+    - prefer ssize_t over int as result of read operations
+    - use boolean values in expressions
+    - reduce implicit conversions
+    - use NULL for null-pointer assignments
+
+M	nssmtpd.c
+
+commit 5bac0365f838dfac27fd12f1821734e82f50de41
+Merge: 7fd7c8c e572702
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-14
+
+    merge versions
+
+commit 7fd7c8c43f257013d3adfd695bfba2d6a09415c2
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-06-14
+
+    - make clear, that recvProc and sendProc are NOT used by this driver module
+
+M	nssmtpd.c
+
+commit e572702978737bf8d8397d75a4314b3bfe46d506
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-13
+
+    Extract Ns_TLS_CtxServerCreate and Ns_TLS_SSLAccept into tls.c in naviserver code.
+
+M	nssmtpd.c
+
+commit 6ee9f6b5c0fd7d61aa08377a358b423bc6e0311d
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-12
+
+    More refactoring.
+
+M	nssmtpd.c
+
+commit 28aa9c0fb30559bcec11a7d3be13aea460d0e663
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-12
+
+    Refactor bufsize & buf types to size_t and ssize_t.
+    Remove useless logging statement.
+
+M	nssmtpd.c
+
+commit 2939c46114dd9fd66654e127ea579d7cd83ed0ad
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-12
+
+    Update README with certificate parameter.
+
+M	README
+
+commit c333a6fd2b0ccf4b7400a31f0267e9a3856a4de9
+Merge: d258dd1 7fc99f6
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-12
+
+    Merge changes from bitbucket.
+
+commit d258dd1313e68e8f0f2f80e453f053283019edc1
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-12
+
+    Rename certchainfile parameter to certificate.
+
+M	nssmtpd.c
+
+commit 7fc99f69efc1ca41a805126a83b5c481ff6d0a06
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-09
+
+    README edited online with Bitbucket
+
+M	README
+
+commit 16b52b215828e47128ef9bb4b902f44a86c48baa
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-09
+
+    README edited online with Bitbucket
+
+M	README
+
+commit 26f662df089d76211078cc0699826a15eab676d7
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-09
+
+    Remove unnecessary SSLContext & SSLDriver structs.
+
+M	nssmtpd.c
+
+commit 236ac77d9c6e77b5631f797d4dcff54668251cb9
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-06-09
+
+    Add config options for certificate chain file, ciphers, cafile & capath.
+    Also remove debugging prints
+
+M	nssmtpd.c
+
+commit 9e9b2759782c051ad6b745d9986d845777b2a23a
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-05-29
+
+    Relaying using STARTTLS working.
+
+M	nssmtpd.c
+
+commit 30b05458b36e239a9a1e4952b7cca8b163d4e6b7
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-05-26
+
+    Some code cleanup
+
+M	nssmtpd.c
+
+commit e921ef5b9d1ad777d6bc2ce5afcd9abcde6bbec5
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-05-26
+
+    First complete STARTTLS session working.
+
+M	nssmtpd.c
+
+commit c6678642626c3732ae0de7622fb850a7c86b39b4
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-05-24
+
+    Ugly code with TlsRecv/Send functions.
+
+M	nssmtpd.c
+
+commit 7ed2d3b7312f8cb774d046baa2792dbba5e89bec
+Author: Constantin Șerban-Rădoi <costashsrc@gmail.com>
+Date:   2016-05-19
+
+    Ugly temporary code: Managed to get SSL handshake working for STARTTLS.
+
+M	nssmtpd.c
+
+commit 562acba0bd97560a316e5d2e82f256032178e28b
+Author: costash@localhost <costash@localhost>
+Date:   2016-05-15
+
+    Extract magic constant for 25, the default SMTP port into named constant.
+
+M	nssmtpd.c
+
+commit cd50b2b8447dca27cdbbaaa66ab5a996f6fe5553
+Author: costash@localhost <costash@localhost>
+Date:   2016-05-15
+
+    Advertise the STARTTLS command upon EHLO command.
+
+M	nssmtpd.c
+
+commit 6fd71bd3b610d806f47870d8f53881067e20d277
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-05-10
+
+    - adapted to OpenSSL reform
+
+M	nssmtpd.c
+
+commit c19540fcd8ce1cef3f487d7962c65fdb835c5ecf
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-05-07
+
+    - Provide information for driver version 4
+      (protocol and default port)
+
+M	nssmtpd.c
+
+commit 744ea8cd47a66308aaaaf5ffa99a791cecd818ab
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-04-17
+
+    - use library nssock
+    - renamed nssmtpd_procs.tcl to nssmtpd-procs.tcl (to follow naming
+      conventions of e.g. OpenACS).
+    - fixed nssmtpd_procs.tcl to provide a more useful start configuration
+      * add all tcl callbacks
+      * fix filter rules in "smtdp:rcpt" to make the "userid verified"
+        code reachable
+      * add more detailed log messages for severity Debug(smtpd)
+    - smtpd.c
+      * Provide severity for debugging nssmtpd SmtpdDebug (Debug(smtpd)).
+      * reuse Ns_DriverSockListen, Ns_DriverSockRecv, Ns_DriverSockSend
+        and Ns_DriverSockClose.
+      * prefer typedefs of procs from ns.h over local function definitions
+      * support ip-literal conventions for config parameter
+        relayhost and spamhost
+      * allow "deferaccept" and "nodelay" as driver options
+      * name Config structure smtpdConfig (in alignment with nssock)
+
+M	Makefile
+R074	nssmtpd_procs.tcl	nssmtpd-procs.tcl
+M	nssmtpd.c
+
+commit 6f391ce89504abe7d4ccb0ded4e2f9862d752d2c
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-04-14
+
+    - reduce IPv4 dependencies (however, AAAA records are not implemented yet)
+
+M	README
+M	nssmtpd.c
+
+commit 6679bf52622a53397005e8f8a56ddefc2eee3611
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-04-14
+
+    - prefer expand operator over eval
+
+M	nssmtpd_procs.tcl
+
+commit 272f56f9d2c6014a558958dcc0cfc61b9cf95cf1
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-04-13
+
+    - use typedef Ns_ModuleInitProc for Ns_ModuleInit()
+
+M	nssmtpd.c
+
+commit ab361e51124ed749da779c64585af84d897398e7
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-04-12
+
+    - align to driver reform
+
+M	nssmtpd.c
+
+commit ea303ba5d56fa9b9518ed7f62c627f7f7f14ad33
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-01-11
+
+    - Removed NULL after the last typed argument to a variadic function
+    - Reduced variable scopes
+    - initialize variable
+    - fix print format
+
+M	nssmtpd.c
+
+commit 5146e06433a63ab067185d39e2e253ddd4cb9afa
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2015-02-21
+
+    - adjust prototypes
+    - avoid deprecated functions
+    - use documented MODOBJS instead of older-style OBJS in Makefiles
+
+M	Makefile
+M	nssmtpd.c
+
+commit 8ec68803266bcf7007b5247bf221e227bd36025e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-11-01
+
+    - adjust to tip
+
+M	nssmtpd.c
+
+commit f47b2a74688b5daa2dd44d3b4ef8e7420dff6f75
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-10-29
+
+    - adjust to recent version of naviserver
+
+M	nssmtpd.c
+
+commit ef9983ebb3ce53010897f5cdee2b441b757cd4d8
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-09-29
+
+    - minor cleanup
+
+M	nssmtpd.c
+
+commit 794a395e06c439b0d69ba0340d59b395df3464d0
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-09-23
+
+    - make flags unsigned int
+
+M	nssmtpd.c
+
+commit 635063a20be33a482def7df50be4ca231a9903ca
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-05-02
+
+    Make sure to initialize all members of Ns_DriverInitData to zero
+
+M	nssmtpd.c
+
+commit b0d8ca7f0175b7a38df72f698efe90319918242f
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2013-05-25
+
+    Added tag naviserver-4.99.5 for changeset a061ce62fc89
+
+A	.hgtags
+
+commit 2d53afc39899efa9a4ddc02e0acbf669ff9ceabb
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2013-05-25
+
+    fix typo
+
+M	Makefile
+
+commit 151a306042966a21338682409865d932c1fa1f0d
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2012-10-27
+
+    reduce number of warnings, use NS_SOCKET instead of SOCKET
+
+M	nssmtpd.c
+
+commit 478da349ad244240ff9d4c23cd3a7c359e516613
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2012-01-10
+
+    Deactivated clamav in the default configuration since the interface has changed, some configuration changes in the interaction with the clamav library are necessary
+
+M	Makefile
+
+commit ab15b0c2898b3931309c4762fc7c751d41b5feef
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2011-08-02
+
+    Fixed nssmtpd for NS_DRIVER_VERSION_2 (with some initial work from Neophytos Demetriou)
+
+M	README
+M	nssmtpd.c
+
+commit 8e0230f2f89ff409dbf4ba637dcb451bfa5ed24c
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-05-09
+
+    Update to latest clamav version
+
+M	nssmtpd.c
+
+commit aef5c2f57c137cc0365960743c963bcc04bc65b1
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-04-06
+
+    Fix crash on smtpd startup in parsing local hostname
+
+M	nssmtpd.c
+
+commit 44d492294e273225d47a4168542253cc4ada2393
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-03-28
+
+    Minor smtpd correctnesses with latest cmalav version
+
+M	nssmtpd.c
+
+commit acfc52ddcac49d72650d646696db2b8672e2cffa
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-03-24
+
+    Update smtpd to latest Clamav version
+
+M	Makefile
+M	nssmtpd.c
+
+commit 5c626303851638e84ad000fca8436e0c296d5aab
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-02-07
+
+    Use ns_sockclose for closing sockets for Windows port
+
+M	nssmtpd.c
+
+commit 3578a00d5fe7615b6283c40bee570b39db048690
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-03-10
+
+    Add Mozilla license file
+
+A	LICENSE
+
+commit efd0f423c52c16a78c4d57a5c36fc6cec558b811
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-02-16
+
+    Fix typo in structure name
+
+M	nssmtpd.c
+
+commit 3fb03c4ac0835c6e52c032f61a30c88f0fc480f0
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-12-13
+
+    Fix bug accessing empty pointer
+
+M	nssmtpd.c
+
+commit dbaa2f0081d18d1118fed2a9ef3e985422c0a2e4
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-09-01
+
+    Code cleanups
+
+M	nssmtpd.c
+
+commit d5954e8c7ea21a219f050e9e21aca55a18ec22ac
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-06-30
+
+    Update to new simpler driver API
+
+M	nssmtpd.c
+
+commit c07a3e7c47481d552ef4f09604e156223727ac7f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-06-29
+
+    Cleanup and re-arrange stuff around, common proc names, etc...
+
+M	nssmtpd.c
+
+commit 55c1a45148a83c2263cf9ac20aab49b07a49afd3
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-05-02
+
+    Smtpd cleanups; code reformatting according to Naviserver style
+
+M	nssmtpd.c
+
+commit a8c6bb3ed8a689446865dbd3666d33e4df29024b
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-20
+
+    Update to new driver API; update request line for access logging
+
+M	nssmtpd.c
+
+commit ba70432cd6db868f1273b094ff7a79ff7be16c3a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-19
+
+    Don't delete editor backup files on 'make clean'
+
+M	Makefile
+
+commit 06e0d8dc89e6e4ebc5629ba1cc53f789f1919702
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-01-24
+
+    Use new Ns_Sock timeout API
+
+M	nssmtpd.c
+
+commit 1b4fc99b9941c0a65d729c84da9e23d37233f783
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-01-20
+
+    Make sure to return errors in dirver proc
+
+M	nssmtpd.c
+
+commit 487b7ca63a8548690e221c298184798da4e6705f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-01-20
+
+    Initial revision
+
+A	Makefile
+A	README
+A	nssmtpd.c
+A	nssmtpd_procs.tcl
