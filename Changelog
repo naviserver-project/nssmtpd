@@ -1,3 +1,11 @@
+commit 2e2ffd001430d425380ce7f0a9a9c6b932f06ddc
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2022-06-13
+
+    Added Changelog
+
+A	.gitignore
+
 commit 563944a32fc6354fd8084d6f4446fb110e50a564
 Author: Gustaf Neumann <neumann@wu-wien.ac.at>
 Date:   2021-07-23
@@ -98,17 +106,6 @@ Date:   2020-07-26
     align spelling with LDP
 
 M	nssmtpd.c
-
-commit eab4f77f8e5d58ff32c335f02f572f3e99d76cc2
-Merge: d9b158f 1f50cac
-Author: Hector Romojaro <hector.romojaro@gmail.com>
-Date:   2020-07-26
-
-    Merged in hromojaro/nssmtpd/build-fix (pull request #1)
-    
-    Use the new 'ciphersuites' and 'protocols' parameters of 'Ns_TLS_CtxServerCreate', fixing build errors with newest NaviServer development code
-    
-    Approved-by: Gustaf Neumann <neumann@wu.ac.at>
 
 commit 1f50cac7d41863cde078fd22f61fac150145fc10
 Author: Hector Romojaro Gomez <hector.romojaro.gomez@wu.ac.at>
