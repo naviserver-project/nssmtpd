@@ -605,7 +605,11 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
+#if defined(NS_DRIVER_VERSION_5)
     init.version      = NS_DRIVER_VERSION_5;
+#else
+    init.version      = NS_DRIVER_VERSION_4;
+#endif
     init.name         = "nssmtpd";
     init.listenProc   = SmtpdListenProc;
     init.acceptProc   = SmtpdAcceptProc;
@@ -620,7 +624,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     init.path         = path;
     init.protocol     = "smtp";
     init.defaultPort  = DEFAULT_PORT;
-#ifdef HAVE_OPENSSL_EVP_H
+#if defined(NS_DRIVER_VERSION_5) && defined(HAVE_OPENSSL_EVP_H)
     init.libraryVersion = ns_strdup(SSLeay_version(SSLEAY_VERSION));
 #endif
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
