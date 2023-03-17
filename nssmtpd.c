@@ -605,7 +605,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     Ns_MutexSetName2(&serverPtr->lock, "nssmtpd", "smtpd");
 
     /* Register SMTP driver */
-    init.version      = NS_DRIVER_VERSION_4;
+    init.version      = NS_DRIVER_VERSION_5;
     init.name         = "nssmtpd";
     init.listenProc   = SmtpdListenProc;
     init.acceptProc   = SmtpdAcceptProc;
@@ -620,6 +620,9 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     init.path         = path;
     init.protocol     = "smtp";
     init.defaultPort  = DEFAULT_PORT;
+#ifdef HAVE_OPENSSL_EVP_H
+    init.libraryVersion = ns_strdup(SSLeay_version(SSLEAY_VERSION));
+#endif
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
         ns_free(path);
@@ -1697,6 +1700,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             &ctx);
 
         if (likely(result == TCL_OK)) {
+            Ns_ReturnCode rc;
             /*
              * Make sure, the socket is in a writable state.
              */
@@ -1709,7 +1713,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
              * the sni_hostname, which might be used via configuration in
              * future versions.
              */
-            result = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, NULL, &ssl);
+            rc = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, NULL, NULL, &ssl);
+            result = (rc == NS_OK ? TCL_OK : TCL_ERROR);
             relay->sock->arg = ssl;
         }
         if (unlikely(result != TCL_OK)) {
