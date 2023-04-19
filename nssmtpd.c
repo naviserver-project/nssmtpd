@@ -1524,7 +1524,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
     for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "%s(0x%X/%.2f), ", rcpt->addr, rcpt->flags, rcpt->spam_score);
     }
-    Ns_DStringPrintf(&conn->line, "SIZE: %d/%lu", conn->body.data.length, conn->body.offset);
+    Ns_DStringPrintf(&conn->line, "SIZE: %lu/%lu", (unsigned long)conn->body.data.length, conn->body.offset);
     Ns_Log(Notice, "%s", conn->line.string);
 
     /*
@@ -3370,7 +3370,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
         Ns_MutexUnlock(&config->lock);
         if (!rec) {
             Tcl_AppendResult(interp, "invalid session id: ",
-                             Tcl_GetStringFromObj(objv[2], 0), (char *)0L);
+                             Tcl_GetString(objv[2]), (char *)0L);
             return TCL_ERROR;
         }
         conn = Tcl_GetHashValue(rec);
