@@ -1,3 +1,27 @@
+commit 81918f5dc531b967030304e573be56c7a1104439
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-04-19
+
+    get rid of warnings when compiled against Tcl9
+
+M	nssmtpd.c
+
+commit c96650552773381cacb6c95ccc6ae68f2cc07713
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-03-17
+
+    support NS_DRIVER_VERSION_4 and NS_DRIVER_VERSION_5
+
+M	nssmtpd.c
+
+commit 57edb463e57f7b55538ef931f5bf44ed33dfd375
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-03-17
+
+    Align with API change for Ns_TLS_SSLConnect
+
+M	nssmtpd.c
+
 commit 2e2ffd001430d425380ce7f0a9a9c6b932f06ddc
 Author: Gustaf Neumann <neumann@wu-wien.ac.at>
 Date:   2022-06-13

@@ -440,7 +440,7 @@ NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 
 // Free list of connection structures
 static smtpdConn *connList = NULL;
-static Ns_Mutex connLock;
+static Ns_Mutex connLock = NULL;
 static int segvTimeout;
 static const char hex[] = "0123456789ABCDEF";
 
@@ -487,6 +487,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     if (!globalInit) {
         Ns_MutexInit(&dnsMutex);
         Ns_MutexSetName(&dnsMutex, "smtp:dns");
+        Ns_MutexSetName(&connLock, "smtp:conn");
         globalInit = NS_TRUE;
     }
 
