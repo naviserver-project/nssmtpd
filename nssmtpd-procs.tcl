@@ -1,9 +1,10 @@
-# Author: Vlad Seryakov vlad@crystalballinc.com 
+# Author: Vlad Seryakov vlad@crystalballinc.com
+# Gustaf Neumann
+#
 # March 2006
 
 namespace eval smtpd {
-
-   variable version "Smtpd version 2.6"
+    variable version "Smtpd version 2.7"
 }
 
 proc smtpd::init {} {
@@ -20,19 +21,19 @@ proc smtpd::decodeHdr { str } {
 
     set b [string first "=?" $str]
     if { $b >= 0 } {
-      set b [string first "?" $str [expr $b+2]]
-      if { $b > 0 } {
-        set e [string first "?=" $str $b]
-        if { $e == -1 } { set e end } else { incr e -1 }
-        switch [string index $str [expr $b+1]] {
-         Q {
-           set str [ns_smtpd decode qprint [string range $str [expr $b+3] $e]]
-         }
-         B {
-           set str [ns_smtpd decode base64 [string range $str [expr $b+3] $e]]
-         }
+        set b [string first "?" $str $b+2]
+        if { $b > 0 } {
+            set e [string first "?=" $str $b]
+            if { $e == -1 } { set e end } else { incr e -1 }
+            switch [string index $str $b+1] {
+                Q {
+                    set str [ns_smtpd decode qprint [string range $str $b+3 $e]]
+                }
+                B {
+                    set str [ns_smtpd decode base64 [string range $str $b+3 $e]]
+                }
+            }
         }
-      }
     }
     return $str
 }
@@ -41,7 +42,7 @@ proc smtpd::decodeHdr { str } {
 proc smtpd::decodeBounce { id body } {
 
     set sender_email ""
-    set filters { 
+    set filters {
         {The following addresses had permanent fatal errors -----[\r\n]+<?([^>\r\n]+)} {}
         {The following addresses had permanent delivery errors -----[\r\n]+<?([^>\r\n]+)} {}
         {The following addresses had delivery errors---[\r\n]+<?([^> \r\n]+)} {}
@@ -76,16 +77,16 @@ proc smtpd::decodeBounce { id body } {
     }
 
     foreach { filter data } $filters {
-      if { [regexp -nocase $filter $body d sender_email] } { 
-        if { $data ne "" } { set sender_email [format $data $sender_email] }
-        break
-      }
+        if { [regexp -nocase $filter $body d sender_email] } {
+            if { $data ne "" } { set sender_email [format $data $sender_email] }
+            break
+        }
     }
     if { $sender_email ne "" } {
-      foreach rcpt [ns_smtpd getrcpt $id] {
-        foreach { user_email user_flags spam_score } $rcpt {}
-        ns_log Error smtpd::decodeBounce: $id: $user_email: $sender_email
-      }
+        foreach rcpt [ns_smtpd getrcpt $id] {
+            lassign $rcpt user_email user_flags spam_score
+            ns_log Error smtpd::decodeBounce: $id: $user_email: $sender_email
+        }
     }
     return $sender_email
 }
@@ -95,13 +96,13 @@ proc smtpd::decodeSender { id } {
 
     set From [ns_smtpd getfrom $id]
     if { [set Sender [ns_smtpd checkemail [ns_smtpd gethdr $id Sender]]] ne "" } {
-      return $Sender
+        return $Sender
     }
     if { [set ReplyTo [ns_smtpd checkemail [ns_smtpd gethdr $id Reply-To]]] ne "" && $ReplyTo ne $From } {
-      return $ReplyTo
+        return $ReplyTo
     }
     if { [set XSender [ns_smtpd checkemail [ns_smtpd gethdr $id X-Sender]]] ne "" } {
-      return $XSender
+        return $XSender
     }
     # Try for old/obsolete mailing lists
     if { [ns_smtpd gethdr $id Mailing-List] ne "" ||
@@ -109,11 +110,11 @@ proc smtpd::decodeSender { id } {
          [ns_smtpd gethdr $id List-Unsubscribe] ne "" ||
          [ns_smtpd gethdr $id Precedence] in {"bulk" "list"}
      } {
-	if { $ReplyTo ne "" } {
-	    return $ReplyTo
-	} else {
-	    return $From
-	}
+        if { $ReplyTo ne "" } {
+            return $ReplyTo
+        } else {
+            return $From
+        }
     }
     return $From
 }
@@ -127,35 +128,35 @@ proc smtpd::mail { id } {
 }
 
 proc smtpd::rcpt { id } {
-   
+
     # Current recipient
     lassign [ns_smtpd getrcpt $id 0] user_email user_flags spam_score
 
     ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email ($user_flags & [ns_smtpd flag RELAY])"
-    
+
     # Non-relayable user, just pass it through
     if { !($user_flags & [ns_smtpd flag RELAY]) } {
-	ns_smtpd setflag $id 0 VERIFIED
-	ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... pass through"
-	return
+        ns_smtpd setflag $id 0 VERIFIED
+        ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... pass through"
+        return
     }
     # Example of checking by recipient
     switch -regexp -- $user_email {
-     "joe@domain.com" -
-     "joe@localhost" {
-        # User is not allowed to receive any mail
-        ns_smtpd setreply $id "550 ${user_email}... User unknown\r\n"
-        ns_smtpd delrcpt $id 0
-	ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... not allowed"
-        return
-     }
-     
-     default {
-	 # Check everything for this domain
-	 ns_smtpd setflag $id 0 VIRUSCHECK
-	 ns_smtpd setflag $id 0 SPAMCHECK
-	 #return
-     }
+        "joe@domain.com" -
+        "joe@localhost" {
+            # User is not allowed to receive any mail
+            ns_smtpd setreply $id "550 ${user_email}... User unknown\r\n"
+            ns_smtpd delrcpt $id 0
+            ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email .... not allowed"
+            return
+        }
+
+        default {
+            # Check everything for this domain
+            ns_smtpd setflag $id 0 VIRUSCHECK
+            ns_smtpd setflag $id 0 SPAMCHECK
+            #return
+        }
     }
     ns_log Debug(smtpd) "### smtpd::rcpt $id $user_email VERIFIED"
 
@@ -177,49 +178,49 @@ proc smtpd::data { id } {
     set virus_status [ns_smtpd gethdr $id X-Smtpd-Virus-Status]
     # Message data
     lassign [ns_smtpd getbody $id] body body_offset body_size
-    
+
     # Find users who needs verification
     foreach rcpt [ns_smtpd getrcpt $id] {
-	lassign $rcpt deliver_email user_flags spam_score
-	# Non-relayable user
-	if { !($user_flags & [ns_smtpd flag RELAY]) } {
-	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... Non-relayable"
-	    continue
-	}
-	# SPAM detected
-	if { $user_flags & [ns_smtpd flag GOTSPAM] } {
-	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTSPAM"
-	    continue
-	}
-	# Already delivered user
-	if { $user_flags & [ns_smtpd flag DELIVERED] } {
-	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... DELIVERED"
-	    continue
-	}
-	# Virus detected
-	if { $conn_flags & [ns_smtpd flag GOTVIRUS] } {
-	    ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTVIRUS"
-	    continue
-	}
-	# Recipient is okay
-	set users($deliver_email) $spam_score
+        lassign $rcpt deliver_email user_flags spam_score
+        # Non-relayable user
+        if { !($user_flags & [ns_smtpd flag RELAY]) } {
+            ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... Non-relayable"
+            continue
+        }
+        # SPAM detected
+        if { $user_flags & [ns_smtpd flag GOTSPAM] } {
+            ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTSPAM"
+            continue
+        }
+        # Already delivered user
+        if { $user_flags & [ns_smtpd flag DELIVERED] } {
+            ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... DELIVERED"
+            continue
+        }
+        # Virus detected
+        if { $conn_flags & [ns_smtpd flag GOTVIRUS] } {
+            ns_log Debug(smtpd) "### smtpd::data $id $ $rcpt .... GOTVIRUS"
+            continue
+        }
+        # Recipient is okay
+        set users($deliver_email) $spam_score
     }
     if { [array size users] > 0 } {
-      # Build attachments list
-      foreach file [ns_smtpd gethdrs $id X-Smtpd-File] {
-        append attachments $file " "
-      }
-      # Save the message in the database or do other things to the message,
-      # i will save in the mailbox just as an example
-      if { [catch {
-        set fd [open /tmp/mailbox a]
-        puts $fd "From $sender_email [ns_fmttime [ns_time]]\n$body"
-        close $fd
-      } errmsg] } {
-        ns_smtpd setflag $id -1 ABORT
-        ns_log Error smtpd:data: $errmsg
-        ns_smtpd setreply $id "421 Transaction failed (Msg)\r\n"
-      }
+        # Build attachments list
+        foreach file [ns_smtpd gethdrs $id X-Smtpd-File] {
+            append attachments $file " "
+        }
+        # Save the message in the database or do other things to the message,
+        # i will save in the mailbox just as an example
+        if { [catch {
+            set fd [open /tmp/mailbox a]
+            puts $fd "From $sender_email [ns_fmttime [ns_time]]\n$body"
+            close $fd
+        } errmsg] } {
+            ns_smtpd setflag $id -1 ABORT
+            ns_log Error smtpd:data: $errmsg
+            ns_smtpd setreply $id "421 Transaction failed (Msg)\r\n"
+        }
     }
 }
 
@@ -230,7 +231,14 @@ proc smtpd::error { id } {
     set line [ns_smtpd getline $id]
     # sendmail 550 user unknown reply
     if { [regexp -nocase {RCPT TO: <([^@ ]+@[^ ]+)>: 550} $line d user_email] } {
-      ns_log notice "smtpd::error: $id: Dropping $user_email"
+        ns_log notice "smtpd::error: $id: Dropping $user_email"
     }
 }
 
+
+#
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

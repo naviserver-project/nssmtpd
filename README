@@ -1,8 +1,9 @@
 SMTPD server/proxy for NaviServer
-Release 2.1
+Release 2.3
 vlad@crystalballinc.com
 
-    SMTPD proxy/server for Naviserver
+SMTPD proxy/server for NaviServer
+----------------------------------
 
 This NaviServer module implements the SMTP protocol and acts as SMTP
 proxy with anti-spam and anti-virus capabilities.
@@ -14,82 +15,97 @@ To support anti-SPAM feature one of the following should be installed:
 
     * SpamAssasin <http://www.spamassassin.org/>
     * DSPAM <http://www.nuclearelephant.com/projects/dspam/>: patched
-      version <http://www.crystalballinc.com/vlad/dspam-3.1.0-vlad-src.tar.gz>. 
+      version <http://www.crystalballinc.com/vlad/dspam-3.1.0-vlad-src.tar.gz>.
 
 To support anti-virus feature one of the following should be installed:
 
     * ClamAV <http://www.clamav.net/>
-    * Sophos: SAVI <http://sophos.com> 
+    * Sophos: SAVI <http://sophos.com>
 
 *Configuring*
 
 Add the following configuration directives to the nsd.tcl file, modules
 section should already exist, so just add nssmtpd line there:
 
-    ns_section      "ns/server/${server}/modules"
-    ns_param        nssmtpd            ${home}/bin/nssmtpd.so
-    
-    ns_section      "ns/server/${server}/module/nssmtpd"
-    ns_param        port                    2525
-    ns_param        address                 127.0.0.1
-    ns_param        relay                   localhost:25
-    ns_param        spamd                   localhost
-    ns_param        initproc                smtpd::init
-    ns_param        rcptproc                smtpd::rcpt
-    ns_param        dataproc                smtpd::data
-    ns_param        errorproc               smtpd::error
-    ns_param	    relaydomains	    "localhost domain.com"
-    ns_param	    localdomains	    "localhost domain.com"
+    ns_section ns/server/${server}/modules {
+      ns_param        nssmtpd            ${home}/bin/nssmtpd.so
+    }
 
-# For STARTTLS functionality
-    ns_param certificate "pathToYourCertificateChainFile.pem"
-    ns_param cafile ""
-    ns_param capath ""
-    ns_param ciphers "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!RC4"
+    ns_section ns/server/${server}/module/nssmtpd {
+      ns_param  port                2525
+      ns_param  address             127.0.0.1
+      ns_param  relay               localhost:25
+      ns_param  spamd               localhost
+      ns_param  initproc            smtpd::init
+      ns_param  rcptproc            smtpd::rcpt
+      ns_param  dataproc            smtpd::data
+      ns_param  errorproc           smtpd::error
+      ns_param	relaydomains        "localhost domain.com"
+      ns_param	localdomains        "localhost domain.com"
+
+      #
+      # For STARTTLS functionality
+      #
+      ns_param  certificate         "pathToYourCertificateChainFile.pem"
+      ns_param  cafile              ""
+      ns_param  capath              ""
+      ns_param  ciphers             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305"
+
+      #
+      # For logging "ns_smtpd send ..." operations
+      #
+      ns_param  logging             on            ;# default: off
+      #ns_param logfile             ${logroot}/smtpsend.log
+      ns_param  logrollfmt          %Y-%m-%d      ;# format appended to log filename
+      #ns_param logmaxbackup        100           ;# 10, max number of backup log files
+      #ns_param logroll             true          ;# true, should server log files automatically
+      #ns_param logrollonsignal     true          ;# false, perform roll on a sighup
+      #ns_param logrollhour         0             ;# 0, specify at which hour to roll
+    }
 
 Once enabled, smtpd acts as SMTP server forwarding all messages to the
 configured real SMTP server via "relay" parameter. For each SMTP
-command it calles configured Tcl handler which performs actual
+command it calls configured Tcl handler which performs actual
 processing. The package can as well be used via "ns_nsmp
 
 *Usage*
 
-There is ns_smtpd command available in called Tcl handlers
+The behavior is controlled by the single Tcl command "ns_smtpd":
 
 ns_smtpd usage:
 
-  ns_smtpd flag
-  ns_smtpd send
-  ns_smtpd relay
-  ns_smtpd local
-  ns_smtpd encode
-  ns_smtpd decode
-  ns_smtpd checkemail - parses email and returns as name@domain if valid
-  ns_smtpd checkdomain
-  ns_smtpd virusversion - returns version of anti-virus tool used
-  ns_smtpd spamversion - returns version of anti-spam tool used
-  ns_smtpd checkspam
-  ns_smtpd trainspam
-  ns_smtpd checkvirus
-  ns_smtpd sessions
-  ns_smtpd gethdr
-  ns_smtpd gethdrs
-  ns_smtpd getbody
-  ns_smtpd getfrom
-  ns_smtpd getfromdata
-  ns_smtpd setfrom
-  ns_smtpd setfromdata
-  ns_smtpd getrcpt
-  ns_smtpd getrcptdata
-  ns_smtpd addrcpt
-  ns_smtpd setrcptdata
-  ns_smtpd delrcpt
-  ns_smtpd setflag
-  ns_smtpd unsetflag
-  ns_smtpd getflag
-  ns_smtpd setreply
-  ns_smtpd getline
-  ns_smtpd dump
+    ns_smtpd flag
+    ns_smtpd send
+    ns_smtpd relay
+    ns_smtpd local
+    ns_smtpd encode
+    ns_smtpd decode
+    ns_smtpd checkemail - parses email and returns as name@domain if valid
+    ns_smtpd checkdomain
+    ns_smtpd virusversion - returns version of anti-virus tool used
+    ns_smtpd spamversion - returns version of anti-spam tool used
+    ns_smtpd checkspam
+    ns_smtpd trainspam
+    ns_smtpd checkvirus
+    ns_smtpd sessions
+    ns_smtpd gethdr
+    ns_smtpd gethdrs
+    ns_smtpd getbody
+    ns_smtpd getfrom
+    ns_smtpd getfromdata
+    ns_smtpd setfrom
+    ns_smtpd setfromdata
+    ns_smtpd getrcpt
+    ns_smtpd getrcptdata
+    ns_smtpd addrcpt
+    ns_smtpd setrcptdata
+    ns_smtpd delrcpt
+    ns_smtpd setflag
+    ns_smtpd unsetflag
+    ns_smtpd getflag
+    ns_smtpd setreply
+    ns_smtpd getline
+    ns_smtpd dump
 
 *Licensing*
 

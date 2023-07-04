@@ -106,7 +106,7 @@ namespace eval ::nstest {
 		ns_set icput $hdrs Connection close
 	    }
 
-	    if {[string match *:* $host]} {
+	    if {[string match "*:*" $host]} {
 		set host "\[$host\]"
 	    }
 	    if {$port eq "80"} {
@@ -167,7 +167,7 @@ namespace eval ::nstest {
 
 		while {1} {
 		    set line [http_gets $timeout $rfd]
-		    if {![string length $line]} {
+		    if {$line eq ""} {
 			break
 		    }
 		    ns_parseheader $hdrs $line
