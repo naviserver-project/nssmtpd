@@ -1536,7 +1536,7 @@ static void SmtpdThread(smtpdConn *conn)
             Ns_Log(SmtpdDebug, "DATA relayhost <%s>", config->relayhost);
             if (config->relayhost != NULL) {
                 for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
-                    Ns_Log(SmtpdDebug, "DATA check rcpt <%s> %s %d -> verfied %d", rcpt->addr, rcpt->relay.host, rcpt->relay.port,
+                    Ns_Log(SmtpdDebug, "DATA check rcpt <%s> %s %d -> verified %d", rcpt->addr, rcpt->relay.host, rcpt->relay.port,
                            rcpt->flags & SMTPD_VERIFIED);
                     if ((rcpt->flags & SMTPD_VERIFIED) != 0u) {
                         break;
@@ -2967,21 +2967,38 @@ static void SmtpdConnParseData(smtpdConn *conn)
     }
 }
 
+/* Take length of the longest format (with reserve) for all */
+#define FORMAT_SIZE 36
+
 static smtpdIpaddr *SmtpdParseIpaddr(char *str)
 {
     struct sockaddr *saPtr, *addr_saPtr;
     smtpdIpaddr     *alist = NULL;
-    char             addr[NS_IPADDR_SIZE], mask[NS_IPADDR_SIZE] = "", format[16];
+    char             addr[NS_IPADDR_SIZE], mask[NS_IPADDR_SIZE] = "",
+                     format1[FORMAT_SIZE], format2[FORMAT_SIZE],
+                     format3[FORMAT_SIZE], format4[FORMAT_SIZE];
     bool             have_ipmask = NS_FALSE;
     int              rc;
     unsigned int     maskBits;
 
-    snprintf(format, sizeof(format), "%%%lus", (unsigned long)(sizeof(addr)));
+    snprintf(format1, sizeof(format1),
+             "%%%lu[0123456789.]/%%%lu[0123456789.]",
+             (unsigned long)(sizeof(addr)),
+             (unsigned long)(sizeof(mask)));
+    snprintf(format2, sizeof(format2),
+             "%%%lu[0123456789.:]",
+             (unsigned long)(sizeof(addr)));
+    snprintf(format3, sizeof(format3),
+             "%%%lu[^/]/%%%lus",
+             (unsigned long)(sizeof(addr)),
+             (unsigned long)(sizeof(mask)));
+    snprintf(format4, sizeof(format4),
+             "%%%lus", (unsigned long)(sizeof(addr)));
 
-    if (sscanf(str, "%[0123456789.]/%[0123456789.]", addr, mask) == 2) {
-    } else if (sscanf(str, "%[0123456789.:]", addr) == 1) {
-    } else if (sscanf(str, "%[^/]/%17s", addr, mask) == 2) {
-    } else if (sscanf(str, format, addr) == 1) {
+    if (sscanf(str, format1, addr, mask) == 2) {
+    } else if (sscanf(str, format2, addr) == 1) {
+    } else if (sscanf(str, format3, addr, mask) == 2) {
+    } else if (sscanf(str, format4, addr) == 1) {
         smtpdIpaddr *arec;
         Tcl_DString  ds, *dsPtr = &ds;
         Tcl_Obj     *listObj, **objv;
