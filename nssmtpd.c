@@ -610,12 +610,12 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     }
     serverPtr->relayhost = ns_strcopy(Ns_ConfigGetValue(path, "relay"));
     serverPtr->spamdhost = ns_strcopy(Ns_ConfigGetValue(path, "spamd"));
-    serverPtr->initproc = Ns_ConfigGetValue(path, "initproc");
-    serverPtr->heloproc = Ns_ConfigGetValue(path, "heloproc");
-    serverPtr->mailproc = Ns_ConfigGetValue(path, "mailproc");
-    serverPtr->rcptproc = Ns_ConfigGetValue(path, "rcptproc");
-    serverPtr->dataproc = Ns_ConfigGetValue(path, "dataproc");
-    serverPtr->errorproc = Ns_ConfigGetValue(path, "errorproc");
+    serverPtr->initproc = ns_strcopy(Ns_ConfigGetValue(path, "initproc"));
+    serverPtr->heloproc = ns_strcopy(Ns_ConfigGetValue(path, "heloproc"));
+    serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(path, "mailproc"));
+    serverPtr->rcptproc = ns_strcopy(Ns_ConfigGetValue(path, "rcptproc"));
+    serverPtr->dataproc = ns_strcopy(Ns_ConfigGetValue(path, "dataproc"));
+    serverPtr->errorproc = ns_strcopy(Ns_ConfigGetValue(path, "errorproc"));
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
 
 #ifdef HAVE_OPENSSL_EVP_H
