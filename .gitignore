@@ -1,2 +1,4 @@
-nsd.pid
-server.pem
+*~
+*.o
+*.so
+*.pid
