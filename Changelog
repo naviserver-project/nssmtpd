@@ -1,3 +1,73 @@
+commit 7076164b18b4c35a58e87413a536f6f0e97265a3
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-07-13
+
+    Added .gitignore
+
+M	.gitignore
+
+commit 0a227e1b4110799ed836dfca685d1892a120bd24
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-07-05
+
+    improved safety on parsing IP addresses and masks
+
+M	Makefile
+M	nssmtpd.c
+
+commit 4cdde02dfd131e984de8657cbc2766e65b595735
+Author: Hector Romojaro <hector.romojaro@gmail.com>
+Date:   2023-07-04
+
+    Copy values from configuration strings
+
+M	nssmtpd.c
+
+commit 104dfec1157702a1253ae30b4693086b029db019
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-06-21
+
+    nsmtp send logging
+    
+    - support for optionally writing a log file of outgoing SMTP send
+      requests initiated via "ns_smtpd send...". SMTP send request logging
+      helps to track performance and functionality problems in the mail
+      delivery system.
+    
+    - The log file entries contain a timestamp, thread name, status code,
+      error code, mail server host and port, time duration for send
+      request, bytes sent, sender, and recipient(s).
+    
+    - The new config-file options are the same as e.g. for the HTTP client
+      log files.
+    
+    Sample configuration for the logging SMTP send messages:
+    
+    ns_section ns/server/$server/module/nssmtpd {
+        ...
+        ns_param logging on            ;# default: off
+        #ns_param logfile ${logroot}/smtpsend.log
+        ns_param logrollfmt %Y-%m-%d   ;# format appended to log filename
+        #ns_param logmaxbackup 100     ;# 10, max number of backup log files
+        #ns_param logroll true         ;# true, should server log files automatically
+        #ns_param logrollonsignal true ;# false, perform roll on a sighup
+        #ns_param logrollhour 0        ;# 0, specify at which hour to roll
+    }
+    
+    - bumped version number to 2.3
+
+M	README
+M	nssmtpd.c
+M	tests/config.tcl
+
+commit 5fd74c8bdd5ece5a281f32e04933c922e653e30f
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-06-10
+
+    initialize global variables
+
+M	nssmtpd.c
+
 commit 81918f5dc531b967030304e573be56c7a1104439
 Author: Gustaf Neumann <neumann@wu-wien.ac.at>
 Date:   2023-04-19
@@ -882,7 +952,7 @@ commit 1b4fc99b9941c0a65d729c84da9e23d37233f783
 Author: Vlad Seryakov <vlad@crystalballinc.com>
 Date:   2006-01-20
 
-    Make sure to return errors in driver proc
+    Make sure to return errors in dirver proc
 
 M	nssmtpd.c
 
