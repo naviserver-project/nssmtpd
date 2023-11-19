@@ -74,38 +74,48 @@ The behavior is controlled by the single Tcl command "ns_smtpd":
 
 ns_smtpd usage:
 
-    ns_smtpd flag
-    ns_smtpd send
-    ns_smtpd relay
-    ns_smtpd local
-    ns_smtpd encode
-    ns_smtpd decode
-    ns_smtpd checkemail - parses email and returns as name@domain if valid
-    ns_smtpd checkdomain
+    ns_smtpd flag /name/
+    ns_smtpd send /sender_email/ /rcpt_email/ /data_varname/ ?server? ?port?
+    ns_smtpd relay add /domain/
+    ns_smtpd relay check /address/
+    ns_smtpd relay clear
+    ns_smtpd relay del /domain/
+    ns_smtpd relay get
+    ns_smtpd relay set /relay/ ?relay? ...
+    ns_smtpd local add /domain|ipaddr|
+    ns_smtpd local check /ipaddr|
+    ns_smtpd local clear
+    ns_smtpd local del /domain|ipaddr|
+    ns_smtpd local get
+    ns_smtpd local set /ipaddr/ ?ipaddr? ...
+    ns_smtpd encode /base64|hex|qprint/ /text/
+    ns_smtpd decode /base64|hex|qprint/ /text/
+    ns_smtpd checkemail /email/ - parses email and returns as name@domain if valid
+    ns_smtpd checkdomain /domain/
     ns_smtpd virusversion - returns version of anti-virus tool used
     ns_smtpd spamversion - returns version of anti-spam tool used
-    ns_smtpd checkspam
-    ns_smtpd trainspam
-    ns_smtpd checkvirus
+    ns_smtpd checkspam /message/ ?email?
+    ns_smtpd trainspam 1|0 /email/ /message/ ?signature? ?mode? ?source?
+    ns_smtpd checkvirus /data/
     ns_smtpd sessions
-    ns_smtpd gethdr
-    ns_smtpd gethdrs
+    ns_smtpd gethdr /name/
+    ns_smtpd gethdrs ?name?
     ns_smtpd getbody
     ns_smtpd getfrom
     ns_smtpd getfromdata
-    ns_smtpd setfrom
-    ns_smtpd setfromdata
-    ns_smtpd getrcpt
-    ns_smtpd getrcptdata
-    ns_smtpd addrcpt
-    ns_smtpd setrcptdata
-    ns_smtpd delrcpt
-    ns_smtpd setflag
-    ns_smtpd unsetflag
-    ns_smtpd getflag
-    ns_smtpd setreply
+    ns_smtpd setfrom /address/
+    ns_smtpd setfromdata /data/
+    ns_smtpd getrcpt ?address|index?
+    ns_smtpd getrcptdata ?address|index?
+    ns_smtpd addrcpt /address/ ?flags? ?data?
+    ns_smtpd setrcptdata /address|index/ /data/
+    ns_smtpd delrcpt /address|index/
+    ns_smtpd setflag /address|index/ /flag/
+    ns_smtpd unsetflag /address|index/ /flag/
+    ns_smtpd getflag ?address|index?
+    ns_smtpd setreply /reply/
     ns_smtpd getline
-    ns_smtpd dump
+    ns_smtpd dump /filename/
 
 *Licensing*
 
