@@ -2204,8 +2204,9 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
      * also multiple "RCPT TO" lines.
      */
     {
-        int objc, i;
-        Tcl_Obj **objv;
+        int        i;
+        TCL_SIZE_T objc;
+        Tcl_Obj  **objv;
 
         if (Tcl_ListObjGetElements(NULL, rcptObj, &objc, &objv) != TCL_OK) {
             goto error;
@@ -3002,7 +3003,8 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         smtpdIpaddr *arec;
         Tcl_DString  ds, *dsPtr = &ds;
         Tcl_Obj     *listObj, **objv;
-        int          objc, i;
+        TCL_SIZE_T   objc;
+        int          i;
 
         // Obtain all IP addresses for given hostname
         Tcl_DStringInit(dsPtr);
@@ -3565,7 +3567,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
     smtpdConn     *conn = NULL;
     Tcl_HashEntry *rec;
     smtpdConfig   *config = arg;
-    int            cmd, index = -99, count = 0;
+    int            cmd, index = -99;
+    TCL_SIZE_T     count;
     unsigned int   id;
 
     enum {
@@ -3814,7 +3817,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
 
     case cmdRelay:
         if (objc < 3) {
-            Tcl_WrongNumArgs(interp, 1, objv, "add|del|get|set");
+            Tcl_WrongNumArgs(interp, 1, objv, "add|check|clear|del|get|set");
             return TCL_ERROR;
         }
         if (!strcasecmp("add", Tcl_GetString(objv[2]))) {
