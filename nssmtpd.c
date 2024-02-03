@@ -414,7 +414,6 @@ static Ns_DriverRequestProc SmtpdRequestProc;
 static Ns_DriverCloseProc SmtpdCloseProc;
 
 static void SmtpdInit(void *arg);
-static int SmtpdRequestProc(void *arg, Ns_Conn *conn);
 static Ns_TclTraceProc SmtpdInterpInit;
 static Tcl_ObjCmdProc SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
@@ -2204,8 +2203,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
      * also multiple "RCPT TO" lines.
      */
     {
-        int        i;
-        TCL_SIZE_T objc;
+        TCL_SIZE_T i, objc;
         Tcl_Obj  **objv;
 
         if (Tcl_ListObjGetElements(NULL, rcptObj, &objc, &objv) != TCL_OK) {
@@ -3003,8 +3001,7 @@ static smtpdIpaddr *SmtpdParseIpaddr(char *str)
         smtpdIpaddr *arec;
         Tcl_DString  ds, *dsPtr = &ds;
         Tcl_Obj     *listObj, **objv;
-        TCL_SIZE_T   objc;
-        int          i;
+        TCL_SIZE_T   objc, i;
 
         // Obtain all IP addresses for given hostname
         Tcl_DStringInit(dsPtr);
@@ -3568,7 +3565,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
     Tcl_HashEntry *rec;
     smtpdConfig   *config = arg;
     int            cmd, index = -99;
-    TCL_SIZE_T     count;
+    TCL_SIZE_T     count = 0;
     unsigned int   id;
 
     enum {
