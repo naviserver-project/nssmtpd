@@ -415,7 +415,7 @@ static Ns_DriverCloseProc SmtpdCloseProc;
 
 static void SmtpdInit(void *arg);
 static Ns_TclTraceProc SmtpdInterpInit;
-static Tcl_ObjCmdProc SmtpdCmd;
+static TCL_OBJCMDPROC_T SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
 static int SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
 static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
@@ -969,7 +969,7 @@ SendLogClose(void *arg)
  */
 static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
 {
-    Tcl_CreateObjCommand(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
+    TCL_CREATEOBJCOMMAND(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
     return TCL_OK;
 }
 
@@ -3557,7 +3557,7 @@ static unsigned int SmtpdFlags(const char *name)
     return 0u;
 }
 
-static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * const objv[])
+static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj * const objv[])
 {
     char          *name = NULL;
     smtpdRcpt     *rcpt;
@@ -3891,7 +3891,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_SetObjResult(interp, list);
 
         } else if (!strcasecmp("set", Tcl_GetString(objv[2]))) {
-            int         i;
+            TCL_SIZE_T  i;
             char       *p;
             smtpdRelay *relay;
 
@@ -4013,7 +4013,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * cons
             Tcl_SetObjResult(interp, list);
 
         } else if (!strcasecmp("set", Tcl_GetString(objv[2]))) {
-            int i;
+            TCL_SIZE_T i;
             smtpdIpaddr *addr, *end = NULL;
 
             Ns_MutexLock(&config->locallock);
@@ -4888,7 +4888,7 @@ static char *encode64(const char *in, int len)
 static char *decode64(const char *in, int len, size_t *outlen)
 {
     char *out, *buf;
-    int i, d = 0, dlast = 0, phase = 0;
+    int   i, d = 0, dlast = 0, phase = 0;
     static int table[256] = {
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, /* 00-0F */
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, /* 10-1F */
@@ -4944,7 +4944,7 @@ static char *decode64(const char *in, int len, size_t *outlen)
 
 static char *encodeqp(const char *in, size_t len)
 {
-    int i = 0;
+    int   i = 0;
     char *buf, *out;
 
     buf = out = ns_malloc((unsigned) (3 * len + (6 * len) / 75 + 3));
