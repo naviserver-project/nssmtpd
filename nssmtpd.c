@@ -374,10 +374,10 @@ typedef struct _dnsPacket {
 } dnsPacket;
 
 static bool parseEmail(smtpdEmail *addr, char *str);
-static char *encode64(const char *in, int len);
-static char *decode64(const char *in, int len, size_t *outlen);
+static char *encode64(const char *in, TCL_SIZE_T len);
+static char *decode64(const char *in, TCL_SIZE_T len, size_t *outlen);
 static char *encodeqp(const char *in, size_t len);
-static char *decodeqp(const char *in, int len, size_t *outlen);
+static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen);
 static char *encodehex(const char *buf, size_t len);
 static char *decodehex(const char *str, size_t *len);
 static int parsePhrase(char **inp, char **phrasep, const char *specials);
@@ -448,7 +448,7 @@ static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
 static bool SmtpdCheckDomain(smtpdConn *conn, const char *domain);
 static bool SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsigned short *port);
 static int SmtpdCheckSpam(smtpdConn *conn);
-static int SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location);
+static int SmtpdCheckVirus(smtpdConn *conn, char *data, TCL_SIZE_T datalen, char *location);
 static void SmtpdPanic(const char *fmt, ...);
 static void SmtpdSegv(int sig);
 static unsigned int SmtpdFlags(const char *name);
@@ -3330,13 +3330,13 @@ static int SmtpdCheckSpam(smtpdConn *conn)
 #if !defined(USE_SAVI) && !defined(USE_CLAMAV)
 static int
 SmtpdCheckVirus(smtpdConn *UNUSED(conn), char *UNUSED(data),
-                int UNUSED(datalen), char *UNUSED(location))
+                TCL_SIZE_T UNUSED(datalen), char *UNUSED(location))
 {
     return TCL_OK;
 }
 #else
 static int
-SmtpdCheckVirus(smtpdConn *conn, char *data, int datalen, char *location)
+SmtpdCheckVirus(smtpdConn *conn, char *data, TCL_SIZE_T datalen, char *location)
 {
 # ifdef USE_SAVI
     HRESULT hr;
@@ -4853,7 +4853,7 @@ static char *decodehex(const char *str, size_t *len)
     return p;
 }
 
-static char *encode64(const char *in, int len)
+static char *encode64(const char *in, TCL_SIZE_T len)
 {
     static unsigned char basis_64[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????";
@@ -4885,7 +4885,7 @@ static char *encode64(const char *in, int len)
     return (char *) buf;
 }
 
-static char *decode64(const char *in, int len, size_t *outlen)
+static char *decode64(const char *in, TCL_SIZE_T len, size_t *outlen)
 {
     char *out, *buf;
     int   i, d = 0, dlast = 0, phase = 0;
@@ -4982,7 +4982,7 @@ static char *encodeqp(const char *in, size_t len)
     return buf;
 }
 
-static char *decodeqp(const char *in, int len, size_t *outlen)
+static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen)
 {
     char c2, *out, *buf, *ptr, *s;
 

@@ -952,7 +952,7 @@ commit 1b4fc99b9941c0a65d729c84da9e23d37233f783
 Author: Vlad Seryakov <vlad@crystalballinc.com>
 Date:   2006-01-20
 
-    Make sure to return errors in dirver proc
+    Make sure to return errors in driver proc
 
 M	nssmtpd.c
 

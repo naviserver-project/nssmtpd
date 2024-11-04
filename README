@@ -8,6 +8,8 @@ SMTPD proxy/server for NaviServer
 This NaviServer module implements the SMTP protocol and acts as SMTP
 proxy with anti-spam and anti-virus capabilities.
 
+Compatibility: The module compiles with Tcl 8.5, 8.6 and 9.0.
+
 Per default, the  anti-SPAM and anti-virus support is deactivated
 and needs probably more work for the current libraries.
 
