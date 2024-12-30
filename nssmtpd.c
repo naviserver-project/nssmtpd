@@ -540,10 +540,17 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
         } else {
             Tcl_DString ds;
+            Ns_Set     *set;
 
             Tcl_DStringInit(&ds);
             (void) Ns_HomePath(&ds, "logs", "/", filename, (char *)0L);
             serverPtr->sendlog.logFileName = Ns_DStringExport(&ds);
+
+            /*
+             * The path was completed. Make the result queryable.
+             */
+            set = Ns_ConfigCreateSection(path);
+            Ns_SetIUpdateSz(set, "logfile", 7, serverPtr->sendlog.logFileName, TCL_INDEX_NONE);
         }
 
         Tcl_DStringFree(&defaultLogFileName);
