@@ -1925,7 +1925,14 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
              * the sni_hostname, which might be used via configuration in
              * future versions.
              */
-            rc = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx, NULL, NULL, &ssl);
+            rc = Ns_TLS_SSLConnect(relay->interp, relay->sock->sock, ctx,
+                                   /*sniHostname*/NULL,
+#if NS_VERSION_NUM >= 50000
+                                   /*caFile*/NULL,
+                                   /*caPath*/NULL,
+#endif
+                                   /*timeoutPtr*/NULL,
+                                   &ssl);
             result = (rc == NS_OK ? TCL_OK : TCL_ERROR);
             relay->sock->arg = ssl;
         }
