@@ -417,7 +417,7 @@ static void SmtpdInit(void *arg);
 static Ns_TclTraceProc SmtpdInterpInit;
 static TCL_OBJCMDPROC_T SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
-static int SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
+static TCL_SIZE_T SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
 static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
                                Tcl_Obj *rcptObj, const char *dataVarName,
                                const char *host, unsigned short port);
@@ -1792,7 +1792,7 @@ static void SmtpdConnFree(smtpdConn *conn)
     Ns_MutexUnlock(&connLock);
 }
 
-static int
+static TCL_SIZE_T
 SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 {
     Ns_Sock    sock;
