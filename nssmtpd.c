@@ -1528,7 +1528,7 @@ static void SmtpdThread(smtpdConn *conn)
         }
 
         if (!strncasecmp(conn->line.string, "DATA", 4)) {
-            int size = -1;
+            TCL_SIZE_T size = -1;
             smtpdRcpt *rcpt;
 
             conn->cmd = SMTP_DATA;
@@ -1799,7 +1799,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     smtpdRcpt *rcpt;
     smtpdConn *relay;
     Ns_Time    timeout = { conn->config->writetimeout, 0 };
-    int        size = 0, vcount = 0;
+    TCL_SIZE_T size = 0;
+    int        vcount = 0;
     bool       hasStarttls;
     Ns_Conn   *nsconn = Ns_GetConn();
 
