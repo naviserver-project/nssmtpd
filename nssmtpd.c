@@ -1198,7 +1198,7 @@ static void SmtpdThread(smtpdConn *conn)
     Tcl_DStringSetLength(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "220 %s SMTP nssmtpd %s ", Ns_InfoHostname(), SMTPD_VERSION);
     Ns_HttpTime(&conn->line, 0);
-    Ns_DStringAppend(&conn->line, "\r\n");
+    Tcl_DStringAppend(&conn->line, "\r\n", 2);
     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
         goto error;
     }
@@ -1594,7 +1594,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             /* Callback might set its own reply code */
             if (!conn->reply.length) {
-                Ns_DStringAppend(&conn->reply, "250 Message accepted\r\n");
+                Tcl_DStringAppend(&conn->reply, "250 Message accepted\r\n", 22);
             }
             /* No reply in relay mode */
             if (config->relayhost) {
