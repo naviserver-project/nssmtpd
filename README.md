@@ -1,6 +1,3 @@
-Below is an improved version of the README converted to Markdown:
-
----
 
 # SMTPD Server/Proxy for NaviServer
 
@@ -145,4 +142,3 @@ This project is licensed under the Mozilla Public License.
 - **Vlad Seryakov** – <vlad@crystalballinc.com>
 - **Gustaf Neumann** – <neumann@wu-wien.ac.at>
 
----
