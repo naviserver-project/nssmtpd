@@ -79,6 +79,10 @@
 # define MIN(a,b) (((a)<(b))?(a):(b))
 #endif
 
+#if !defined(NS_DRIVER_VERSION_5)
+#define Ns_ReturnCodeString(rc) (((rc) == NS_OK ? "NS_OK" : ((rc) == NS_ERROR ? "NS_ERROR" : "OTHER_ERROR")))
+#endif
+
 /* SMTP commands */
 #define SMTP_HELO           1
 #define SMTP_MAIL           2
@@ -111,8 +115,9 @@
 #define SMTPD_GOTSPAM        0x0080000u
 #define SMTPD_GOTVIRUS       0x0100000u
 #define SMTPD_GOTSTARTTLS    0x0200000u
+#define SMTPD_GOTAUTHPLAIN   0x0400000u
 
-#define SMTPD_VERSION              "2.3"
+#define SMTPD_VERSION              "2.4"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"
@@ -179,6 +184,8 @@ typedef struct _smtpdConfig {
     int readtimeout;
     int writetimeout;
     char *relayhost;
+    char *relayuser;
+    char *relaypassword;
     const char *address;
     char *spamdhost;
     const char *initproc;
@@ -221,7 +228,7 @@ typedef struct _smtpdConfig {
 
 typedef struct _smtpdConn {
     struct _smtpdConn *next;
-    unsigned int id;
+    uintptr_t id;
     int cmd;
     unsigned int flags;
     const char *host;
@@ -432,14 +439,23 @@ static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
-static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr);
-static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len);
+static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr);
+static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr);
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length);
 static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len);
 static Ns_ReturnCode SmtpdWriteDString(smtpdConn *conn, Tcl_DString *dsPtr);
 static Ns_ReturnCode SmtpdPuts(smtpdConn *conn, const char *string);
 static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t len);
-static ssize_t SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr);
+static ssize_t SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr, Ns_ReturnCode *rcPtr);
+static Ns_ReturnCode SmtpdReadMultiLine(smtpdConn *conn, Tcl_DString *dsPtr, unsigned int *ehloFlagsPtr)
+    NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(2);
+static void SmtpdJoinMultiLine(Tcl_DString *dsPtr) NS_GNUC_NONNULL(1);
+
+static Ns_ReturnCode SmtpdEHLOCommand(smtpdConn *conn, smtpdConn *relay)
+    NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(2);
+static Ns_ReturnCode SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, const char *user, const char *password)
+    NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(2) NS_GNUC_NONNULL(3) NS_GNUC_NONNULL(4);
+static bool SmtpLineTrimCR(Tcl_DString *dsPtr) NS_GNUC_NONNULL(1);
 static char *SmtpdStrPos(char *as1, const char *as2);
 static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
 static char *SmtpdStrTrim(char *str);
@@ -517,7 +533,9 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     if (!initialized) {
         Ns_MutexInit(&dnsMutex);
-        Ns_MutexSetName(&dnsMutex, "smtp:dns");
+        Ns_MutexSetName(&dnsMutex, "smtpd:dns");
+        Ns_MutexInit(&connLock);
+        Ns_MutexSetName(&connLock, "smtpd:connLock");
         initialized = NS_TRUE;
     }
 
@@ -670,14 +688,45 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     /* SMTP relay support */
     serverPtr->relayport = DEFAULT_PORT;
+
     if (serverPtr->relayhost != NULL) {
-        char *end;
-        Ns_HttpParseHost2(serverPtr->relayhost, NS_TRUE, &serverPtr->relayhost, &portString, &end);
-        if (portString != NULL) {
-            *portString = '\0';
-            serverPtr->relayport = (unsigned short) strtol(portString + 1, NULL, 10);
+        Ns_URL url;
+        const char *errorMsg;
+
+        //Ns_Log(Notice, "smtpd relayhost: parseurl '%s'", serverPtr->relayhost);
+        (void) Ns_ParseUrl(serverPtr->relayhost, NS_FALSE, &url, &errorMsg);
+        //Ns_Log(Notice, "smtpd relayhost: parseurl rc %s %s", Ns_ReturnCodeString(rc), errorMsg);
+        if (url.host == NULL && url.protocol != NULL) {
+            serverPtr->relayhost = url.protocol;
+            if (url.tail != NULL) {
+                serverPtr->relayport = (unsigned short) strtol(url.tail, NULL, 10);
+            }
+            Ns_Log(Notice, "smtpd relayhost: old-style  parameter '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
+        } else {
+            if (url.host != NULL) {
+                serverPtr->relayhost = url.host;
+                if (url.port != NULL) {
+                    serverPtr->relayport = (unsigned short) strtol(url.port, NULL, 10);
+                }
+                Ns_Log(Notice, "smtpd relayhost: new-style parameter '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
+            } else {
+                Ns_Log(Notice, "smtpd relayhost: use default port '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
+            }
+            if (url.userinfo != NULL) {
+                char *p = strchr(url.userinfo, INTCHAR(':'));
+                //Ns_Log(Notice, "smtpd relayhost: got userinfo <%s>", url.userinfo);
+                serverPtr->relayuser = url.userinfo;
+                serverPtr->relaypassword = p+1;
+                *p = '\0';
+                //Ns_Log(Notice, "smtpd: got user '%s' pw '%s'", serverPtr->relayuser, serverPtr->relaypassword);
+                Ns_Log(Notice, "smtpd relayhost: got user and password");
+            } else {
+                Ns_Log(Notice, "smtpd relayhost: no user and password configured");
+            }
         }
     }
+
+    Ns_Log(Notice, "smtpd relayhost: host <%s> port %hu", serverPtr->relayhost, serverPtr->relayport);
 
     /* SpamAssassin support */
     serverPtr->spamdport = 783;
@@ -1172,7 +1221,9 @@ static void SmtpdThread(smtpdConn *conn)
     char *data;
     Ns_Conn *nsconn = Ns_GetConn();
     smtpdConfig *config = conn->config;
+    Ns_ReturnCode rc = TCL_OK;
 
+    Ns_ThreadSetName("-nssmptd:%ld-", conn->id);
     Ns_Log(SmtpdDebug,"SmtpdThread");
 
     Ns_GetHostByAddr(&conn->line, Ns_ConnPeerAddr(nsconn));
@@ -1182,7 +1233,7 @@ static void SmtpdThread(smtpdConn *conn)
         return;
     }
     if (!(conn->interp = Ns_GetConnInterp(nsconn))) {
-        Ns_Log(Error, "nssmtpd: %d: Conn/Tcl interp error: %s", conn->id, strerror(errno));
+        Ns_Log(Error, "nssmtpd: %ld: Conn/Tcl interp error: %s", conn->id, strerror(errno));
         SmtpdPuts(conn, "421 Service not available, internal error");
         SmtpdConnFree(conn);
         return;
@@ -1207,7 +1258,7 @@ static void SmtpdThread(smtpdConn *conn)
 
     while (1) {
         conn->cmd = SMTP_READ;
-        if (SmtpdReadLine(conn, &conn->line) < 0) {
+        if (SmtpdReadLine(conn, &conn->line, &rc) < 0) {
             goto error;
         }
         Tcl_DStringSetLength(&conn->reply, 0);
@@ -1215,7 +1266,7 @@ static void SmtpdThread(smtpdConn *conn)
         Ns_StrTrim(conn->line.string);
         conn->line.length = (int)strlen(conn->line.string);
 
-        //Ns_Log(SmtpdDebug, "=== SmtpdThread: %s", conn->line.string);
+        Ns_Log(SmtpdDebug, "SmtpdThread got cmd <%s>", conn->line.string);
 
         if (!strncasecmp(conn->line.string, "QUIT", 4)) {
             conn->cmd = SMTP_QUIT;
@@ -1241,6 +1292,7 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "HELP", 4)) {
             Tcl_DString ds;
+
             conn->cmd = SMTP_HELP;
             Tcl_DStringInit(&ds);
             Ns_DStringPrintf(&ds, "214- This is nssmtpd version %s\r\n", SMTPD_VERSION);
@@ -1481,7 +1533,7 @@ static void SmtpdThread(smtpdConn *conn)
 
                 } else if ((conn->flags & SMTPD_LOCAL) == 0u) {
                     Ns_DStringPrintf(&conn->reply, "550 %s@%s... Relaying denied\r\n", addr.mailbox, addr.domain);
-                    Ns_Log(Error, "nssmtpd: %d: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
+                    Ns_Log(Error, "nssmtpd: %ld: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
                            conn->id, conn->host, Ns_ConnPeerAddr(nsconn), addr.mailbox, addr.domain);
                     if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                         goto error;
@@ -1552,6 +1604,7 @@ static void SmtpdThread(smtpdConn *conn)
 
                 if (rcpt != NULL
                     && (size = SmtpdRelayData(conn, rcpt->relay.host, rcpt->relay.port)) < 0) {
+                    Ns_Log(SmtpdDebug, "SmtpdRelayData failed");
                     goto done;
                 }
             }
@@ -1561,7 +1614,7 @@ static void SmtpdThread(smtpdConn *conn)
                     break;
                 }
                 do {
-                    if (SmtpdReadLine(conn, &conn->line) < 0) {
+                    if (SmtpdReadLine(conn, &conn->line, &rc) < 0) {
                         goto error;
                     }
                     /* Remove trailing dot sender the data buffer */
@@ -1631,7 +1684,7 @@ static void SmtpdThread(smtpdConn *conn)
     case 0:
         break;
     default:
-        Ns_Log(Error, "nssmtpd: %d/%d: HOST: %s/%s, I/O error: %d/%d: %s: %s",
+        Ns_Log(Error, "nssmtpd: %ld/%d: HOST: %s/%s, I/O error: %d/%d: %s: %s",
                conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn),
                conn->sock->sock, conn->cmd, strerror(errno), conn->line.string);
     }
@@ -1726,7 +1779,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
     }
     nsconn = Ns_GetConn();
     Tcl_DStringSetLength(&conn->line, 0);
-    Ns_DStringPrintf(&conn->line, "nssmtpd: %d/%d: HOST: %s/%s",
+    Ns_DStringPrintf(&conn->line, "nssmtpd: %ld/%d: HOST: %s/%s",
                      conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn));
     Ns_DStringPrintf(&conn->line, ", FLAGS: 0x%X, FROM: %s, RCPT: ", conn->flags, conn->from.addr);
     for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
@@ -1756,7 +1809,7 @@ static int SmtpdConnEval(smtpdConn *conn, const char *proc)
     if (!proc || !*proc) {
         return TCL_OK;
     }
-    snprintf(name, sizeof(name), "%s %u", proc, conn->id);
+    snprintf(name, sizeof(name), "%s %lu", proc, conn->id);
     if (Tcl_Eval(conn->interp, name) == TCL_ERROR) {
         (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd eval)");
         return TCL_ERROR;
@@ -1792,19 +1845,148 @@ static void SmtpdConnFree(smtpdConn *conn)
     Ns_MutexUnlock(&connLock);
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdEHLOCommand --
+ *
+ *      Sends an EHLO command over the relay connection and parses the relay's
+ *      response to determine the capabilities of the SMTP relay. The function
+ *      builds the EHLO command using the local hostname, sends it via the
+ *      relay, and reads back the response lines. It scans the response for
+ *      the keywords "STARTTLS" and "AUTH" (specifically the "PLAIN"
+ *      mechanism) to set corresponding flags in the relay connection.
+ *
+ * Results:
+
+ *      Returns NS_OK if the EHLO command was successfully processed and the relay's
+ *      responses were acceptable. Otherwise, it returns NS_ERROR or NS_FILTER_BREAK
+ *      to indicate an unsuccsessful response.
+ *
+ * Side Effects:
+ *      - Modifies the connection's and relay's line buffers.
+ *      - Updates the relay's flags (SMTPD_GOTSTARTTLS and SMTPD_GOTAUTHPLAIN)
+ *        based on the relay's response vi SmtpdReadMultiLine();
+ *
+ *----------------------------------------------------------------------
+ */
+static Ns_ReturnCode
+SmtpdEHLOCommand(smtpdConn *conn, smtpdConn *relay) {
+    Ns_ReturnCode result = NS_OK;
+    /*
+     * EHLO command
+     */
+    Ns_Log(SmtpdDebug,"before sending EHLO, have flags %.8x", relay->flags);
+
+    Tcl_DStringSetLength(&conn->line, 0);
+    Ns_DStringPrintf(&conn->line, "EHLO %s\r\n", Ns_InfoHostname());
+    if (SmtpdWriteDString(relay, &conn->line) != NS_OK
+        || SmtpdReadMultiLine(relay, &relay->line, &relay->flags) != NS_OK) {
+        result = NS_ERROR;
+
+    } else if (relay->line.string[0] != '2') {
+        result =  NS_FILTER_BREAK;
+
+    } else {
+        Ns_Log(SmtpdDebug,"after sending EHLO, have flags %.8x", relay->flags);
+    }
+    return result;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdAuthPlainCommand --
+ *
+ *      This function implements the SMTP AUTH PLAIN command. It constructs a
+ *      raw authentication message by concatenating a leading NUL byte, the
+ *      username, another NUL byte, and the password base64-encoded.  The
+ *      function sends the "AUTH PLAIN <encoded>" command it to the relay
+ *      connection, and reads the multi-line response.
+ *
+ * Results:
+ *      Returns NS_OK if the relay returns a successful response (i.e. a response
+ *      code starting with '2'). Otherwise, it returns NS_ERROR or NS_FILTER_BREAK
+ *      to indicate an authentication failure.
+ *
+ * Side Effects:
+ *      - Modifies the connection's command line buffer to contain the AUTH PLAIN
+ *        command.
+ *      - Communicates with the relay via SmtpdWriteDString() and SmtpdReadMultiLine().
+ *
+ *----------------------------------------------------------------------
+ */
+static Ns_ReturnCode
+SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, const char *user, const char *password) {
+    TCL_SIZE_T  user_len = (TCL_SIZE_T)strlen(user);
+    TCL_SIZE_T  password_len = (TCL_SIZE_T)strlen(password);
+    Tcl_DString authinfoDS, encodedDs;
+    size_t      encoded_len;
+
+    Tcl_DStringInit(&authinfoDS);
+    Tcl_DStringInit(&encodedDs);
+
+    /*
+     * Construct the raw authentication message consisting of a leading NUL,
+     * the username, another NUL, and the password. The message consists of
+     * exactly rawlen bytes; no extra null terminator is needed.
+     */
+    Tcl_DStringAppend(&authinfoDS, "", 1);
+    Tcl_DStringAppend(&authinfoDS, user, user_len);
+    Tcl_DStringAppend(&authinfoDS, "", 1);
+    Tcl_DStringAppend(&authinfoDS, password, password_len);
+
+#if 0
+    {
+            /* Show the raw identification data as hex for debugging */
+            TCL_SIZE_T  rawlen = 1 + user_len + 1 + password_len;
+            Tcl_DStringSetLength(&encodedDs, authinfoDS.length*2 + 1);
+            Ns_HexString((const unsigned char *)authinfoDS.string, encodedDs.string, authinfoDS.length, NS_FALSE);
+            Ns_Log(Notice, "raw_len %d authinfo.len %d hex <%s>", rawlen, authinfoDS.length, encodedDs.string);
+    }
+#endif
+
+    /*
+     * Base64-encode the authentication message.
+     */
+    Tcl_DStringSetLength(&encodedDs, MAX(4, (authinfoDS.length * 4/3) + 4));
+    encoded_len = Ns_Base64Encode((const unsigned char *)authinfoDS.string, (size_t)authinfoDS.length, encodedDs.string, 0, 0);
+    Tcl_DStringSetLength(&encodedDs, (TCL_SIZE_T)encoded_len);
+    //Ns_Log(Notice, "enc_len %ld encodedDs.len %d base64 <%s>", encoded_len, encodedDs.length, encodedDs.string);
+
+    /*
+     * Build the AUTH PLAIN command: "AUTH PLAIN <encoded>\r\n"
+     */
+    Tcl_DStringSetLength(&conn->line, 0);
+    Ns_DStringPrintf(&conn->line, "AUTH PLAIN %s\r\n", encodedDs.string);
+
+    Tcl_DStringFree(&authinfoDS);
+    Tcl_DStringFree(&encodedDs);
+
+    /* Send the command to the relay */
+    if (SmtpdWriteDString(relay, &conn->line) != NS_OK
+        || SmtpdReadMultiLine(relay, &relay->line, NULL) != NS_OK) {
+        return NS_ERROR;
+
+    } else {
+        Ns_Log(SmtpdDebug, "SmtpdAuthPlainCommand response:\n%s", relay->line.string);
+        return (relay->line.string[0] != '2' ? NS_FILTER_BREAK : NS_OK);
+    }
+}
+
 static TCL_SIZE_T
 SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 {
-    Ns_Sock    sock;
-    smtpdRcpt *rcpt;
-    smtpdConn *relay;
-    Ns_Time    timeout = { conn->config->writetimeout, 0 };
-    TCL_SIZE_T size = 0;
-    int        vcount = 0;
-    bool       hasStarttls;
-    Ns_Conn   *nsconn = Ns_GetConn();
+    Ns_Sock       sock;
+    smtpdRcpt    *rcpt;
+    smtpdConn    *relay;
+    Ns_Time       timeout = { conn->config->writetimeout, 0 };
+    TCL_SIZE_T    size = 0;
+    int           vcount = 0;
+    Ns_Conn      *nsconn = Ns_GetConn();
+    Ns_ReturnCode rc = NS_OK;
 
-    Ns_Log(SmtpdDebug,"SmtpdRelayData");
+    Ns_Log(SmtpdDebug, "SmtpdRelayData");
 
     /*
      * If we have single recipient, use recipient's relay otherwise for
@@ -1828,13 +2010,24 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (!port) {
         port = DEFAULT_PORT;
     }
-    if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
-        Ns_Log(Error, "nssmtpd: relay: %d/%d: Unable to connect to %s:%d: %s",
-               conn->id, getpid(), host, port, strerror(errno));
+
+    Ns_Log(SmtpdDebug,"SmtpdRelayData connect %s:%hu with timeout " NS_TIME_FMT "s",
+           host, port, (int64_t)timeout.sec, timeout.usec);
+
+    if ((sock.sock = Ns_SockTimedConnect2(host, port, NULL, 0, &timeout, &rc)) == NS_INVALID_SOCKET) {
+        Ns_Log(SmtpdDebug,"SmtpdRelayData connect returns invalid socket (%s)", Ns_ReturnCodeString(rc));
+        Ns_Log(Error, "nssmtpd: relay: %lu/%d: Unable to connect to %s:%d: %s",
+               conn->id, getpid(), host, port, rc == NS_TIMEOUT ? "timeout" : strerror(errno));
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
     }
+
+    Ns_Log(SmtpdDebug,"SmtpdRelayData connect with timeout %s:%hu " NS_TIME_FMT "s returned %s",
+           host, port, (int64_t)timeout.sec, timeout.usec, Ns_ReturnCodeString(rc));
+
     sock.driver = conn->sock->driver;
+
+    Ns_Log(SmtpdDebug,"SmtpdRelayData create connection");
 
     /*
      * Allocate relay SMTPD connection
@@ -1850,43 +2043,32 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
      */
     Ns_Log(SmtpdDebug,"SmtpdRelayData read greeting");
 
-    if (SmtpdReadLine(relay, &relay->line) < 0) {
-        Ns_Log(Error, "nssmtpd: relay: %d/%d: %s:%d: Greeting read error: %s",
+    if (SmtpdReadLine(relay, &relay->line, &rc) < 0) {
+        Ns_Log(Error, "nssmtpd: relay: %lu/%d: %s:%d: Greeting read error: %s",
                conn->id, getpid(), host, port, strerror(errno));
         SmtpdConnFree(relay);
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
     }
-    Ns_Log(SmtpdDebug,"SmtpdRelayData got greeting");
+    Ns_Log(SmtpdDebug,"SmtpdRelayData got greeting, send now EHLO");
 
     /*
      * EHLO command
      */
-    Tcl_DStringSetLength(&conn->line, 0);
-    Ns_DStringPrintf(&conn->line, "EHLO %s\r\n", Ns_InfoHostname());
-    if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
+    relay->flags |= SMTPD_GOTSTARTTLS;
+    rc = SmtpdEHLOCommand(conn, relay);
+    if (rc == NS_ERROR) {
         goto error421;
+    } else if (rc != NS_OK) {
+        goto errorrelay;
     }
-    hasStarttls = NS_FALSE;
-    do {
-        ssize_t nread = SmtpdReadLine(relay, &relay->line);
-
-        if (nread <= 0) {
-            goto error421;
-        }
-        if (!strncasecmp(relay->line.string + 4, "STARTTLS", 8)) {
-            hasStarttls = NS_TRUE;
-        }
-        if (relay->line.string[0] != '2') {
-            goto errorrelay;
-        }
-    } while (relay->line.string[3] != ' ');
 
     /*
-     * If STARTTLS available attempt it.
+     * If STARTTLS is offered, and OpenSSL is available, attempt TLS
+     * connection..
      */
 #ifdef HAVE_OPENSSL_EVP_H
-    if (hasStarttls) {
+    if ((relay->flags & SMTPD_GOTSTARTTLS) != 0) {
         NS_TLS_SSL_CTX *ctx;
         NS_TLS_SSL     *ssl;
         int             result;
@@ -1896,7 +2078,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
             goto error421;
         }
-        if (SmtpdReadLine(relay, &relay->line) <= 0 || relay->line.string[0] != '2') {
+        if (SmtpdReadLine(relay, &relay->line, &rc) <= 0 || relay->line.string[0] != '2') {
             goto error421;
         }
 
@@ -1913,7 +2095,6 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             &ctx);
 
         if (likely(result == TCL_OK)) {
-            Ns_ReturnCode rc;
             /*
              * Make sure, the socket is in a writable state.
              */
@@ -1940,8 +2121,35 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (unlikely(result != TCL_OK)) {
             goto error421;
         }
+
+        /*
+         * send EHLO command again, options may differ
+         */
+        Ns_Log(SmtpdDebug,"TLS connection established, send EHLO again");
+        rc = SmtpdEHLOCommand(conn, relay);
+        if (rc == NS_ERROR) {
+            goto error421;
+        } else if (rc != NS_OK) {
+            goto errorrelay;
+        }
     }
 #endif
+
+    if ((relay->flags & SMTPD_GOTAUTHPLAIN) != 0) {
+        if (conn->config->relayuser != NULL && conn->config->relaypassword != NULL) {
+            rc = SmtpdAuthPlainCommand(conn, relay, conn->config->relayuser, conn->config->relaypassword);
+            Ns_Log(SmtpdDebug, "Result of Auth %s", Ns_ReturnCodeString(rc));
+            if (rc == NS_ERROR) {
+                goto error421;
+            } else if (rc != NS_OK) {
+                goto errorrelay;
+            }
+        } else {
+            //char *p = NULL; *p=0; // debug hook
+            Ns_Log(Error, "nssmtpd: AUTH PLAIN was requested, but no user and password was configured");
+            goto error421;
+        }
+    }
 
     /*
      * MAIL FROM command
@@ -1951,7 +2159,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
         goto error421;
     }
-    if (SmtpdReadLine(relay, &relay->line) <= 0) {
+    if (SmtpdReadLine(relay, &relay->line, &rc) <= 0) {
         goto error421;
     }
     if (relay->line.string[0] != '2') {
@@ -1970,7 +2178,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (SmtpdWriteDString(relay, &conn->line) != NS_OK) {
             goto error421;
         }
-        if (SmtpdReadLine(relay, &relay->line) <= 0) {
+        if (SmtpdReadLine(relay, &relay->line, &rc) <= 0) {
             goto error421;
         }
         if (relay->line.string[0] != '2') {
@@ -1983,7 +2191,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (SmtpdPuts(relay, "DATA\r\n") != NS_OK) {
         goto error421;
     }
-    if (SmtpdReadLine(relay, &relay->line) <= 0) {
+    if (SmtpdReadLine(relay, &relay->line, &rc) <= 0) {
         goto error421;
     }
     if (strncmp(relay->line.string, "354", 3)) {
@@ -1993,7 +2201,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         goto error;
     }
     do {
-        if (SmtpdReadLine(conn, &relay->line) < 0) {
+        if (SmtpdReadLine(conn, &relay->line, &rc) < 0) {
             goto error;
         }
         if (SmtpdWriteDString(relay, &relay->line) != NS_OK) {
@@ -2011,7 +2219,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             Tcl_DStringAppend(&conn->body.data, relay->line.string, relay->line.length);
         }
     } while (relay->line.length > 0);
-    if (SmtpdReadLine(relay, &relay->line) <= 0) {
+    if (SmtpdReadLine(relay, &relay->line, &rc) <= 0) {
         goto error421;
     }
     if (relay->line.string[0] != '2') {
@@ -2027,15 +2235,22 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         }
     }
     return size;
-
-  error:
+ error:
+    /*
+     * Sending mail data failed
+     */
+    Ns_Log(SmtpdDebug,"SmtpdSend: sending mail data to the relay failed");
     SmtpdConnFree(relay);
     return -1;
 
-  error421:
+ error421:
+    /*
+     * We have received no proper response from the backend server.
+     * Reply 421: Service not available, closing transmission channel.
+     */
     Ns_StrTrimRight(conn->line.string);
     Ns_StrTrimRight(relay->line.string);
-    Ns_Log(Error, "nssmtpd: relay: %d/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s: %s/%s",
+    Ns_Log(Error, "nssmtpd: relay 421: %lu/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s: %s/%s",
            conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn),
            conn->flags, conn->from.addr, conn->line.string, conn->line.string, relay->line.string);
     SmtpdPuts(conn, "421 Service not available\r\n");
@@ -2043,16 +2258,32 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     return -1;
 
   errorrelay:
+    /*
+     * We received a proper response in the relay buffer, but it is indicating
+     * not a success.  Pass the result to the error proc, and when this fails, fall
+     * back to the 421 error.
+     */
+    /*Ns_Log(Notice, "ERROR RELAY: relay string '%s', conn string '%s'",
+           relay->line.string,
+           conn->line.string);*/
     Ns_StrTrimRight(conn->line.string);
-    conn->line.length = (int)strlen(conn->line.string);
+    //conn->line.length = (int)strlen(conn->line.string);
     Ns_StrTrimRight(relay->line.string);
     Tcl_DStringAppend(&conn->line, ": ", 2);
     Tcl_DStringAppend(&conn->line, relay->line.string, relay->line.length);
-    Ns_Log(Error, "nssmtpd: relay: %d/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s/%s",
+    Ns_Log(Error, "nssmtpd: relay errorproc: %lu/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s/%s",
            conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn), conn->flags, conn->from.addr,
            conn->line.string, relay->line.string);
+
+    SmtpdJoinMultiLine(&relay->line);
+    Ns_Log(Error, "nssmtpd: relay errorproc: %lu/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s/%s",
+           conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn), conn->flags, conn->from.addr,
+           conn->line.string, relay->line.string);
+
+
     SmtpdConnEval(conn, conn->config->errorproc);
     if (!conn->reply.length) {
+        Ns_Log(Warning, "nssmtpd: empty reply, build our own from '%s'", &relay->line.string[4]);
         Ns_DStringPrintf(&conn->reply, "421 Service not available. %s\r\n", &relay->line.string[4]);
     }
     SmtpdWriteDString(conn, &conn->reply);
@@ -2121,15 +2352,17 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
           Tcl_Obj *rcptObj, const char *dataVarName, const char *host,
           unsigned short port)
 {
-    char       *ptr, *dataString;
-    char        finalStatus[4];
-    Ns_Sock     sock;
-    Tcl_Obj    *data;
-    smtpdConn  *conn;
-    Ns_Time     timeout = { config->writetimeout, 0 };
-    TCL_SIZE_T  dataLength = 0;
-    Tcl_DString dataDString;
-    Ns_Time     startTime;
+    char         *ptr, *dataString;
+    char          finalStatus[4];
+    Ns_Sock       sock;
+    Tcl_Obj      *data;
+    smtpdConn    *conn;
+    Ns_Time       timeout = { config->writetimeout, 0 };
+    TCL_SIZE_T    dataLength = 0;
+    Tcl_DString   dataDString;
+    Ns_Time       startTime;
+    Ns_ReturnCode rc;
+    const char    *errorString = "Unclassified error condition";
 
     Ns_Log(SmtpdDebug,"SmtpdSend rcpt %s host %s port %hu",
            Tcl_GetString(rcptObj), host, port);
@@ -2173,7 +2406,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
      */
     Ns_Log(SmtpdDebug,"SmtpdSend wait for greeting");
 
-    if (SmtpdReadLine(conn, &conn->line) < 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) < 0) {
         Tcl_AppendResult(interp, "greeting read error: ", strerror(errno), (char *)0L);
         SmtpdConnFree(conn);
         SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "GREET_FAILURE", 0u);
@@ -2186,9 +2419,12 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Tcl_DStringSetLength(&conn->line, 0);
     Ns_DStringPrintf(&conn->line, "HELO %s\r\n", Ns_InfoHostname());
     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
+        errorString = "send HELO";
+
         goto ioerror;
     }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+        errorString = "read HELO reply";
         goto ioerror;
     }
     if (conn->line.string[0] != '2') {
@@ -2201,9 +2437,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Tcl_DStringAppend(&conn->reply, (char *) sender, TCL_INDEX_NONE);
     Ns_DStringPrintf(&conn->line, "MAIL FROM:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
+        errorString = "send MAIL FROM";
         goto ioerror;
     }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+        errorString = "read MAIL FROM reply";
         goto ioerror;
     }
     if (conn->line.string[0] != '2') {
@@ -2228,15 +2466,17 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         for (i = 0; i < objc; i++) {
             TCL_SIZE_T  argLen;
             const char *argString = Tcl_GetStringFromObj(objv[i], &argLen);
-                
+
             Tcl_DStringSetLength(&conn->line, 0);
             Tcl_DStringSetLength(&conn->reply, 0);
             Tcl_DStringAppend(&conn->reply, (char *)argString, argLen);
             Ns_DStringPrintf(&conn->line, "RCPT TO:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
             if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
+                errorString = "send RCPT TO";
                 goto ioerror;
             }
-            if (SmtpdReadLine(conn, &conn->line) <= 0) {
+            if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+                errorString = "read RCPT TO reply";
                 goto ioerror;
             }
             if (conn->line.string[0] != '2') {
@@ -2279,9 +2519,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
 
     /* DATA command */
     if (SmtpdPuts(conn, "DATA\r\n") != NS_OK) {
+        errorString = "send DATA command";
         goto ioerror;
     }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+        errorString = "read DATA command reply";
         goto ioerror;
     }
     memcpy(finalStatus, conn->line.string, 3);
@@ -2290,12 +2532,15 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         goto error;
     }
     if (SmtpdWriteData(conn, dataString, dataLength) != NS_OK) {
+        errorString = "send DATA";
         goto ioerror;
     }
     if (SmtpdWriteData(conn, "\r\n.\r\n", 5) != NS_OK) {
+        errorString = "send DATA terminate";
         goto ioerror;
     }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+        errorString = "read DATA terminate reply";
         goto ioerror;
     }
     memcpy(finalStatus, conn->line.string, 3);
@@ -2305,9 +2550,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
 
     /* QUIT command */
     if (SmtpdPuts(conn, "QUIT\r\n") != NS_OK) {
+        errorString = "send QUIT";
         goto ioerror;
     }
-    if (SmtpdReadLine(conn, &conn->line) <= 0) {
+    if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {
+        errorString = "read QUIT reply";
         goto ioerror;
     }
     Ns_Log(Notice, "nssmtpd: send: from %s to %s via %s:%d %ld bytes",
@@ -2318,17 +2565,20 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Tcl_DStringFree(&dataDString);
     return NS_OK;
 
-  ioerror:
-    if (errno) {
-        Tcl_AppendResult(interp, "nssmtpd: send: I/O error: ", conn->line.string, ": ",
-                         strerror(errno), (char *)0L);
+ ioerror:
+    if (rc == NS_TIMEOUT) {
+        Tcl_AppendResult(interp, "nssmtpd: send: timeout during ", errorString, (char *)0L);
+
+    } else if (errno) {
+        Tcl_AppendResult(interp, "nssmtpd: send: I/O error during ", errorString, ": ",
+                         conn->line.string, ": ", strerror(errno), (char *)0L);
     }
     SmtpdConnFree(conn);
     SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "IO_ERROR", 0u);
     Tcl_DStringFree(&dataDString);
     return NS_ERROR;
 
-  error:
+ error:
     Tcl_AppendResult(interp, "nssmtpd: send: unexpected status from ", host, ": ",
                      conn->line.string, (char *)0L);
     SmtpdConnFree(conn);
@@ -2373,15 +2623,19 @@ SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
 }
 
 static ssize_t
-SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr)
+SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr)
 {
+    Ns_ReturnCode rc = TCL_OK;
     ssize_t       received;
 
     NS_NONNULL_ASSERT(sock != NULL);
     NS_NONNULL_ASSERT(buffer != NULL);
+
+
 again:
     if (sock->arg == NULL) {
         received = ns_recv(sock->sock, buffer, length, 0);
+
     } else {
 #ifdef HAVE_OPENSSL_EVP_H
         SSL *ssl = (SSL *)sock->arg;
@@ -2392,6 +2646,7 @@ again:
 
             n = SSL_read(ssl, buffer+received, (int)(length - (size_t)received));
             err = SSL_get_error(ssl, n);
+
             switch (err) {
             case SSL_ERROR_NONE:
                 if (n < 0) {
@@ -2416,23 +2671,27 @@ again:
     }
 
     if (received == -1 && errno == EWOULDBLOCK) {
-        if (Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr) == NS_OK) {
+        Ns_Log(SmtpdDebug, "SmtpdRecv: call again after timeout " NS_TIME_FMT "s",
+               (int64_t)timeoutPtr->sec, timeoutPtr->usec);
+        rc = Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr);
+        Ns_Log(SmtpdDebug, "SmtpdRecv: sock wait returned %s", Ns_ReturnCodeString(rc));
+        if (rc == NS_OK) {
             goto again;
         }
     }
 
-    Ns_Log(Ns_LogTaskDebug, "HttpTaskRecv received %ld bytes (from %lu)", received, length);
+    *rcPtr = rc;
     return received;
 }
 
 static ssize_t
-SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len)
+SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
 {
     ssize_t nread, n;
     char *buf = (char *) vbuf;
     Ns_Time timeout = { conn->config->readtimeout, 0 };
 
-    //Ns_Log(SmtpdDebug,"SmtpdRead");
+    Ns_Log(SmtpdDebug,"SmtpdRead");
 
     nread = len;
     while (len > 0) {
@@ -2452,9 +2711,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len)
         if (len > 0) {
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
-
-            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout);
-
+            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, rcPtr);
             if (conn->buf.pos <= 0) {
                 return -1;
             }
@@ -2554,15 +2811,206 @@ static ssize_t SmtpdWrite(smtpdConn *conn, const void *buf, ssize_t len)
     return SmtpdUnixSend(conn->sock, buf, (size_t)len);
 }
 
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpLineTrimCR --
+ *
+ *      This function trims a trailing carriage return (CR, 0x0d) from a line
+ *      stored in a Tcl_DString. If the string length is at least 2, it
+ *      examines the character at position (length - 2). If that character is
+ *      a CR, the function removes it by replacing it with the final character
+ *      and decrementing the string length.
+ *
+ * Results:
+ *      Returns NS_TRUE if the Tcl_DString contained at least 2 characters,
+ *      regardless of whether a CR was actually removed. Returns NS_FALSE if
+ *      the string is too short to contain a CR.
+ *
+ * Side Effects:
+ *      Modifies the Tcl_DString by potentially removing a trailing CR.
+ *
+ *----------------------------------------------------------------------
+ */
+static bool
+SmtpLineTrimCR(Tcl_DString *dsPtr)
+{
+    bool result = NS_TRUE;
+
+    if (dsPtr->length < 2) {
+        result = NS_FALSE;
+    } else {
+        char lastChar = dsPtr->string[dsPtr->length-2];
+
+        if (lastChar == 0x0d) {
+            dsPtr->string[dsPtr->length-2] = dsPtr->string[dsPtr->length-1];
+            dsPtr->length--;
+            dsPtr->string[dsPtr->length] = '\0';
+            /*Ns_Log(Notice, "SmtpLineTrimCR returns stripped <%s>", dsPtr->string);*/
+        }
+    }
+
+    return result;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdReadMultiLine --
+ *
+ *      Reads and concatenates a multi-line SMTP response from the connection.
+ *      The function repeatedly reads single lines from the given SMTP
+ *      connection using SmtpdReadLine(), trims any trailing carriage return
+ *      from each line, and appends the line to the provided Tcl_DString. It
+ *      continues this process until it encounters a line whose fourth
+ *      character is a space, indicating the end of the multi-line response.
+ *
+ *      If a non-NULL pointer for EHLO flags is provided (ehloFlagsPtr), the function
+ *      also inspects each line for specific EHLO-related messages. If a line contains
+ *      "STARTTLS" or "AUTH" (with the "PLAIN" option), it sets the corresponding flags
+ *      in *ehloFlagsPtr.
+ *
+ * Results:
+ *      Returns NS_OK if all lines are successfully read and appended to the
+ *      Tcl_DString. If a read error occurs or a line is too short (less than
+ *      4 characters), the function returns NS_ERROR.
+ *
+ * Side Effects:
+ *      - Modifies the provided Tcl_DString (dsPtr) by appending the text of each line.
+ *      - Adjusts each read line by removing a trailing carriage return (0x0d) if present.
+ *
+ *----------------------------------------------------------------------
+ */
+static Ns_ReturnCode
+SmtpdReadMultiLine(smtpdConn *conn, Tcl_DString *dsPtr, unsigned int *ehloFlagsPtr)
+{
+    Ns_ReturnCode result = NS_OK;
+    Tcl_DString   oneLine;
+    char          fourthChar;
+
+    /*
+     * Reset the output Tcl_DString and initialize the temporary string for
+     * single lines.
+     */
+    Tcl_DStringSetLength(dsPtr, 0);
+    Tcl_DStringInit(&oneLine);
+
+    do {
+        ssize_t nread = SmtpdReadLine(conn, &oneLine, &result);
+
+        if (nread <= 0 || oneLine.length < 4) {
+            result = NS_ERROR;
+            break;
+        }
+        SmtpLineTrimCR(&oneLine);
+
+        if (ehloFlagsPtr != NULL) {
+            Ns_Log(SmtpdDebug, "process EHLO flags in line <%s>", oneLine.string);
+
+            if (!strncasecmp(oneLine.string + 4, "STARTTLS", 8)) {
+                *ehloFlagsPtr |= SMTPD_GOTSTARTTLS;
+
+            } else if (!strncasecmp(oneLine.string + 4, "AUTH", 4)) {
+                /* Check for a 250 AUTH message containing the PLAIN option */
+                if (strstr(oneLine.string, "PLAIN") != NULL) {
+                    *ehloFlagsPtr |= SMTPD_GOTAUTHPLAIN;
+                } else {
+                    Ns_Log(SmtpdDebug,"Warning: unsupported AUTH options: %s", oneLine.string);
+                }
+            }
+        }
+
+        fourthChar = oneLine.string[3];
+        Tcl_DStringAppend(dsPtr, oneLine.string, oneLine.length);
+
+    } while (fourthChar != ' ');
+
+    Tcl_DStringFree(&oneLine);
+    return result;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdJoinMultiLine --
+ *
+ *      Joins together multi-line SMTP response lines by removing embedded
+ *      status codes and enhanced error codes. This function scans through the
+ *      provided Tcl_DString for newline characters. For each newline found,
+ *      if the following characters represent a 3-digit error code (and
+ *      optionally a dot-separated sequence), the function replaces the
+ *      newline with a space, removes the error code along with any extra
+ *      spacing, and shifts the remaining text accordingly. This process
+ *      effectively "joins" the multi-line response into a single continuous
+ *      line, suitable for end users.
+ *
+ * Results:
+ *      None. The merged response is stored directly in the provided Tcl_DString.
+ *
+ * Side Effects:
+ *      - Modifies the content and length of the Tcl_DString pointed to by dsPtr.
+ *
+ *----------------------------------------------------------------------
+ */
+static void
+SmtpdJoinMultiLine(Tcl_DString *dsPtr)
+{
+    char  *p;
+
+    p = strchr(dsPtr->string, INTCHAR('\n'));
+    while (p != NULL) {
+        ptrdiff_t offset = p - dsPtr->string;
+
+        //Ns_Log(Notice, "JOIN: '%c' '%c' '%c' '%c'", p[1], p[2], p[3], p[4]);
+        if (offset < (dsPtr->length-4)
+            && CHARTYPE(digit, p[1]) != 0
+            && CHARTYPE(digit, p[2]) != 0
+            && CHARTYPE(digit, p[3]) != 0
+            ) {
+            char *textStart;
+
+            /*Ns_Log(Notice, "... before move len %d shorten by %d to move %ld chars from '%s'",
+              dsPtr->length, 4, (dsPtr->length - offset) - 4,  p+5);*/
+            *p = ' ';
+            memmove(p+1, p+5, (size_t)(dsPtr->length - offset) - 5u);
+            Tcl_DStringSetLength(dsPtr, (TCL_SIZE_T)dsPtr->length - 5);
+            //Ns_Log(Notice, "... after move len %d line '%s'", dsPtr->length, dsPtr->string);
+
+            /*
+             * Skip enhanced error code, e.g., 5.7.8, followed by blanks)
+             */
+            textStart = p+1;
+            while (CHARTYPE(digit, *textStart) != 0 || *textStart == '.') {
+                //Ns_Log(Notice, "... skip enhanced digit '%c'", *textStart);
+                textStart ++;
+            }
+            while (*textStart == ' ') {
+                textStart ++;
+            }
+            if (textStart != p+1) {
+                ptrdiff_t processed = textStart - dsPtr->string;
+
+                offset = textStart - (p+1);
+                memmove(p+1, textStart, (size_t)(dsPtr->length - processed));
+                Tcl_DStringSetLength(dsPtr, dsPtr->length - (TCL_SIZE_T)offset);
+            }
+
+            //Ns_Log(Notice, "JOIN: -> %d '%s'", dsPtr->length, dsPtr->string);
+        }
+        p = strchr(dsPtr->string, INTCHAR('\n'));
+    }
+}
+
 static ssize_t
-SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr)
+SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr, Ns_ReturnCode *rcPtr)
 {
     char    buf[1];
     ssize_t len = 0, nread;
 
     Tcl_DStringSetLength(dsPtr, 0);
     do {
-        if ((nread = SmtpdRead(conn, buf, 1)) == 1) {
+        if ((nread = SmtpdRead(conn, buf, 1, rcPtr)) == 1) {
             Tcl_DStringAppend(dsPtr, buf, 1);
             ++len;
             if (buf[0] == '\n') {
@@ -2575,7 +3023,7 @@ SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr)
         char *end = &dsPtr->string[dsPtr->length-1], saved = *end;
 
         *end = '\0';
-        Ns_Log(SmtpdDebug, "nssmtpd: %d: <<< %s", conn->id, dsPtr->string);
+        Ns_Log(SmtpdDebug, "nssmtpd: %lu: <<< %s", conn->id, dsPtr->string);
         *end = saved;
     }
     return (nread > 0 ? len : nread);
@@ -2604,11 +3052,11 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
 
         Tcl_DStringInit(&ds);
         Tcl_DStringAppend(&ds, buf, (int)(len-2));
-        Ns_Log(SmtpdDebug, "nssmtpd: %d: >>> %s", conn->id, ds.string);
+        Ns_Log(SmtpdDebug, "nssmtpd: %lu: >>> %s", conn->id, ds.string);
         Tcl_DStringFree(&ds);
     }
 
-    Ns_Log(SmtpdDebug, "nssmtpd: %d want to send %ld bytes in total", conn->id, len);
+    Ns_Log(SmtpdDebug, "nssmtpd: %lu want to send %ld bytes in total", conn->id, len);
 
     while (len > 0) {
         ssize_t nwrote = SmtpdWrite(conn, buf, len);
@@ -2797,7 +3245,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
                     if (size <= (len = strlen(addr.mailbox) + strlen(addr.domain))) {
                         ns_free(header->value);
                         header->value = ns_malloc(len + 1);
-                        Ns_Log(Error, "nssmtpd: %d: header: %s: %ld,%ld", conn->id, header->value, size, len);
+                        Ns_Log(Error, "nssmtpd: %lu: header: %s: %ld,%ld", conn->id, header->value, size, len);
                     }
                     sprintf(header->value, "%s@%s", addr.mailbox, addr.domain);
                     Ns_StrToLower(header->value);
@@ -3168,7 +3616,7 @@ static bool SmtpdCheckDomain(smtpdConn *conn, const char *domain)
     if (!conn) {
         return NS_FALSE;
     }
-    Ns_Log(Error, "nssmtpd: checkdomain: %d: HOST: %s, FLAGS: 0x%X, %s", conn->id, conn->host, conn->flags, domain);
+    Ns_Log(Error, "nssmtpd: checkdomain: %lu: HOST: %s, FLAGS: 0x%X, %s", conn->id, conn->host, conn->flags, domain);
     Ns_DStringPrintf(&conn->reply, "553 %s... Domain unrecognized\r\n", domain);
     return NS_FALSE;
 }
@@ -3270,14 +3718,14 @@ static int SmtpdCheckSpam(smtpdConn *conn)
         goto error;
     }
     shutdown(sock.sock, 1);
-    if (SmtpdReadLine(spamd, &spamd->line) < 0) {
+    if (SmtpdReadLine(spamd, &spamd->line, &rc) < 0) {
         goto error;
     }
     /* We should receive 0 response code */
     if (strncasecmp(spamd->line.string, "SPAMD/", 6) || !strstr(spamd->line.string, "EX_OK")) {
         goto error;
     }
-    if (SmtpdReadLine(spamd, &spamd->line) < 0) {
+    if (SmtpdReadLine(spamd, &spamd->line, &rc) < 0) {
         goto error;
     }
     /* Validate spam line */
@@ -4079,7 +4527,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             if (objc > 6) {
                 port =  (unsigned short) strtol(Tcl_GetString(objv[6]), NULL, 10);
             }
-            if (!host || !*host) {
+            if (host  == NULL || *host == '\0') {
                 smtpdEmail addr;
                 smtpdConn  sconn;
                 char      *email = ns_strdup(Tcl_GetString(objv[3]));
@@ -4567,6 +5015,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             break;
         }
     }
+
     return TCL_OK;
 }
 
