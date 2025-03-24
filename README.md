@@ -36,7 +36,7 @@ work to interact with newer releases of the external packages.
 - [Configuration](#configuration)
   - [Basic Setup](#basic-setup)
   - [Enabling Logging](#enabling-logging)
-- [Relay Authentication](#relay-authentication)
+  - [Relay Authentication](#relay-authentication)
 - [API Overview](#api-overview)
 - [Usage Example](#usage-example)
 - [License](#license)
@@ -115,6 +115,8 @@ For secure communication via STARTTLS and to enable logging, add these
 parameters to the `nssmtpd` section.
   
 ```tcl
+ns_section ns/server/${server}/module/nssmtpd {
+  # ...
   # For logging "ns_smtpd send ..." operations
   ns_param logging    on           ;# default: off
   # ns_param logfile ${logroot}/smtpsend.log
@@ -123,22 +125,25 @@ parameters to the `nssmtpd` section.
   # ns_param logroll true           ;# enable automatic log rolling
   # ns_param logrollonsignal true   ;# roll logs on SIGHUP
   # ns_param logrollhour 0          ;# specify the hour to roll logs
+  # ...
+}
 ```
 
 
 ### Relay Authentication
 
-The `relay` parameter specifies the SMTP server used for message
-delivery. When using port `25`, the relay server is expected to accept
-messages without further authentication. However, if you configure the
-relay to use port `587`, the module supports PLAIN password
-authentication. In this case, ensure that:
+The `relay` parameter defines the SMTP server responsible for message
+delivery. When using port `25`, the relay server is assumed to accept
+messages without requiring further authentication. However, if you
+configure the relay to use port `587`, the module supports PLAIN
+password authentication. In this scenario, ensure that:
 
 - The relay server supports STARTTLS.
-- NaviServer (and this module= is compiled with OpenSSL support.
+- NaviServer and this module are compiled with OpenSSL support.
 
-The URL format is designed to allow for future authentication
-methods. For example (the uppercase letters are placeholders):
+The URL format is intentionally designed to accommodate additional
+authentication methods in the future. An example (with placeholders
+in uppercase):
 
 ```tcl
 ns_section ns/server/${server}/module/nssmtpd {
@@ -147,6 +152,14 @@ ns_section ns/server/${server}/module/nssmtpd {
   # ...
 }
 ```
+
+**Security Note:** Be cautious when embedding credentials in
+configuration files. To protect sensitive information, restrict file
+permissions for the configuration file, verify user permissions on the
+host machine, or consider using environment variables or reading
+credentials from a secured file. Keep in mind that arbitrary Tcl
+commands can be executed from within the configuration file.
+
 
 ## API Overview
 
