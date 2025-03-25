@@ -508,6 +508,74 @@ static const unsigned short DEFAULT_PORT = 25;
 
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
+
+static TCL_SIZE_T
+PercentDecode(char *dest, const char *source, char part)
+{
+    register char       *q = dest;
+    register const char *p = source;
+    register TCL_SIZE_T  n = 0;
+    static const int hex_code[] = {
+        /* 0x00 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x10 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x20 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x30 */   0,  1,  2,  3,  4,  5,  6,  7,  8,  9, -1, -1, -1, -1, -1, -1,
+        /* 0x40 */  -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x50 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x60 */  -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x70 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x80 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0x90 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xa0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xb0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xc0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xd0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xe0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        /* 0xf0 */  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
+    };
+
+    while (likely(*p != '\0')) {
+        int  i, j;
+        char c1, c2 = '\0';
+
+        if (unlikely(p[0] == '%')) {
+            /*
+             * Decode percent code and make sure not to read date after
+             * the NUL character.
+             */
+            c1 = p[1];
+            if (c1 != '\0') {
+                c2 = p[2];
+            }
+        } else {
+            c1 = '\0';
+        }
+
+        /*
+         * When c2 != '\0', hex conversion is possible
+         */
+        if (c2 != '\0'
+            && (i = hex_code[UCHAR(c1)]) >= 0
+            && (j = hex_code[UCHAR(c2)]) >= 0) {
+            *q++ = (char)(UCHAR(UCHAR(i) << 4u) + UCHAR(j));
+            p += 3;
+        } else if (unlikely(p[0] == '+') && part == 'q') {
+            *q++ = ' ';
+            p++;
+        } else {
+            *q++ = *p++;
+        }
+        n++;
+    }
+    /*
+     * Ensure the resulting string is null-terminated.
+     */
+    *q = '\0';
+
+    return n;
+}
+
+
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
     char             *path, *addr2, *portString;
@@ -690,18 +758,23 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->relayport = DEFAULT_PORT;
 
     if (serverPtr->relayhost != NULL) {
-        Ns_URL url;
-        const char *errorMsg;
+        Ns_URL        url;
+        const char   *errorMsg, *relayhostString;
+        Ns_ReturnCode rc;
 
+        relayhostString = ns_strdup(serverPtr->relayhost);
         //Ns_Log(Notice, "smtpd relayhost: parseurl '%s'", serverPtr->relayhost);
-        (void) Ns_ParseUrl(serverPtr->relayhost, NS_FALSE, &url, &errorMsg);
-        //Ns_Log(Notice, "smtpd relayhost: parseurl rc %s %s", Ns_ReturnCodeString(rc), errorMsg);
-        if (url.host == NULL && url.protocol != NULL) {
+        rc = Ns_ParseUrl(serverPtr->relayhost, NS_FALSE, &url, &errorMsg);
+        if (rc != NS_OK) {
+            Ns_Log(Warning, "smtpd relayhost: invalid URL, parseurl '%s' returned: %s."
+                   " No user and password configured.", relayhostString, errorMsg);
+
+        } else if (url.host == NULL && url.protocol != NULL) {
             serverPtr->relayhost = url.protocol;
             if (url.tail != NULL) {
                 serverPtr->relayport = (unsigned short) strtol(url.tail, NULL, 10);
             }
-            Ns_Log(Notice, "smtpd relayhost: old-style  parameter '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
+            Ns_Log(Notice, "smtpd relayhost: old-style parameter '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
         } else {
             if (url.host != NULL) {
                 serverPtr->relayhost = url.host;
@@ -713,17 +786,29 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
                 Ns_Log(Notice, "smtpd relayhost: use default port '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
             }
             if (url.userinfo != NULL) {
-                char *p = strchr(url.userinfo, INTCHAR(':'));
+                char *p, *decodedUserInfo;
+
                 //Ns_Log(Notice, "smtpd relayhost: got userinfo <%s>", url.userinfo);
-                serverPtr->relayuser = url.userinfo;
-                serverPtr->relaypassword = p+1;
-                *p = '\0';
-                //Ns_Log(Notice, "smtpd: got user '%s' pw '%s'", serverPtr->relayuser, serverPtr->relaypassword);
-                Ns_Log(Notice, "smtpd relayhost: got user and password");
+                decodedUserInfo = ns_calloc(1, strlen(url.userinfo)+1);
+                (void) PercentDecode(decodedUserInfo, url.userinfo, 'o');
+
+                p = strchr(decodedUserInfo, INTCHAR(':'));
+                if (p != NULL) {
+                    *p = '\0';
+                    serverPtr->relayuser     = ns_strdup(decodedUserInfo);
+                    serverPtr->relaypassword = ns_strdup(p+1);
+                    //Ns_Log(Notice, "smtpd: got user '%s' pw '%s'", serverPtr->relayuser, serverPtr->relaypassword);
+                    Ns_Log(Notice, "smtpd relayhost: got user and password");
+                } else {
+                    Ns_Log(Warning, "smtpd relayhost: userinfo '%s' does not contain a colon."
+                           " No user and password configured", decodedUserInfo);
+                }
+                ns_free(decodedUserInfo);
             } else {
                 Ns_Log(Notice, "smtpd relayhost: no user and password configured");
             }
         }
+        ns_free((char*)relayhostString);
     }
 
     Ns_Log(Notice, "smtpd relayhost: host <%s> port %hu", serverPtr->relayhost, serverPtr->relayport);
