@@ -153,6 +153,17 @@ ns_section ns/server/${server}/module/nssmtpd {
 }
 ```
 
+Note that the USER:PWD infomation is passed in the "userinfo" part of
+the URL (as defined in RFC 3207). To guarantee URL parsing, USER:PWD
+has to be percent-encoded. This can be done e.g. with the NaviServer
+command `ns_urlencode -part oauth1 $credentials`.
+
+**Note:** The username and password (USER:PWD) are included in the
+URL's "userinfo" segment, as defined by RFC 3207. To ensure correct
+URL parsing, these credentials must be percent-encoded. For example,
+you can use the NaviServer command `ns_urlencode -part oauth1 $credentials`
+to perform this encoding.
+
 **Security Note:** Be cautious when embedding credentials in
 configuration files. To protect sensitive information, restrict file
 permissions for the configuration file, verify user permissions on the
