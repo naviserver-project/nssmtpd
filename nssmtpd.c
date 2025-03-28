@@ -702,12 +702,13 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     }
     serverPtr->relayhost = ns_strcopy(Ns_ConfigGetValue(path, "relay"));
     serverPtr->spamdhost = ns_strcopy(Ns_ConfigGetValue(path, "spamd"));
-    serverPtr->initproc = ns_strcopy(Ns_ConfigGetValue(path, "initproc"));
+    serverPtr->initproc = ns_strcopy(Ns_ConfigString(path, "initproc", "smtpd::init"));
     serverPtr->heloproc = ns_strcopy(Ns_ConfigGetValue(path, "heloproc"));
     serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(path, "mailproc"));
-    serverPtr->rcptproc = ns_strcopy(Ns_ConfigGetValue(path, "rcptproc"));
-    serverPtr->dataproc = ns_strcopy(Ns_ConfigGetValue(path, "dataproc"));
-    serverPtr->errorproc = ns_strcopy(Ns_ConfigGetValue(path, "errorproc"));
+    serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(path, "rcptproc", "smtpd::rcpt"));
+    serverPtr->dataproc = ns_strcopy(Ns_ConfigString(path, "dataproc", "smtpd::data"));
+    serverPtr->errorproc = ns_strcopy(Ns_ConfigString(path, "errorproc", "smtpd::error"));
+
     dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
 
 #ifdef HAVE_OPENSSL_EVP_H
@@ -3710,9 +3711,13 @@ static bool SmtpdCheckRelay(smtpdConn *conn, smtpdEmail *addr, char **host, unsi
 {
     smtpdRelay *relay;
 
+    Ns_Log(SmtpdDebug, "checkrelay: check address '%s' '%s' '%s'", addr->name, addr->domain, addr->mailbox);
+
     Ns_MutexLock(&conn->config->relaylock);
     for (relay = conn->config->relaylist; relay != NULL; relay = relay->next) {
         const char *p, *s;
+
+        Ns_Log(SmtpdDebug, "checkrelay: check address domain against relay domain '%s'", relay->name);
 
         p = &addr->domain[strlen(addr->domain) - 1];
         s = &relay->name[strlen(relay->name) - 1];

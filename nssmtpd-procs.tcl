@@ -10,9 +10,9 @@ namespace eval smtpd {
 proc smtpd::init {} {
 
     set path "ns/server/[ns_info server]/module/nssmtpd"
-    ns_smtpd relay set {*}[ns_config $path relaydomains]
+    ns_smtpd relay set {*}[ns_config $path relaydomains "localhost"]
     ns_log notice "smtpd::init: Relay Domains: [ns_smtpd relay get]"
-    ns_smtpd local set {*}[ns_config $path localdomains]
+    ns_smtpd local set {*}[ns_config $path localdomains "localhost"]
     ns_log notice "smtpd::init: Local Domains: [ns_smtpd local get]"
 }
 
