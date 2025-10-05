@@ -149,7 +149,7 @@ typedef struct _smtpdRcpt {
         unsigned short port;
         const char *host;
     } relay;
-    float spam_score;
+    double spam_score;
 } smtpdRcpt;
 
 typedef struct _smtpdConfig {
@@ -312,11 +312,11 @@ typedef struct _dnsServer {
 typedef struct _dnsSOA {
     const char *mname;
     const char *rname;
-    unsigned long serial;
-    unsigned long refresh;
-    unsigned long retry;
-    unsigned long expire;
-    unsigned long ttl;
+    uint32_t serial;
+    uint32_t refresh;
+    uint32_t retry;
+    uint32_t expire;
+    uint32_t ttl;
 } dnsSOA;
 
 typedef struct _dnsMX {
@@ -335,7 +335,7 @@ typedef struct _dnsRecord {
     const char *name;
     unsigned short type;
     unsigned short class;
-    unsigned long ttl;
+    uint32_t ttl;
     short len;
     union {
         const char *name;
@@ -362,7 +362,7 @@ typedef struct _dnsPacket {
     struct {
         unsigned short allocated;
         unsigned short size;
-        const char *rec;
+        char *rec;
         char *ptr;
         char *data;
     } buf;
@@ -393,8 +393,8 @@ static void dnsEncodeName(dnsPacket *pkt, const char *name);
 static void dnsEncodeGrow(dnsPacket *pkt, size_t size, const char *proc);
 static void dnsEncodeHeader(dnsPacket *pkt);
 static void dnsEncodePtr(dnsPacket *pkt, int offset);
-static void dnsEncodeShort(dnsPacket *pkt, int num);
-static void dnsEncodeLong(dnsPacket *pkt, unsigned long num);
+static void dnsEncodeShort(dnsPacket *pkt, uint16_t num);
+static void dnsEncodeLong(dnsPacket *pkt, uint32_t num);
 static void dnsEncodeData(dnsPacket *pkt, void *ptr, int len);
 static void dnsEncodeBegin(dnsPacket *pkt);
 static void dnsEncodeEnd(dnsPacket *pkt);
@@ -483,7 +483,7 @@ static const char hex[] = "0123456789ABCDEF";
 
 // Static DNS stuff
 static int dnsDebug = 0;
-static unsigned long dnsTTL = 86400;
+static uint32_t dnsTTL = 86400;
 
 static Ns_Mutex dnsMutex = NULL;
 static dnsServer *dnsServers  = NULL;
@@ -3508,31 +3508,22 @@ static void SmtpdConnParseData(smtpdConn *conn)
 
 /* Take length of the longest format (with reserve) for all */
 #define FORMAT_SIZE 36
+#define NS_IPADDR_SCANW_STR "45" /* NS_IPADDR_SIZE -1 */
 
 static smtpdIpaddr *SmtpdParseIpaddr(char *str)
 {
     struct sockaddr *saPtr, *addr_saPtr;
     smtpdIpaddr     *alist = NULL;
-    char             addr[NS_IPADDR_SIZE], mask[NS_IPADDR_SIZE] = "",
-                     format1[FORMAT_SIZE], format2[FORMAT_SIZE],
-                     format3[FORMAT_SIZE], format4[FORMAT_SIZE];
+    char             addr[NS_IPADDR_SIZE], mask[NS_IPADDR_SIZE] = "";
     bool             have_ipmask = NS_FALSE;
     int              rc;
     unsigned int     maskBits;
 
-    snprintf(format1, sizeof(format1),
-             "%%%lu[0123456789.]/%%%lu[0123456789.]",
-             (unsigned long)(sizeof(addr)),
-             (unsigned long)(sizeof(mask)));
-    snprintf(format2, sizeof(format2),
-             "%%%lu[0123456789.:]",
-             (unsigned long)(sizeof(addr)));
-    snprintf(format3, sizeof(format3),
-             "%%%lu[^/]/%%%lus",
-             (unsigned long)(sizeof(addr)),
-             (unsigned long)(sizeof(mask)));
-    snprintf(format4, sizeof(format4),
-             "%%%lus", (unsigned long)(sizeof(addr)));
+    /* Literal formats with compile-time widths */
+    static const char format1[] = "%" NS_IPADDR_SCANW_STR "[0-9.]/%" NS_IPADDR_SCANW_STR "[0-9.]";
+    static const char format2[] = "%" NS_IPADDR_SCANW_STR "[0-9.:]";
+    static const char format3[] = "%" NS_IPADDR_SCANW_STR "[^/]/%" NS_IPADDR_SCANW_STR "s";
+    static const char format4[] = "%" NS_IPADDR_SCANW_STR "s";
 
     if (sscanf(str, format1, addr, mask) == 2) {
     } else if (sscanf(str, format2, addr) == 1) {
@@ -3755,7 +3746,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
 # ifdef USE_SPAMASSASSIN
     int rc;
     char *p;
-    float score;
+    double score;
     Ns_Sock sock;
     smtpdRcpt *rcpt;
     smtpdConn *spamd;
@@ -3811,7 +3802,10 @@ static int SmtpdCheckSpam(smtpdConn *conn)
         goto error;
     }
     rc = strstr(spamd->line.string, "True") ? SMTPD_GOTSPAM : 0;
-    score = atof(++p);
+    { /* parse result */
+        char *end = NULL;
+        score = strtod(++p, &end);
+    }
     // Update all recipients with spam score/status
     for (; rcpt != NULL; rcpt = rctp->next) {
         if ((rcpt->flags & SMTPD_DELIVERED) != 0u || (rcpt->flag & SMTPD_SPAMCHECK) == 0u) {
@@ -5626,7 +5620,7 @@ static void dnsInit(const char *name, ...)
     } else if (!strcmp(name, "failuretimeout")) {
         dnsFailureTimeout = va_arg(ap, int);
     } else if (!strcmp(name, "ttl")) {
-         dnsTTL = va_arg(ap, unsigned long);
+        dnsTTL = va_arg(ap, uint32_t);
     }
     va_end(ap);
     Ns_MutexUnlock(&dnsMutex);
@@ -5899,62 +5893,113 @@ static dnsPacket *dnsParseHeader(void *buf, size_t size)
     return pkt;
 }
 
+/* read big endian 16 bits from buf (network byte order) */
+static inline bool ns_pull_be16(dnsPacket *pkt, uint16_t *out)
+{
+    char *end = pkt->buf.data + pkt->buf.allocated;
+
+    if (pkt->buf.ptr + 2 > end) {
+        return NS_FALSE;
+    }
+    memcpy(out, pkt->buf.ptr, sizeof *out);   /* unaligned-safe */
+    pkt->buf.ptr += 2;
+    *out = ntohs(*out);
+    return NS_TRUE;
+}
+
+/* read big endian 32 bits from buf (network byte order) */
+static inline bool ns_pull_be32(dnsPacket *pkt, uint32_t *out)
+{
+    char *end = pkt->buf.data + pkt->buf.allocated;
+
+    if (pkt->buf.ptr + 4 > end) {
+        return NS_FALSE;
+    }
+    memcpy(out, pkt->buf.ptr, sizeof *out);   /* unaligned-safe */
+    pkt->buf.ptr += 4;
+    *out = ntohl(*out);
+    return NS_TRUE;
+}
+
+/* store big endian 16 bits into dst (network byte order) */
+static inline void ns_store_be16(char *dst, uint16_t v) {
+    uint16_t n = htons(v);
+    memcpy(dst, &n, sizeof n);   /* safe for unaligned dst */
+}
+
+
 static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query)
 {
     int rc;
-    //int offset;
     char name[256] = {'\0'};
     dnsRecord *y;
 
     Ns_Log(SmtpdDebug, "dnsParseRecord");
 
     y = ns_calloc(1, sizeof(dnsRecord));
-    //offset = (pkt->buf.ptr - pkt->buf.data) - 2;
+
     // The name of the resource
     if ((rc = dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0)) < 0) {
         snprintf(name, 255, "invalid name: %d %s: ", rc, pkt->buf.ptr);
         goto err;
     }
     y->name = ns_strdup(name);
-    // The type of data
-    if (pkt->buf.ptr + 2 > pkt->buf.data + pkt->buf.allocated) {
-        strcpy(name, "invalid type position");
-        goto err;
+
+    /* Type (16-bit) */
+    {
+        uint16_t v16;
+        if (!ns_pull_be16(pkt, &v16)) {
+            strcpy(name, "invalid type position");
+            goto err;
+        }
+        y->type = (unsigned short)v16;
     }
-    y->type = ntohs(*((unsigned short *) pkt->buf.ptr));
-    pkt->buf.ptr += 2;
-    // The class type
-    if (pkt->buf.ptr + 2 > pkt->buf.data + pkt->buf.allocated) {
-        strcpy(name, "invalid class position");
-        goto err;
+
+    /* Class (16-bit) */
+    {
+        uint16_t v16;
+        if (!ns_pull_be16(pkt, &v16)) {
+            strcpy(name, "invalid class position");
+            goto err;
+        }
+        y->class = (unsigned short)v16;
     }
-    y->class = ntohs(*((unsigned short *) pkt->buf.ptr));
-    pkt->buf.ptr += 2;
-    // Query block stops here
+
+    /* For queries, stop here */
     if (query) {
         goto rec;
     }
-    // Answer blocks carry a TTL and the actual data.
-    if (pkt->buf.ptr + 4 > pkt->buf.data + pkt->buf.allocated) {
-        strcpy(name, "invalid TTL position");
-        goto err;
+
+    /* TTL (32-bit) */
+    {
+        uint32_t v32;
+        if (!ns_pull_be32(pkt, &v32)) {
+            strcpy(name, "invalid TTL position");
+            goto err;
+        }
+        y->ttl = (unsigned)v32;
     }
-    y->ttl = ntohl(*((unsigned *) pkt->buf.ptr));
-    pkt->buf.ptr += 4;
-    // Fetch the resource data.
-    if (pkt->buf.ptr + 2 > pkt->buf.data + pkt->buf.allocated) {
-        strcpy(name, "invalid data position");
-        goto err;
+
+    /* RDATA length (16-bit) */
+  {
+        uint16_t rdlen;
+        if (!ns_pull_be16(pkt, &rdlen)) {
+            strcpy(name, "invalid data position");
+            goto err;
+        }
+        if (rdlen == 0) {
+            strcpy(name, "empty data len");
+            goto err;
+        }
+        y->len = (short)rdlen;
+
+        /* Ensure the full RDATA is present */
+        if (pkt->buf.ptr + y->len > pkt->buf.data + pkt->buf.allocated) {
+            strcpy(name, "invalid data len");
+            goto err;
+        }
     }
-    if (!(y->len = (short)ntohs(*((unsigned short *) pkt->buf.ptr)))) {
-        strcpy(name, "empty data len");
-        goto err;
-    }
-    pkt->buf.ptr += 2;
-    if (pkt->buf.ptr + y->len > pkt->buf.data + pkt->buf.allocated) {
-        strcpy(name, "invalid data len");
-        goto err;
-    }
+
     switch (y->type) {
     case DNS_TYPE_AAAA:
         Ns_Log(Notice, "AAAA records are not implemented yet");
@@ -5963,15 +6008,24 @@ static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query)
         memcpy(&y->data.ipaddr, pkt->buf.ptr, 4);
         pkt->buf.ptr += 4;
         break;
-    case DNS_TYPE_MX:
-        y->data.soa = ns_calloc(1, sizeof(dnsSOA));
-        y->data.mx->preference = ntohs(*((unsigned short *) pkt->buf.ptr));
-        pkt->buf.ptr += 2;
+    case DNS_TYPE_MX: {
+        uint16_t pref16;
+
+        y->data.mx = ns_calloc(1, sizeof(*y->data.mx));   /* was: y->data.soa */
+        /* read 16-bit preference safely (unaligned OK) */
+        if (!ns_pull_be16(pkt, &pref16)) {
+            strcpy(name, "invalid MX preference position");
+            goto err;
+        }
+        y->data.mx->preference = (unsigned short)pref16;
+
         if (dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0) < 0) {
+            strcpy(name, "invalid MX name");
             goto err;
         }
         y->data.mx->name = ns_strcopy(name);
         break;
+    }
     case DNS_TYPE_NS:
     case DNS_TYPE_CNAME:
     case DNS_TYPE_PTR:
@@ -5983,29 +6037,34 @@ static dnsRecord *dnsParseRecord(dnsPacket *pkt, int query)
         break;
     case DNS_TYPE_SOA:
         y->data.soa = ns_calloc(1, sizeof(dnsSOA));
+
         /* MNAME */
         if (dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0) < 0)
             goto err;
         y->data.soa->mname = ns_strdup(name);
+
         /* RNAME */
         if (dnsParseName(pkt, &pkt->buf.ptr, name, 255, 0, 0) < 0) {
             goto err;
         }
         y->data.soa->rname = ns_strdup(name);
+
+        /* Need 5 x 32-bit fields: serial, refresh, retry, expire, minimum/ttl */
         if (pkt->buf.ptr + 20 > pkt->buf.data + pkt->buf.allocated) {
             strcpy(name, "invalid SOA data len");
             goto err;
+        } else {
+            uint32_t v[5];
+
+            memcpy(v, pkt->buf.ptr, sizeof(v));   /* unaligned-safe load */
+            pkt->buf.ptr += sizeof(v);
+
+            y->data.soa->serial  = ntohl(v[0]);
+            y->data.soa->refresh = ntohl(v[1]);
+            y->data.soa->retry   = ntohl(v[2]);
+            y->data.soa->expire  = ntohl(v[3]);
+            y->data.soa->ttl     = ntohl(v[4]);  /* a.k.a. minimum/negative TTL */
         }
-        y->data.soa->serial = ntohl(*((unsigned *) pkt->buf.ptr));
-        pkt->buf.ptr += 4;
-        y->data.soa->refresh = ntohl(*((unsigned *) pkt->buf.ptr));
-        pkt->buf.ptr += 4;
-        y->data.soa->retry = ntohl(*((unsigned *) pkt->buf.ptr));
-        pkt->buf.ptr += 4;
-        y->data.soa->expire = ntohl(*((unsigned *) pkt->buf.ptr));
-        pkt->buf.ptr += 4;
-        y->data.soa->ttl = ntohl(*((unsigned *) pkt->buf.ptr));
-        pkt->buf.ptr += 4;
     }
 rec:
     return y;
@@ -6100,16 +6159,26 @@ static void dnsEncodeName(dnsPacket *pkt, const char *name)
 
 static void dnsEncodeHeader(dnsPacket *pkt)
 {
-    unsigned short *p = (unsigned short *) pkt->buf.data;
+    char   *q   = pkt->buf.data;
+    char   *end = pkt->buf.data + pkt->buf.allocated;
+    size_t  need = 14; /* 2 (len) + 12 (DNS header) */
 
+    if ((size_t)(end - q) < need) {
+        /* Not enough space for header; handle as you prefer */
+        /* e.g., Ns_Log(Error, "dnsEncodeHeader: buffer too small (%zu < %zu)", (size_t)(end - q), need); */
+        return;
+    }
+
+    /* length is DNS payload length excluding the leading 2-byte length field */
     pkt->buf.size = (unsigned short)((pkt->buf.ptr - pkt->buf.data) - 2u);
-    p[0] = htons(pkt->buf.size);
-    p[1] = htons(pkt->id);
-    p[2] = htons(pkt->u);
-    p[3] = htons(pkt->qdcount);
-    p[4] = htons(pkt->ancount);
-    p[5] = htons(pkt->nscount);
-    p[6] = htons(pkt->arcount);
+
+    ns_store_be16(q + 0,  pkt->buf.size);
+    ns_store_be16(q + 2,  pkt->id);
+    ns_store_be16(q + 4,  pkt->u);
+    ns_store_be16(q + 6,  pkt->qdcount);
+    ns_store_be16(q + 8,  pkt->ancount);
+    ns_store_be16(q + 10, pkt->nscount);
+    ns_store_be16(q + 12, pkt->arcount);
 }
 
 static void dnsEncodePtr(dnsPacket *pkt, int offset)
@@ -6118,16 +6187,32 @@ static void dnsEncodePtr(dnsPacket *pkt, int offset)
     *pkt->buf.ptr++ = (char)(offset & 0xFF);
 }
 
-static void dnsEncodeShort(dnsPacket *pkt, int num)
+static inline void dnsEncodeShort(dnsPacket *pkt, uint16_t num)
 {
-    *((unsigned short *) pkt->buf.ptr) = htons((unsigned short) num);
-    pkt->buf.ptr += 2;
+    char    *end = pkt->buf.data + pkt->buf.allocated;
+    uint16_t n;
+
+    if (pkt->buf.ptr + 2 > end) {
+        /* handle error as you prefer (log/abort/return) */
+        return;
+    }
+    n = htons(num);
+    memcpy(pkt->buf.ptr, &n, sizeof(n));  /* unaligned-safe */
+    pkt->buf.ptr += sizeof(n);
 }
 
-static void dnsEncodeLong(dnsPacket *pkt, unsigned long num)
+static inline void dnsEncodeLong(dnsPacket *pkt, uint32_t num)
 {
-    *((unsigned long *) pkt->buf.ptr) = htonl((unsigned) num);
-    pkt->buf.ptr += 4;
+    char *end = pkt->buf.data + pkt->buf.allocated;
+    uint32_t n;
+
+    if (pkt->buf.ptr + 4 > end) {
+        /* handle error as you prefer (log/abort/return) */
+        return;
+    }
+    n = htonl(num);
+    memcpy(pkt->buf.ptr, &n, sizeof(n));  /* unaligned-safe */
+    pkt->buf.ptr += sizeof(n);
 }
 
 static void dnsEncodeData(dnsPacket *pkt, void *ptr, int len)
@@ -6145,8 +6230,11 @@ static void dnsEncodeBegin(dnsPacket *pkt)
 
 static void dnsEncodeEnd(dnsPacket *pkt)
 {
-    unsigned short len = (unsigned short)(pkt->buf.ptr - pkt->buf.rec);
-    *((unsigned short *) pkt->buf.rec) = htons((unsigned short)(len - 2));
+    size_t    len = (size_t)(pkt->buf.ptr - pkt->buf.rec);
+    uint16_t  be  = htons((uint16_t)(len - 2));
+
+    /* unaligned-safe store of 2 bytes at rec */
+    memcpy(pkt->buf.rec, &be, sizeof be);
 }
 
 static void dnsEncodeRecord(dnsPacket *pkt, dnsRecord *list)
