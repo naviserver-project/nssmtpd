@@ -1,3 +1,223 @@
+commit 5df5231a64fe2fbcd9b18dadfe55795b72d0412f
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-07-08
+
+    NaviServer 5 license upgrade
+
+D	LICENSE
+M	nssmtpd.c
+
+commit 0a654410190551b77c610cf0f8cd03df37dc012a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-28
+
+    Added defaults to configuration parameters to shorten required configuration section
+    
+    In particular, the following configuration parameters git defaults:
+    - relaydomains: localhost
+    - localdomains: localhost
+    - initproc: smtpd::init
+    - rcptproc: smtpd::rcpt
+    - dataproc: smtpd::data
+    - errorproc: smtpd::error
+
+M	nssmtpd-procs.tcl
+M	nssmtpd.c
+
+commit 8107123c3d786123f4475911f20715ba80c76d05
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-28
+
+    added paragraph describing requirement of percent-encoding in user-info section
+
+M	README.md
+
+commit 061c5941c226234c5064489010d8345a35bca78e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-25
+
+    Add percent-decoding support to relayhost parsing
+    
+    - Provide an error message, when URL provided via "relayhost" is invalid
+    
+    - If the provided URL contains userinfo, decode it and split it at the
+      colon; if the colon is missing, log a warning and do not configure
+      user credentials.
+    
+    - Introduce a new helper function, PercentDecode(), to decode
+      percent-encoded characters from the relayhost userinfo string.  This
+      is currently a duplication of the NaviServer function, since
+      NaviServer does not provide a public API for this.
+
+M	nssmtpd.c
+
+commit c46cec0918df3af5d93395c7494d2251b342a60e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-24
+
+    improved README file (added security note concerning passwords)
+
+M	README.md
+
+commit f2a2b6a70929fb5f4f89ffaf774a62fe52034ac4
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-23
+
+    Improved README structure and update release version
+    
+    - Bump release version from 2.3 to 2.4.
+    - Rename title to "NaviServer SMTPD Module" and update the Overview section for clarity.
+    - Add a detailed Table of Contents for better navigation.
+    - Reorganize configuration details into "Basic Setup" and "Enabling Logging" sections.
+    - Introduce a new "Relay Authentication" section to explain SMTP relay settings and authentication.
+    - Enhance API documentation with clearly categorized command lists.
+    - Update the Usage Example with a "ns_smtpd send" command.
+
+M	README.md
+
+commit c4539044078110b0198d319d767a06d59981fc07
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-23
+
+    Enhanced SMTP relay support and improve multi-line response processing
+    
+    - Implement SmtpdAuthPlainCommand to support AUTH PLAIN authentication
+      One can specify now "plain://USER:PWF@MAILHOST:587" for the "relay"
+      parameter in the configuration section
+    
+    - This change required using the Ns_ParseUrl() API function from
+      NaviServer and to introduce new configuration fields for relay
+      authentication (relayuser and relaypassword).
+    
+    - General code cleanups and error-handling enhancements for robust
+        SMTP relay communication.
+    
+      * Refactor multi-line response processing by adding
+        SmtpdReadMultiLine and SmtpdJoinMultiLine functions to handle
+        enhanced status codes (e.g. "535-5.7.8") and strip CRLF/newline
+        delimiters.
+    
+      * Change connection ID type from unsigned int to uintptr_t for
+        better portability and long running servers.
+    
+      * Improved logging messages
+    
+      * Provide compatibility with the latests NaviServer 5 and 4.99 versions.
+    
+      * Improved error handling and error messages to distinguish between
+        timeouts and other errors, This required adding further output
+        parameters to functions to pass Ns_ReturnCode pointers.
+    
+    - Bump SMTPD version from "2.3" to "2.4".
+
+M	nssmtpd.c
+
+commit a1a472ca37e2f086ed0c72c51cc97c1b47dd82fd
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-17
+
+    removed conversion artefacts
+
+M	README.md
+
+commit f251387307b525f6f480a358dd9c7fa507c0f3f4
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-03-17
+
+    converted to markdown, added more explanations, improved wording
+
+D	README
+A	README.md
+
+commit 20ec112a36af48a98cc7f6f538682aa55496ef5a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-02-25
+
+    Replaced calls to deprecated Ns_DString functions
+
+M	nssmtpd.c
+
+commit 7b62ea45aade2b1ceb43354c020ca341c56ce6b9
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-02-25
+
+    Replaced calls to deprecated Ns_DString functions
+
+M	nssmtpd.c
+
+commit e8770b2778c67541533c3cce29db3323eefb00cb
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-02-24
+
+    improved type-cleanness for Tcl9
+
+M	nssmtpd.c
+
+commit ed8e41bf524138fab89c0d337df5da82dc109e53
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-02-24
+
+    improved type-cleanness for Tcl9
+
+M	nssmtpd.c
+
+commit 257dd67cb98d52f31953196b73afaacb8dfb622e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2025-01-30
+
+    adjust to altered interface Ns_TLS_SSLConnect() has arguments caFile and caPath
+
+M	nssmtpd.c
+
+commit bc93fa8c9ac0371c6cfcabbbd2031239a136e6a3
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2024-12-30
+
+    make completed log file path queryable
+
+M	nssmtpd.c
+
+commit 339343372522ce0f604f502cb81ef12dea9b8234
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2024-11-04
+
+    improved tcl9 compatibility
+
+M	README
+M	nssmtpd.c
+
+commit b8bbb701a22b8d3c308883409715eab1839f49fe
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2024-10-02
+
+    Improve Tcl9 compatibility: support long argument lists
+
+M	nssmtpd.c
+
+commit 23d9bd2b7c0155d0112b3b3b4fc0df8436593c1a
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2024-02-03
+
+    improved tcl9 compatibility
+
+M	nssmtpd.c
+
+commit 3c80f12b15ad9d9ad2db292e5444c136599ef3b7
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-11-19
+
+    improved documentation of subcommand with arguments
+
+M	README
+
+commit ddc56c524d1f371ddda3fb99e55b903d8840cbef
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2023-11-19
+
+    improved tcl9 compatibility
+
+M	nssmtpd.c
+
 commit 7076164b18b4c35a58e87413a536f6f0e97265a3
 Author: Gustaf Neumann <neumann@wu-wien.ac.at>
 Date:   2023-07-13
