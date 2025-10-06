@@ -4945,7 +4945,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             Tcl_WrongNumArgs(interp, 2, objv, "domain");
             return TCL_ERROR;
         }
-        Tcl_SetObjResult(interp, Tcl_NewIntObj(SmtpdCheckDomain(0, Tcl_GetString(objv[2]))));
+        /* avoid cast from function call to non-matching type */
+        Tcl_SetObjResult(interp, Tcl_NewIntObj(SmtpdCheckDomain(0, Tcl_GetString(objv[2])) ? 1 : 0));
         break;
 
     case cmdCheckEmail:{
@@ -4969,9 +4970,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
 #endif
         break;
 
-    case cmdCheckSpam:{
+    case cmdCheckSpam: {
             Ns_Sock sock;
-            char score[12];
             smtpdConn *sconn;
 
             if (objc < 3) {
@@ -4980,16 +4980,28 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             }
             sock.sock = -1;
             sconn = SmtpdConnCreate(config, &sock);
+
             Tcl_DStringAppend(&sconn->body.data, Tcl_GetString(objv[2]), TCL_INDEX_NONE);
             sconn->rcpt.list = ns_calloc(1, sizeof(smtpdRcpt));
             sconn->rcpt.list->flags |= SMTPD_SPAMCHECK;
             sconn->rcpt.list->addr = ns_strdup(objc > 3 ? Tcl_GetString(objv[3]) : "smtpd");
             SmtpdCheckSpam(sconn);
-            sprintf(score, "%.2f", sconn->rcpt.list->spam_score);
-            Tcl_AppendResult(interp,
-                             ((sconn->rcpt.list->flags & SMTPD_GOTSPAM) != 0u) ? "Spam" : "Innocent",
-                             " ", score, " ",
-                             SmtpdGetHeader(sconn, SMTPD_HDR_SIGNATURE), (char *)0L);
+
+            {
+                const char *status = ((sconn->rcpt.list->flags & SMTPD_GOTSPAM) != 0u)
+                    ? "Spam" : "Innocent";
+                const char *sig = SmtpdGetHeader(sconn, SMTPD_HDR_SIGNATURE);
+                if (sig == NULL) {
+                    sig = "";
+                }
+
+                /* prints: "<Status> <score with 2 decimals> <signature>" */
+                Ns_TclPrintfResult(interp, "%s %.2f %s",
+                                   status,
+                                   (double)sconn->rcpt.list->spam_score,
+                                   sig);
+            }
+
             SmtpdConnFree(sconn);
             break;
         }
@@ -5772,7 +5784,7 @@ static dnsPacket *dnsLookup(const char *name, unsigned short type, int *errcode)
 
 static void dnsRecordFree(dnsRecord *pkt)
 {
-    if (pkt != NULL) {
+    if (pkt == NULL) {
         return;
     }
     ns_free((char *)pkt->name);
