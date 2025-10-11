@@ -580,21 +580,21 @@ PercentDecode(char *dest, const char *source, char part)
 }
 
 #ifdef NS_HAVE_PARSEHOST2_CONST
-# define NS_PARSE_STRING_T const char *
+# define NS_PARSE_HOST_CONST const
 #else
-# define NS_PARSE_STRING_T char *
+# define NS_PARSE_HOST_CONST
 #endif
 
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
     char             *path, *addr2;
     const char       *addr;
-    NS_PARSE_STRING_T portString;
     int               bufsize;
     smtpdRelay       *relay;
     Ns_DriverInitData init = {0};
     smtpdConfig      *serverPtr;
     static bool       initialized = NS_FALSE;
+    NS_PARSE_HOST_CONST char *portString;
 
     SmtpdDebug = Ns_CreateLogSeverity("Debug(smtpd)");
     path = ns_strdup(Ns_ConfigGetPath(server, module, (char *)0));
@@ -828,7 +828,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->spamdport = 783;
     if (serverPtr->spamdhost != NULL) {
         char             *end;
-        NS_PARSE_STRING_T hostString;
+        NS_PARSE_HOST_CONST char *hostString;
 
         Ns_HttpParseHost2(serverPtr->spamdhost, NS_TRUE, &hostString, &portString, &end);
         if (portString != NULL) {
