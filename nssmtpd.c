@@ -410,6 +410,7 @@ static Ns_DriverCloseProc SmtpdCloseProc;
 
 static void SmtpdInit(void *arg);
 static Ns_TclTraceProc SmtpdInterpInit;
+
 static TCL_OBJCMDPROC_T SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
 static TCL_SIZE_T SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
@@ -445,7 +446,7 @@ static Ns_ReturnCode SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, co
     NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(2) NS_GNUC_NONNULL(3) NS_GNUC_NONNULL(4);
 static bool SmtpLineTrimCR(Tcl_DString *dsPtr) NS_GNUC_NONNULL(1);
 static char *SmtpdStrPos(char *as1, const char *as2);
-static char *SmtpdStrNPos(char *as1, char *as2, size_t len);
+static char *SmtpdStrNPos(char *as1, const char *as2, size_t len);
 static char *SmtpdStrTrim(char *str);
 static smtpdIpaddr *SmtpdParseIpaddr(char *str);
 static smtpdIpaddr *SmtpdCheckIpaddr(smtpdIpaddr *list, const char *ipString);
@@ -496,6 +497,21 @@ static const unsigned short DEFAULT_PORT = 25;
 
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
+
+/*
+ * This function is in essence a clone from the function in NaviServer
+ * 5. However, for backward compatibility, we mirror it here.
+ */
+static inline void ns_free_const_local(const void *p) {
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
+    ns_free((void *)p);       /* dropping const is intentional here */
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic pop
+#endif
+}
 
 static TCL_SIZE_T
 PercentDecode(char *dest, const char *source, char part)
@@ -566,8 +582,8 @@ PercentDecode(char *dest, const char *source, char part)
 
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
-    char             *path, *addr2, *portString;
-    const char       *addr;
+    char             *path, *addr2;
+    const char       *addr, *portString;
     int               bufsize;
     smtpdRelay       *relay;
     Ns_DriverInitData init = {0};
@@ -792,12 +808,12 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
                     Ns_Log(Warning, "smtpd relayhost: userinfo '%s' does not contain a colon."
                            " No user and password configured", decodedUserInfo);
                 }
-                ns_free(decodedUserInfo);
+                ns_free_const_local(decodedUserInfo);
             } else {
                 Ns_Log(Notice, "smtpd relayhost: no user and password configured");
             }
         }
-        ns_free((char*)relayhostString);
+        ns_free_const_local(relayhostString);
     }
 
     Ns_Log(Notice, "smtpd relayhost: host <%s> port %hu", serverPtr->relayhost, serverPtr->relayport);
@@ -806,10 +822,10 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->spamdport = 783;
     if (serverPtr->spamdhost != NULL) {
         char *end;
-        Ns_HttpParseHost2(serverPtr->spamdhost, NS_TRUE, &serverPtr->spamdhost, &portString, &end);
+        const char*hostString;
+        Ns_HttpParseHost2(serverPtr->spamdhost, NS_TRUE, &hostString, &portString, &end);
         if (portString != NULL) {
-            *portString = '\0';
-            serverPtr->spamdport = (unsigned short) strtol(portString + 1, NULL, 10);
+            serverPtr->spamdport = (unsigned short) strtol(portString , NULL, 10);
         }
     }
 
@@ -1099,7 +1115,7 @@ SendLogClose(void *arg)
  */
 static int SmtpdInterpInit(Tcl_Interp *interp, const void *arg)
 {
-    TCL_CREATEOBJCOMMAND(interp, "ns_smtpd", SmtpdCmd, (ClientData)arg, NULL);
+    TCL_CREATEOBJCOMMAND(interp, "ns_smtpd", SmtpdCmd, (void*)arg, NULL);
     return TCL_OK;
 }
 
@@ -1126,7 +1142,7 @@ SmtpdListenProc(Ns_Driver *driver, const char *address, unsigned short port,
 {
     NS_SOCKET sock;
 
-    sock = Ns_SockListenEx((char*)address, port, backlog, reuseport);
+    sock = Ns_SockListenEx(address, port, backlog, reuseport);
     if (sock != NS_INVALID_SOCKET) {
         smtpdConfig *cfg = driver->arg;
 
@@ -1816,7 +1832,7 @@ SmtpdConnReset(smtpdConn *conn)
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
     ns_free(conn->from.addr), conn->from.addr = NULL;
-    ns_free((char *)conn->from.data), conn->from.data = NULL;
+    ns_free_const_local(conn->from.data), conn->from.data = NULL;
     Tcl_DStringSetLength(&conn->line, 0);
     Tcl_DStringSetLength(&conn->reply, 0);
     Tcl_DStringSetLength(&conn->body.data, 0);
@@ -1832,9 +1848,9 @@ SmtpdConnReset(smtpdConn *conn)
 
     while (conn->rcpt.list) {
         smtpdRcpt *next = conn->rcpt.list->next;
-        ns_free((char*)conn->rcpt.list->addr);
-        ns_free((char*)conn->rcpt.list->data);
-        ns_free((char*)conn->rcpt.list->relay.host);
+        ns_free_const_local(conn->rcpt.list->addr);
+        ns_free_const_local(conn->rcpt.list->data);
+        ns_free_const_local(conn->rcpt.list->relay.host);
         ns_free(conn->rcpt.list);
         conn->rcpt.list = next;
     }
@@ -1870,7 +1886,7 @@ static void SmtpdConnPrint(smtpdConn *conn)
     for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
         Ns_DStringPrintf(&conn->line, "/%s", rcpt->addr);
     }
-    ns_free((char *)nsconn->request.line);
+    ns_free_const_local(nsconn->request.line);
     nsconn->request.line = ns_strdup(conn->line.string);
 }
 
@@ -1908,7 +1924,7 @@ static void SmtpdConnFree(smtpdConn *conn)
     ns_sockclose(conn->sock->sock);
     conn->sock->sock = -1;
     SmtpdConnReset(conn);
-    ns_free((char *)conn->host);
+    ns_free_const_local(conn->host);
     conn->host = NULL;
     conn->buf.ptr = NULL;
     conn->buf.pos = 0;
@@ -2508,7 +2524,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
 
     /* MAIL FROM command */
     Tcl_DStringSetLength(&conn->line, 0);
-    Tcl_DStringAppend(&conn->reply, (char *) sender, TCL_INDEX_NONE);
+    Tcl_DStringAppend(&conn->reply, sender, TCL_INDEX_NONE);
     Ns_DStringPrintf(&conn->line, "MAIL FROM:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
         errorString = "send MAIL FROM";
@@ -2543,7 +2559,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
 
             Tcl_DStringSetLength(&conn->line, 0);
             Tcl_DStringSetLength(&conn->reply, 0);
-            Tcl_DStringAppend(&conn->reply, (char *)argString, argLen);
+            Tcl_DStringAppend(&conn->reply, argString, argLen);
             Ns_DStringPrintf(&conn->line, "RCPT TO:<%s>\r\n", SmtpdStrTrim(conn->reply.string));
             if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
                 errorString = "send RCPT TO";
@@ -2685,9 +2701,9 @@ SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
             }
             rcpt2 = rcpt;
             rcpt = rcpt->next;
-            ns_free((char*)rcpt2->addr);
-            ns_free((char*)rcpt2->data);
-            ns_free((char*)rcpt2->relay.host);
+            ns_free_const_local(rcpt2->addr);
+            ns_free_const_local(rcpt2->data);
+            ns_free_const_local(rcpt2->relay.host);
             ns_free(rcpt2);
             conn->rcpt.count--;
             continue;
@@ -3174,9 +3190,10 @@ static char *SmtpdStrPos(char *as1, const char *as2)
     return 0;
 }
 
-static char *SmtpdStrNPos(char *as1, char *as2, size_t len)
+static char *SmtpdStrNPos(char *as1, const char *as2, size_t len)
 {
-    register char *s1 = as1, *s2 = as2, *ptr, *end, c;
+    register char *s1 = as1, *ptr, *end, c;
+    const char    *s2 = as2;
 
     c = *s2;
     end = s1 + len;
@@ -3386,7 +3403,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
             // Check for specific headers
             if (!strncasecmp(hdr, "Content-Disposition:", 20)) {
                 hdr += 20;
-                if ((ptr = SmtpdStrNPos(hdr, (char*)"filename=", (size_t)(end - hdr)))) {
+                if ((ptr = SmtpdStrNPos(hdr, "filename=", (size_t)(end - hdr)))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     if (!fileHdr) {
@@ -3415,7 +3432,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                 contentSize = end - contentType;
 #endif
-                if ((ptr = SmtpdStrNPos(contentType, (char*)"boundary=", (size_t)(end - contentType)))) {
+                if ((ptr = SmtpdStrNPos(contentType, "boundary=", (size_t)(end - contentType)))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     header = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
@@ -3425,7 +3442,7 @@ static void SmtpdConnParseData(smtpdConn *conn)
                     header->next = boundary;
                     boundary = header;
                 }
-                if (!fileHdr && (ptr = SmtpdStrNPos(hdr, (char*)"name=", (size_t)(end - hdr)))) {
+                if (!fileHdr && (ptr = SmtpdStrNPos(hdr, "name=", (size_t)(end - hdr)))) {
                     for (ptr += 5; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
@@ -4436,7 +4453,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
-                ns_free((char *)config->relaylist->name);
+                ns_free_const_local(config->relaylist->name);
                 ns_free(config->relaylist);
                 config->relaylist = relay;
             }
@@ -4461,7 +4478,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             Ns_MutexLock(&config->relaylock);
             while (config->relaylist) {
                 relay = config->relaylist->next;
-                ns_free((char *)config->relaylist->name);
+                ns_free_const_local(config->relaylist->name);
                 ns_free(config->relaylist);
                 config->relaylist = relay;
             }
@@ -4709,7 +4726,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             Tcl_WrongNumArgs(interp, 2, objv, "data");
             return TCL_ERROR;
         }
-        ns_free((char *)conn->from.data);
+        ns_free_const_local(conn->from.data);
         conn->from.data = ns_strcopy(Tcl_GetString(objv[3]));
         break;
 
@@ -4773,7 +4790,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         for (count = 0, rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next, count++) {
             if ((index >= 0 && index == count) || (name && !strcmp(name, rcpt->addr))) {
-                ns_free((char *)rcpt->data);
+                ns_free_const_local(rcpt->data);
                 rcpt->data = ns_strcopy(Tcl_GetString(objv[4]));
                 break;
             }
@@ -5384,7 +5401,8 @@ static char *encodehex(const char *buf, size_t len)
 static char *decodehex(const char *str, size_t *len)
 {
     size_t count = 0u;
-    char *p, *t, *s, code[] = "00";
+    char *p, *t, code[] = "00";
+    const char *s;
 
     if (!str || !*str || !len) {
         return 0;
@@ -5392,7 +5410,7 @@ static char *decodehex(const char *str, size_t *len)
     *len = strlen(str) / 2;
 
     t = p = ns_calloc(1, *len);
-    for (s = (char *) str; *s != '\0' && count < *len; count++) {
+    for (s = str; *s != '\0' && count < *len; count++) {
         if (!isxdigit(*s) || !isxdigit(*(s + 1))) {
             ns_free(p);
             return 0;
@@ -5535,9 +5553,9 @@ static char *encodeqp(const char *in, size_t len)
 
 static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen)
 {
-    char c2, *out, *buf, *ptr, *s;
+    char       c2, *out, *buf, *ptr;
+    const char *s = in;
 
-    s = (char *) in;
     ptr = buf = out = ns_malloc((unsigned) len + 1);
 
     while (s - in < len) {
@@ -5787,26 +5805,26 @@ static void dnsRecordFree(dnsRecord *pkt)
     if (pkt == NULL) {
         return;
     }
-    ns_free((char *)pkt->name);
+    ns_free_const_local(pkt->name);
     switch (pkt->type) {
     case DNS_TYPE_MX:
         if (!pkt->data.mx) {
             break;
         }
-        ns_free((char *)pkt->data.mx->name);
+        ns_free_const_local(pkt->data.mx->name);
         ns_free(pkt->data.mx);
         break;
     case DNS_TYPE_NS:
     case DNS_TYPE_CNAME:
     case DNS_TYPE_PTR:
-        ns_free((char*)pkt->data.name);
+        ns_free_const_local(pkt->data.name);
         break;
     case DNS_TYPE_SOA:
         if (!pkt->data.soa) {
             break;
         }
-        ns_free((char*)pkt->data.soa->mname);
-        ns_free((char*)pkt->data.soa->rname);
+        ns_free_const_local(pkt->data.soa->mname);
+        ns_free_const_local(pkt->data.soa->rname);
         ns_free(pkt->data.soa);
         break;
     }
@@ -6328,7 +6346,7 @@ static void dnsPacketFree(dnsPacket *pkt, int UNUSED(type))
     dnsRecordDestroy(&pkt->anlist);
     while (pkt->nmlist) {
         dnsName *next = pkt->nmlist->next;
-        ns_free((char *)pkt->nmlist->name);
+        ns_free_const_local(pkt->nmlist->name);
         ns_free(pkt->nmlist);
         pkt->nmlist = next;
     }
