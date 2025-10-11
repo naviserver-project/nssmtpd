@@ -579,11 +579,17 @@ PercentDecode(char *dest, const char *source, char part)
     return n;
 }
 
+#ifdef NS_HAVE_PARSEHOST2_CONST
+# define NS_PARSE_STRING_T const char *
+#else
+# define NS_PARSE_STRING_T char *
+#endif
 
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
     char             *path, *addr2;
-    const char       *addr, *portString;
+    const char       *addr;
+    NS_PARSE_STRING_T portString;
     int               bufsize;
     smtpdRelay       *relay;
     Ns_DriverInitData init = {0};
@@ -821,8 +827,9 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     /* SpamAssassin support */
     serverPtr->spamdport = 783;
     if (serverPtr->spamdhost != NULL) {
-        char *end;
-        const char*hostString;
+        char             *end;
+        NS_PARSE_STRING_T hostString;
+
         Ns_HttpParseHost2(serverPtr->spamdhost, NS_TRUE, &hostString, &portString, &end);
         if (portString != NULL) {
             serverPtr->spamdport = (unsigned short) strtol(portString , NULL, 10);
