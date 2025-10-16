@@ -770,25 +770,28 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     if (serverPtr->relayhost != NULL) {
         Ns_URL        url;
-        const char   *errorMsg, *relayhostString;
+        const char   *errorMsg;
+        char         *scratch;
         Ns_ReturnCode rc;
 
-        relayhostString = ns_strdup(serverPtr->relayhost);
+        scratch = ns_strdup(serverPtr->relayhost);
         //Ns_Log(Notice, "smtpd relayhost: parseurl '%s'", serverPtr->relayhost);
-        rc = Ns_ParseUrl(serverPtr->relayhost, NS_FALSE, &url, &errorMsg);
+        rc = Ns_ParseUrl(scratch, NS_FALSE, &url, &errorMsg);
         if (rc != NS_OK) {
             Ns_Log(Warning, "smtpd relayhost: invalid URL, parseurl '%s' returned: %s."
-                   " No user and password configured.", relayhostString, errorMsg);
+                   " No user and password configured.", scratch, errorMsg);
 
         } else if (url.host == NULL && url.protocol != NULL) {
-            serverPtr->relayhost = url.protocol;
+            ns_free(serverPtr->relayhost);
+            serverPtr->relayhost = ns_strdup(url.protocol);
             if (url.tail != NULL) {
                 serverPtr->relayport = (unsigned short) strtol(url.tail, NULL, 10);
             }
-            Ns_Log(Notice, "smtpd relayhost: old-style parameter '%s:%hu'", serverPtr->relayhost, serverPtr->relayport);
+            Ns_Log(Notice, "smtpd relayhost: old-style parameter '%s:%hu'", scratch, serverPtr->relayport);
         } else {
             if (url.host != NULL) {
-                serverPtr->relayhost = url.host;
+                ns_free(serverPtr->relayhost);
+                serverPtr->relayhost = ns_strdup(url.host);
                 if (url.port != NULL) {
                     serverPtr->relayport = (unsigned short) strtol(url.port, NULL, 10);
                 }
@@ -819,7 +822,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
                 Ns_Log(Notice, "smtpd relayhost: no user and password configured");
             }
         }
-        ns_free_const_local(relayhostString);
+        ns_free_const_local(scratch);
     }
 
     Ns_Log(Notice, "smtpd relayhost: host <%s> port %hu", serverPtr->relayhost, serverPtr->relayport);
