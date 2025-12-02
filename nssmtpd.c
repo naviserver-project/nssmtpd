@@ -587,7 +587,7 @@ PercentDecode(char *dest, const char *source, char part)
 
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
-    char             *path, *addr2;
+    char             *section, *addr2;
     const char       *addr;
     int               bufsize;
     smtpdRelay       *relay;
@@ -597,7 +597,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     NS_PARSE_HOST_CONST char *portString;
 
     SmtpdDebug = Ns_CreateLogSeverity("Debug(smtpd)");
-    path = ns_strdup(Ns_ConfigGetPath(server, module, (char *)0));
+    section = ns_strdup(Ns_ConfigGetPath(server, module, (char *)0));
 
     serverPtr = ns_calloc(1, sizeof(smtpdConfig));
 
@@ -617,13 +617,13 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
         initialized = NS_TRUE;
     }
 
-    serverPtr->sendlog.logging = Ns_ConfigBool(path, "logging", NS_FALSE);
+    serverPtr->sendlog.logging = Ns_ConfigBool(section, "logging", NS_FALSE);
     if (serverPtr->sendlog.logging) {
         const char  *filename;
         Tcl_DString  defaultLogFileName;
 
         Tcl_DStringInit(&defaultLogFileName);
-        filename = Ns_ConfigString(path, "logfile", NULL);
+        filename = Ns_ConfigString(section, "logfile", NULL);
         if (filename == NULL) {
             Tcl_DStringAppend(&defaultLogFileName, "smtpsend-", 9);
             Tcl_DStringAppend(&defaultLogFileName, server, TCL_INDEX_NONE);
@@ -635,37 +635,45 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
             serverPtr->sendlog.logFileName = ns_strdup(filename);
 
         } else {
-            Tcl_DString ds;
             Ns_Set     *set;
+
+#if NS_VERSION_NUM >= 50000
+            serverPtr->sendlog.logFileName =
+                Ns_ConfigFilename(section,
+                                  "logfile", 7,
+                                  Ns_ServerLogDir(server), filename,
+                                  NS_FALSE, NS_FALSE);
+#else
+            Tcl_DString ds;
 
             Tcl_DStringInit(&ds);
             (void) Ns_HomePath(&ds, "logs", "/", filename, (char *)0L);
             serverPtr->sendlog.logFileName = Ns_DStringExport(&ds);
-
+#endif
             /*
              * The path was completed. Make the result queryable.
              */
-            set = Ns_ConfigCreateSection(path);
+            set = Ns_ConfigCreateSection(section);
             Ns_SetIUpdateSz(set, "logfile", 7, serverPtr->sendlog.logFileName, TCL_INDEX_NONE);
         }
 
         Tcl_DStringFree(&defaultLogFileName);
 
-        serverPtr->sendlog.logRollfmt = ns_strcopy(Ns_ConfigGetValue(path, "logrollfmt"));
-        serverPtr->sendlog.logMaxbackup = Ns_ConfigIntRange(path, "logmaxbackup",
+        serverPtr->sendlog.logRollfmt = ns_strcopy(Ns_ConfigGetValue(section, "logrollfmt"));
+        serverPtr->sendlog.logMaxbackup = Ns_ConfigIntRange(section, "logmaxbackup",
                                                             100, 1, INT_MAX);
         /*
          *  Schedule various log roll and shutdown options.
          */
 
-        if (Ns_ConfigBool(path, "logroll", NS_TRUE)) {
-            int hour = Ns_ConfigIntRange(path, "logrollhour", 0, 0, 23);
+        if (Ns_ConfigBool(section, "logroll", NS_TRUE)) {
+            int hour = Ns_ConfigIntRange(section, "logrollhour", 0, 0, 23);
 
             Ns_ScheduleDaily(SchedLogRollCallback, serverPtr,
                              0, hour, 0, NULL);
         }
 
-        if (Ns_ConfigBool(path, "logrollonsignal", NS_FALSE)) {
+        if (Ns_ConfigBool(section, "logrollonsignal", NS_FALSE)) {
             Ns_RegisterAtSignal((Ns_Callback *)(ns_funcptr_t)SchedLogRollCallback, serverPtr);
         }
 
@@ -673,65 +681,65 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
         SendLogOpen(serverPtr);
     }
 
-    serverPtr->deferaccept = Ns_ConfigBool(path, "deferaccept", NS_FALSE);
-    serverPtr->nodelay = Ns_ConfigBool(path, "nodelay", NS_FALSE);
+    serverPtr->deferaccept = Ns_ConfigBool(section, "deferaccept", NS_FALSE);
+    serverPtr->nodelay = Ns_ConfigBool(section, "nodelay", NS_FALSE);
     serverPtr->server = server;
     Tcl_InitHashTable(&serverPtr->sessions, TCL_ONE_WORD_KEYS);
-    serverPtr->address = ns_strcopy(Ns_ConfigGetValue(path, "address"));
+    serverPtr->address = ns_strcopy(Ns_ConfigGetValue(section, "address"));
 
     {
         int i;
-        if (Ns_ConfigGetInt(path, "port", &i)) {
+        if (Ns_ConfigGetInt(section, "port", &i)) {
             serverPtr->port = (unsigned short) i;
         } else {
             serverPtr->port = DEFAULT_PORT;
         }
     }
-    if (!Ns_ConfigGetInt(path, "debug", &serverPtr->debug)) {
+    if (!Ns_ConfigGetInt(section, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
     }
-    if (!Ns_ConfigGetInt(path, "readtimeout", &serverPtr->readtimeout)) {
+    if (!Ns_ConfigGetInt(section, "readtimeout", &serverPtr->readtimeout)) {
         serverPtr->readtimeout = 60;
     }
-    if (!Ns_ConfigGetInt(path, "writetimeout", &serverPtr->writetimeout)) {
+    if (!Ns_ConfigGetInt(section, "writetimeout", &serverPtr->writetimeout)) {
         serverPtr->writetimeout = 60;
     }
-    if (!Ns_ConfigGetInt(path, "bufsize", &bufsize)) {
+    if (!Ns_ConfigGetInt(section, "bufsize", &bufsize)) {
         serverPtr->bufsize = 1024 * 4;
     } else {
         serverPtr->bufsize = (size_t) bufsize;
     }
-    if (!Ns_ConfigGetInt(path, "maxrcpt", &serverPtr->maxrcpt)) {
+    if (!Ns_ConfigGetInt(section, "maxrcpt", &serverPtr->maxrcpt)) {
         serverPtr->maxrcpt = 100;
     }
-    if (!Ns_ConfigGetInt(path, "maxline", &serverPtr->maxline)) {
+    if (!Ns_ConfigGetInt(section, "maxline", &serverPtr->maxline)) {
         serverPtr->maxline = 4096;
     }
-    if (!Ns_ConfigGetInt(path, "maxdata", &serverPtr->maxdata)) {
+    if (!Ns_ConfigGetInt(section, "maxdata", &serverPtr->maxdata)) {
         serverPtr->maxdata = 1024 * 1024 * 10;
     }
-    serverPtr->relayhost = ns_strcopy(Ns_ConfigGetValue(path, "relay"));
-    serverPtr->spamdhost = ns_strcopy(Ns_ConfigGetValue(path, "spamd"));
-    serverPtr->initproc = ns_strcopy(Ns_ConfigString(path, "initproc", "smtpd::init"));
-    serverPtr->heloproc = ns_strcopy(Ns_ConfigGetValue(path, "heloproc"));
-    serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(path, "mailproc"));
-    serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(path, "rcptproc", "smtpd::rcpt"));
-    serverPtr->dataproc = ns_strcopy(Ns_ConfigString(path, "dataproc", "smtpd::data"));
-    serverPtr->errorproc = ns_strcopy(Ns_ConfigString(path, "errorproc", "smtpd::error"));
+    serverPtr->relayhost = ns_strcopy(Ns_ConfigGetValue(section, "relay"));
+    serverPtr->spamdhost = ns_strcopy(Ns_ConfigGetValue(section, "spamd"));
+    serverPtr->initproc = ns_strcopy(Ns_ConfigString(section, "initproc", "smtpd::init"));
+    serverPtr->heloproc = ns_strcopy(Ns_ConfigGetValue(section, "heloproc"));
+    serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(section, "mailproc"));
+    serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(section, "rcptproc", "smtpd::rcpt"));
+    serverPtr->dataproc = ns_strcopy(Ns_ConfigString(section, "dataproc", "smtpd::data"));
+    serverPtr->errorproc = ns_strcopy(Ns_ConfigString(section, "errorproc", "smtpd::error"));
 
-    dnsInit("nameserver", Ns_ConfigGetValue(path, "nameserver"), 0);
+    dnsInit("nameserver", Ns_ConfigGetValue(section, "nameserver"), 0);
 
 #ifdef HAVE_OPENSSL_EVP_H
-    serverPtr->certificate = ns_strcopy(Ns_ConfigGetValue(path, "certificate"));
-    serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(path, "cafile"));
-    serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(path, "capath"));
-    serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(path, "ciphers"));
-    serverPtr->ciphersuites = ns_strcopy(Ns_ConfigGetValue(path, "ciphersuites"));
-    serverPtr->protocols = ns_strcopy(Ns_ConfigGetValue(path, "protocols"));
+    serverPtr->certificate = ns_strcopy(Ns_ConfigGetValue(section, "certificate"));
+    serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(section, "cafile"));
+    serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(section, "capath"));
+    serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(section, "ciphers"));
+    serverPtr->ciphersuites = ns_strcopy(Ns_ConfigGetValue(section, "ciphersuites"));
+    serverPtr->protocols = ns_strcopy(Ns_ConfigGetValue(section, "protocols"));
 #endif
 
     /* Parse flags */
-    if ((addr = Ns_ConfigGetValue(path, "flags"))) {
+    if ((addr = Ns_ConfigGetValue(section, "flags"))) {
         char *n;
 
         while (addr) {
@@ -856,7 +864,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     init.closeProc    = SmtpdCloseProc;
     init.opts         = NS_DRIVER_ASYNC|NS_DRIVER_NOPARSE;
     init.arg          = serverPtr;
-    init.path         = path;
+    init.path         = section;
     init.protocol     = "smtp";
     init.defaultPort  = DEFAULT_PORT;
 #if defined(NS_DRIVER_VERSION_5) && defined(HAVE_OPENSSL_EVP_H)
@@ -864,13 +872,13 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 #endif
     if (Ns_DriverInit(server, module, &init) != NS_OK) {
         Ns_Log(Error, "nssmtpd: driver init failed.");
-        ns_free(path);
+        ns_free(section);
         return NS_ERROR;
     }
 
     /* Segv/panic handler */
     if ((serverPtr->flags & SMTPD_SEGV) != 0u) {
-        if (!Ns_ConfigGetInt(path, "segvtimeout", &segvTimeout)) {
+        if (!Ns_ConfigGetInt(section, "segvtimeout", &segvTimeout)) {
             segvTimeout = -1;
         }
         ns_signal(SIGSEGV, SmtpdSegv);
@@ -965,7 +973,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     Ns_RegisterAtStartup(SmtpdInit, serverPtr);
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
-    ns_free(path);
+    ns_free(section);
 
     Ns_Log(Notice, "nssmtpd: version %s loaded", SMTPD_VERSION);
 
