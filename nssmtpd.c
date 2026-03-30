@@ -105,7 +105,7 @@
 #define SMTPD_GOTSTARTTLS    0x0200000u
 #define SMTPD_GOTAUTHPLAIN   0x0400000u
 
-#define SMTPD_VERSION              "2.4"
+#define SMTPD_VERSION              "2.5"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"
@@ -195,6 +195,9 @@ typedef struct _smtpdConfig {
 #endif
 #ifdef HAVE_OPENSSL_EVP_H
     const char *certificate;
+# if NS_VERSION_NUM >= 50100
+    const char *key;
+# endif
     const char *cafile;
     const char *capath;
     const char *ciphers;
@@ -731,6 +734,12 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
 #ifdef HAVE_OPENSSL_EVP_H
     serverPtr->certificate = ns_strcopy(Ns_ConfigGetValue(section, "certificate"));
+# if NS_VERSION_NUM >= 50100
+    {
+        const char *key = Ns_ConfigGetValue(section, "key");
+        serverPtr->key = (key != NULL && *key != '\0') ? ns_strcopy(key) : NULL;
+    }
+# endif
     serverPtr->cafile = ns_strcopy(Ns_ConfigGetValue(section, "cafile"));
     serverPtr->capath = ns_strcopy(Ns_ConfigGetValue(section, "capath"));
     serverPtr->ciphers = ns_strcopy(Ns_ConfigGetValue(section, "ciphers"));
@@ -1485,16 +1494,33 @@ static void SmtpdThread(smtpdConn *conn)
                 goto error;
             }
 
+# if NS_VERSION_NUM >= 50100
+            result = Ns_TLS_CtxServerCreateCfg(
+                                               conn->interp,
+                                               conn->config->certificate,
+                                               conn->config->key,
+                                               conn->config->cafile,
+                                               conn->config->capath,
+                                               0 /*verify*/,
+                                               conn->config->ciphers,
+                                               conn->config->ciphersuites,
+                                               conn->config->protocols,
+                                               "http/1.1" /*alpn*/,
+                                               NULL /*app_data*/,
+                                               0u /*flags*/,
+                                               &ctx);
+#else
             result = Ns_TLS_CtxServerCreate(
-                conn->interp,
-                conn->config->certificate,
-                conn->config->cafile,
-                conn->config->capath,
-                0 /*verify*/,
-                conn->config->ciphers,
-                conn->config->ciphersuites,
-                conn->config->protocols,
-                &ctx);
+                                            conn->interp,
+                                            conn->config->certificate,
+                                            conn->config->cafile,
+                                            conn->config->capath,
+                                            0 /*verify*/,
+                                            conn->config->ciphers,
+                                            conn->config->ciphersuites,
+                                            conn->config->protocols,
+                                            &ctx);
+#endif
             Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
 
             if (likely(result == TCL_OK)) {

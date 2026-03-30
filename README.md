@@ -103,11 +103,17 @@ ns_section ns/server/${server}/module/nssmtpd {
 
   # For STARTTLS functionality
   ns_param certificate "pathToYourCertificateChainFile.pem"
+  ns_param key         "pathToYourCertificatePrivateKey.key"  ;# optional, PEM format
   ns_param cafile      ""
   ns_param capath      ""
   ns_param ciphers     "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305"
 }
 ```
+
+
+Note: before NaviServer 5.1, the certificate file had to include the
+certificate chain and the private key. Starting with NaviServer 5.1, the
+private key file (PEM format) can be specified optionally as a separate file.
 
 ### Enabling Logging
 
