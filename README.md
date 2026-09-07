@@ -12,9 +12,14 @@ The NaviServer SMTPD module implements the SMTP protocol and functions
 as both an SMTP proxy and server. It provides an API for interacting
 with the server directly via Tcl for e.g. sending mails and
 interacting with the server. A typical setup uses a local Postfix
-installation as the relay for further message delivery. The module
-features built-in anti-spam and anti-virus capabilities which require
-work to interact with newer releases of the external packages.
+installation as the relay for further message delivery.
+
+The module supports sending and receiving emails, including
+STARTTLS, logging statistics with graphical display via nsstats, URIs
+for relay host specification including relay authentication.  The
+module features also built-in anti-spam and anti-virus capabilities
+which require work to interact with newer releases of the external
+packages.
 
 
 ```
