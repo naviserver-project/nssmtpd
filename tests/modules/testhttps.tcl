@@ -1,124 +1,170 @@
 # -*- Tcl -*-
 #
-# The contents of this file are subject to the AOLserver Public License
-# Version 1.1 (the "License"); you may not use this file except in
-# compliance with the License. You may obtain a copy of the License at
-# http://aolserver.com/.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Software distributed under the License is distributed on an "AS IS"
-# basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-# the License for the specific language governing rights and limitations
-# under the License.
+# The Initial Developer of the Original Code and related documentation
+# is America Online, Inc. Portions created by AOL are Copyright (C) 1999
+# America Online, Inc. All Rights Reserved.
 #
-# The Original Code is AOLserver Code and related documentation
-# distributed by AOL.
-# 
-# The Initial Developer of the Original Code is America Online,
-# Inc. Portions created by AOL are Copyright (C) 1999 America Online,
-# Inc. All Rights Reserved.
-#
-# Alternatively, the contents of this file may be used under the terms
-# of the GNU General Public License (the "GPL"), in which case the
-# provisions of GPL are applicable instead of those above.  If you wish
-# to allow use of your version of this file only under the terms of the
-# GPL and not to allow others to use your version of this file under the
-# License, indicate your decision by deleting the provisions above and
-# replace them with the notice and other provisions required by the GPL.
-# If you do not delete the provisions above, a recipient may use your
-# version of this file under either the License or the GPL.
 #
 
 # ::nstest::http -
 #     Routines for opening HTTP connections through
 #     the Tcl socket interface.
 #
+if {$::tcl_version < 8.6} {package require try}
 
 namespace eval ::nstest {
 
     proc https {args} {
-	ns_parseargs {
-	    {-http 1.0} 
-	    -setheaders 
-	    -getheaders 
-	    -getmultiheaders 
-	    {-getbody 0} 
-	    {-getbinary 0}
-	    {-verbose 0}
-	    --
-	    method {url ""} {body ""}
-	} $args
+        return [request -proto https {*}$args]
+    }
+    proc http {args} {
+        return [request -proto http {*}$args]
+    }
 
-	set host localhost
-	set port [ns_config "ns/server/test/module/nsssl" port]
-	set timeout 3
-	set ::nstest::verbose $verbose
+    proc request {args} {
+        ns_parseargs {
+            {-proto http}
+            {-http 1.0}
+            {-setheaders}
+            {-getheaders}
+            {-getmultiheaders}
+            {-getbody 0}
+            {-getbinary 0}
+            {-timeout 3s}
+            {-partialresults 0}
+            {-verbose 0}
+            {-hostname}
+            --
+            method
+            {url ""}
+            {body ""}
+        } $args
 
-	set hdrs [ns_set create]
-	if {[info exists setheaders]} {
-	    foreach {k v} $setheaders {
-		ns_set put $hdrs $k $v
-	    }
-	}
+        set addr [ns_config "test" loopback]
+        set host test
+        switch $proto {
+            "https" {
+                set port [ns_config "ns/module/nsssl" port]
+                set defaultPort 443
+            }
+            "http" {
+                set port [ns_config "ns/module/nssock" port]
+                set defaultPort 80
+            }
+            default {error "protocol $proto not supported"}
+        }
 
-	#
-	# Default Headers.
-	#
+        set ::nstest::verbose $verbose
+        set extraFlags {}
 
-	ns_set icput $hdrs Accept */*
-	ns_set icput $hdrs User-Agent "[ns_info name]-Tcl/[ns_info version]"
+        if {[info exists hostname]} {
+            lappend extraFlags -hostname $hostname
+            set host $hostname
+        }
+        if {$partialresults} {
+            lappend extraFlags -partialresults
+        }
 
-	if {$http eq "1.0"} {
-	    ns_set icput $hdrs Connection close
-	}
+        set hdrs [ns_set create]
+        if {[info exists setheaders]} {
+            foreach {k v} $setheaders {
+                ns_set put $hdrs $k $v
+            }
+        }
 
-	if {$port eq "80"} {
-	    ns_set icput $hdrs Host $host
-	} else {
-	    ns_set icput $hdrs Host $host:$port
-	}
-	if {[string is true $getbinary]} {
-	    set binaryFlag "-binary"
-	} else {
-	    set binaryFlag ""
-	}
-	
-	log url https://$host:$port/$url
-	set r [ns_http queue -timeout $timeout -method $method -headers $hdrs https://$host:$port/$url]
-	
-	ns_set cleanup $hdrs 
-	set hdrs [ns_set create]
-	
-	ns_http wait {*}$binaryFlag -result body -status status  -headers $hdrs $r
-	log status $status
+        #
+        # Default Headers.
+        #
 
-	set response [list $status]
+        ns_set icput $hdrs accept */*
+        ns_set icput $hdrs user-agent "[ns_info name]-Tcl/[ns_info version]"
 
-	if {[info exists getheaders]} {
-	    foreach h $getheaders {
-		lappend response [ns_set iget $hdrs $h]
-	    }
-	}
-	if {[info exists getmultiheaders]} {
-	    foreach h $getmultiheaders {
-		for {set i 0} {$i < [ns_set size $hdrs]} {incr i} {
-		    set key [ns_set key $hdrs $i]
-		    if {[string tolower $h] eq [string tolower $key]} {
-			lappend response [ns_set value $hdrs $i]
-		    }
-		}
-	    }
-	}
-	
-	if {[string is true $getbody] && $body ne {}} {
-	    lappend response $body
-	}
-	
-	if {[string is true $getbinary] && $body ne {}} {
-	    binary scan $body "H*" binary
-	    lappend response [regexp -all -inline {..} $binary]
-	}
+        if {$http eq "1.0"} {
+            ns_set icput $hdrs connection close
+        }
 
-	return $response
+        #
+        # Add "host:" header filed only, when not provided
+        #
+        if {[ns_set iget $hdrs host ""] eq ""} {
+            if {$port eq $defaultPort} {
+                ns_set icput $hdrs host $host
+            } else {
+                if {[string match *:* $host]} {
+                    ns_set icput $hdrs host \[$host\]:$port
+                } else {
+                    ns_set icput $hdrs host $host:$port
+                }
+            }
+        } else {
+            lappend extraFlags "-keep_host_header"
+        }
+        #ns_log notice "HEADERS [ns_set array $hdrs]"
+
+        #if {$getbinary} {
+        #    lappend extraFlags "-binary"
+        #}
+
+        set fullUrl $proto://\[$addr\]:$port/[string trimleft $url /]
+        log url $fullUrl
+        try {
+            ns_http run \
+                {*}$extraFlags \
+                -timeout $timeout \
+                -method $method \
+                -headers $hdrs \
+                -body $body \
+                $fullUrl
+        } trap {NS_TIMEOUT} {errorMsg} {
+            #ns_log notice "REQUEST timeout: $errorMsg errorCode $::errorCode"
+            dict set result status 000
+            dict set result body "testcase NS_TIMEOUT: $errorMsg"
+            dict set result headers [ns_set create]
+
+        } on error {errorMsg} {
+            #ns_log notice "REQUEST error: $errorMsg errorCode $::errorCode"
+            ::throw $::errorCode $errorMsg
+        } on ok {result} {
+            #ns_log notice "REQUEST returned $result"
+        }
+
+        set body [dict get $result body]
+        set status [dict get $result status]
+        set hdrs [dict get $result headers]
+        log status $status
+
+        set response [list $status]
+
+        if {[info exists getheaders]} {
+            foreach h $getheaders {
+                lappend response [ns_set iget $hdrs $h]
+            }
+        }
+        if {[info exists getmultiheaders]} {
+            foreach h $getmultiheaders {
+                for {set i 0} {$i < [ns_set size $hdrs]} {incr i} {
+                    set key [ns_set key $hdrs $i]
+                    if {[string tolower $h] eq [string tolower $key]} {
+                        lappend response [ns_set value $hdrs $i]
+                    }
+                }
+            }
+        }
+
+        if {[string is true $getbody] && $body ne {}} {
+            lappend response $body
+        }
+
+        if {[string is true $getbinary] && $body ne {}} {
+            binary scan $body "H*" binary
+            lappend response [regexp -all -inline {..} $binary]
+        }
+        ns_set cleanup
+        return $response
     }
 
     proc log {what {msg ""}} {
@@ -132,3 +178,9 @@ namespace eval ::nstest {
         }
     }
 }
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:
