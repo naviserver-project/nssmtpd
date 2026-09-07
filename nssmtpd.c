@@ -500,6 +500,22 @@ static const unsigned short DEFAULT_PORT = 25;
 
 static Ns_LogSeverity SmtpdDebug;    /* Severity at which to log verbose debugging. */
 
+#if defined(NS_MODULE_INFO_VERSION) && defined(NS_MODULE_TAG)
+NS_EXPORT Ns_ModuleInfoProc Ns_ModuleGetInfo;
+/*
+ * Provide module build and ABI information for runtime introspection.
+ */
+NS_EXPORT void
+Ns_ModuleGetInfo(Ns_ModuleInfo *infoPtr)
+{
+    Ns_ModuleInfoInit(infoPtr, NS_MODULE_INFO_VERSION,
+                      NS_MODULE_NAME,
+                      SMTPD_VERSION,
+                      NS_MODULE_TAG,
+                      "module",
+                      1u);
+}
+#endif
 
 /*
  * This function is in essence a clone from the function in NaviServer
