@@ -268,7 +268,8 @@ applying potentially anti-spam or anti-virus checks along the way.
 
 ## Licensing
 
-This project is licensed under the Mozilla Public License.
+This project is licensed under the Mozilla Public License, v. 2.0.
+A copy of the MPL can be obtained from https://mozilla.org/MPL/2.0/.
 
 ---
 
