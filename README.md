@@ -1,7 +1,7 @@
 
 # SMTPD Server/Proxy for NaviServer
 
-**Release:** 2.4  
+**Release:** 2.5  
 **Author:** Vlad Seryakov (<vlad@crystalballinc.com>) Gustaf Neumann (<neumann@wu-wien.ac.at>)
 
 ---
@@ -78,7 +78,7 @@ Install one of the following to enable anti-virus features:
 
 To enable the SMTPD module, add the following directives to your
 NaviServer configuration file (e.g., `nsd.tcl`) Load the `nssmtpd.so`
-module within your server’s `modules` section and configure its
+module within your server's `modules` section and configure its
 settings in a dedicated section:
 
 
@@ -185,6 +185,187 @@ commands can be executed from within the configuration file.
 
 ## API Overview
 
+### Optional envelope aliases
+
+Alias handling is **disabled by default**. Omitting `aliasproc`, or setting
+it to an empty string, preserves existing receiving and sending behavior.
+No alias map, database connection, or queue is created implicitly.
+
+To enable it, configure a Tcl command prefix in the module section:
+
+```tcl
+ns_section ns/server/${server}/module/nssmtpd {
+  ns_param aliasproc mymail::aliases
+  ns_param relaydomains "localhost openacs.org"
+  ns_param localdomains "127.0.0.1"
+  # Keep the existing delivery relay for this first implementation.
+}
+```
+
+Define the callback in the server's Tcl library so it is available in every
+interpreter:
+
+```tcl
+namespace eval mymail {}
+proc mymail::aliases {recipient} {
+    switch -- $recipient {
+        webmaster@openacs.org {
+            return {maintainer@example.net backup@example.net}
+        }
+        default {
+            # Pass through addresses that are not aliases.
+            return [list $recipient]
+        }
+    }
+}
+```
+
+The callback receives one envelope recipient and returns a Tcl list of
+**final** envelope addresses. A command prefix with fixed arguments is also
+supported, e.g. `ns_param aliasproc {mymail::aliases tenant1}`. The module
+does not impose a storage backend: the proc can use a dictionary, file, or
+an application API such as OpenACS. PostgreSQL is not required.
+
+Callback contract:
+
+- Return the original recipient as a one-element list for passthrough.
+- Return one or more bare `user@domain` addresses for expansion. Display
+  names and control characters are not accepted. The existing address
+  parser defines the supported address syntax.
+- Return an empty list to reject an unknown recipient. This is **not** a
+  request to discard mail silently. For an alias-only local domain, the
+  callback should reject unmapped local addresses rather than pass them through.
+- Raise a Tcl error for a lookup/backend failure. Incoming SMTP returns
+  `451`; an empty result returns `550`; exceeding `maxrcpt` returns `452`.
+  Direct send/resolve calls return Tcl errors. Resolver failures never fall
+  back to sending to the unresolved address.
+- Resolve any alias chains inside the callback, with bounded recursion
+  and cycle detection. The module calls it once per original recipient,
+  not recursively. Final addresses should pass through unchanged if they
+  traverse another alias-enabled submission path.
+- The callback should perform lookups only; it must not send messages,
+  call `ns_smtpd resolve` recursively, or mutate SMTP sessions. It can run
+  concurrently in multiple interpreters.
+
+Both SMTP reception and `ns_smtpd send` automatically use the configured
+hook. Message headers and the envelope sender are unchanged. For receiving,
+the original address first passes the existing peer/domain relay check and
+`rcptproc`. Only accepted recipients are expanded; targets inherit that
+recipient's flags and data, and domain routes are looked up for the targets.
+`rcptproc` is not called again for each target. `dataproc` sees the expanded
+list. Thus allowing a local alias to forward externally does not authorize
+an untrusted peer to relay arbitrary external addresses.
+
+Duplicate targets are removed within a single incoming expansion, or across
+the recipient list of a direct send/resolve call. Separate incoming RCPT
+commands retain the existing duplicate-recipient behavior. `maxrcpt` bounds
+the expanded list and accounts for recipients already accepted in an SMTP
+transaction. A failed expansion removes that original recipient without
+removing previously accepted recipients.
+
+For direct sending, expansion completes before any network connection.
+Multiple expanded recipients use the explicit server or configured default
+relay; they are not all routed through the first recipient's domain-specific
+relay. This change does not add MX delivery or a persistent queue.
+
+A transport-free command exposes the same resolution for application code
+and a future Tcl queue:
+
+```tcl
+set recipients [ns_smtpd resolve {webmaster@openacs.org}]
+```
+
+It returns the original list unchanged when alias handling is disabled.
+With aliases enabled, it shares the validation, deduplication and `maxrcpt`
+limit of direct sending. Configuration belongs to the server/module; each
+callback implementation owns its lookup backend. A future queue can use
+the same approach with optional application-defined persistence procedures.
+
+### Text alias files
+
+The supplied `smtpd::filealiases` callback accepts an uncompiled traditional
+`aliases` or Postfix `virtual` text file. For example:
+
+```tcl
+ns_section ns/server/${server}/module/nssmtpd {
+    ns_param aliasproc [list smtpd::filealiases aliases /etc/aliases {openacs.org}]
+    ns_param relaydomains openacs.org
+    ns_param localdomains 127.0.0.1
+}
+```
+
+An aliases file can contain local names, bare local targets and full addresses:
+
+```text
+# Local names are looked up only in the configured domains.
+webmaster: maintainers
+maintainers: alice@example.net,
+    bob@example.net
+```
+
+For virtual maps, use the command prefix
+`[list smtpd::filealiases virtual /etc/postfix/virtual {openacs.org}]`:
+
+```text
+webmaster@openacs.org alice@example.net, bob@example.net
+@openacs.org fallback@example.net
+```
+
+The arguments are `format filename domains recipient`; the module appends
+the recipient. Both formats support blank lines, full-line `#` comments,
+indented continuations and comma-separated destinations. Keys are matched
+case-insensitively. Virtual exact-address keys take precedence over
+`@domain` catch-alls. Bare targets acquire the domain of the address being
+expanded. Chains are resolved within the configured domains, with cycle
+detection, a 32-level depth bound and a 10,000-node work bound. A destination
+equal to the address being expanded is terminal (an identity mapping).
+Duplicate destinations are removed; the module also enforces `maxrcpt`.
+
+Unmapped addresses and addresses outside `domains` pass through. This
+provider does not assert that an unmapped local mailbox exists: deployments
+that need unknown-user rejection must supply that policy in `rcptproc` or a
+custom resolver. Listing a domain here does not authorize incoming relaying;
+the existing `relaydomains` and recipient policy checks still apply.
+
+This is an **address-forwarding subset**, not a full Postfix map interpreter.
+It accepts simple unquoted local parts (letters, digits, `_ . + % -`) and
+domains containing letters, digits, dots and hyphens. It does not implement
+commands, file delivery, `:include:`, quoted/display-name addresses, inline
+comments, owner/sender rewriting, automatic `+extension` stripping, virtual
+bare-name/domain-marker keys, or `@otherdomain` destination rewriting.
+Unsupported syntax and duplicate keys raise lookup errors; no commands or
+Tcl code from the file are executed. Missing/unreadable files, malformed
+entries and expansion failures produce temporary SMTP failure (`451`).
+
+The text file is read and parsed once per in-scope recipient lookup, without
+`newaliases`, `postmap`, or shared mutable cache state. Use atomic replacement
+when updating it. Each lookup gets its own snapshot; updates can become
+visible between recipients of the same transaction. Large maps or frequent
+lookups can use a custom cached callback with the same interface. Nothing is
+read unless this callback is explicitly configured. Both sending and receiving
+use it; no PostgreSQL or other database dependency is added.
+
+To run the isolated tests (Tcl 8.6+, OpenSSL CLI and an installed
+NaviServer with OpenSSL support needed):
+
+```sh
+make test
+# Optional: select an installation or filter test cases.
+make test NAVISERVER=/usr/local/ns TCLTESTARGS='-match nssmtpd-*'
+```
+
+These tests use ephemeral loopback ports and a local SMTP sink. They exercise
+basic `ns_sendmail` and `ns_smtpd send` submission as well as
+unset/empty hooks, incoming and outgoing expansion, rejection and temporary
+failures, recipient limits, callback compatibility and relay authorization.
+The plain SMTP sink uses NaviServer's `ns_connchan` listener and callbacks.
+Forwarding through STARTTLS uses a second nssmtpd instance within the test
+server, since `ns_connchan` does not provide a STARTTLS-upgrade operation.
+They do not contact external mail servers or require a database.
+`make test` builds the module and runs the Tcl harness; it needs neither a
+local Postfix service nor the `nsadmin` account. Failed tests cause a nonzero
+make exit status. Aggregate envelope checks are skipped when filtering cases.
+
 The module is managed via a single Tcl command, `ns_smtpd`, which
 provides an extensive set of operations for interacting with the SMTP
 server. Below is a summary of available commands:
@@ -275,6 +456,5 @@ A copy of the MPL can be obtained from https://mozilla.org/MPL/2.0/.
 
 ## Authors
 
-- **Vlad Seryakov** – <vlad@crystalballinc.com>
-- **Gustaf Neumann** – <neumann@wu-wien.ac.at>
-
+- **Vlad Seryakov** - <vlad@crystalballinc.com>
+- **Gustaf Neumann** - <neumann@wu-wien.ac.at>

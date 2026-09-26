@@ -39,6 +39,7 @@ include  $(NAVISERVER)/include/Makefile.module
 
 NS_LD_LIBRARY_PATH = LD_LIBRARY_PATH="./:$$LD_LIBRARY_PATH"
 NSD                = $(NAVISERVER)/bin/nsd
+NS_TCLSH           ?= $(NAVISERVER)/bin/tclsh
 NS_TEST_CFG        = -c -d -t tests/config.tcl -u nsadmin
 NS_TEST_ALL        = all.tcl $(TCLTESTARGS)
 PEM_FILE           = tests/etc/server.pem
@@ -51,8 +52,9 @@ $(PEM_FILE):
 	openssl dhparam 1024 >> server.pem
 	mv server.pem $(PEM_FILE)
 
-test: all $(PEM_FILE)
-	export $(NS_LD_LIBRARY_PATH); $(NSD) $(NS_TEST_CFG) $(NS_TEST_ALL)
+.PHONY: test
+test: all
+	set -f; $(NS_TCLSH) tests/run-alias-tests.tcl --naviserver "$(NAVISERVER)" $(TCLTESTARGS)
 lldbtest: all $(PEM_FILE)
 	$(NS_LD_LIBRARY_PATH) lldb -- $(NSD) $(NS_TEST_CFG) $(NS_TEST_ALL)
 

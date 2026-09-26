@@ -1,132 +1,57 @@
 # -*- Tcl -*-
-#
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-
-#
-# Test the nssmtpd module
-#
+# Basic submission through the local nssmtpd listener, without HTTP or an
+# external relay. Run through make test / run-alias-tests.tcl.
+if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ne "basic"} {return}
 package require tcltest 2.2
-namespace import -force ::tcltest::*
-ns_logctl severity Debug(smtpd) on
+namespace import ::tcltest::*
+configure {*}$argv
+nsv_set alias-test policy {}
 
-::tcltest::configure {*}$argv
-
-if {[ns_config ns/server/test/module/nssmtpd port] ne ""} {
-    testConstraint serverListen true
+proc basic_recipients {} {
+    set addresses {}
+    foreach recipient [nsv_get alias-test recipients] {
+        lappend addresses [lindex $recipient 0]
+    }
+    return [lsort $addresses]
 }
 
-test nssmtpd-1.1 {basic ns_sendmail request to single recipient} -constraints {serverListen} -setup {
-    ns_register_proc GET /get {
-      if {[catch {
-          ns_sendmail -to neumann@wu.ac.at -from neumann@wu.ac.at -subject "hi" -body "some text"
-      } result]} {
-          ns_log warning "$::errorInfo"
-      } else {
-          set result "OK"
-      }
-        ns_return 200 text/plain $result
-    }
-} -body {
-    nstest::http -http 1.0 -getbody 1 GET /get
-} -cleanup {
-    ns_unregister_op GET /get
-} -result "200 OK"
+test nssmtpd-1.1 {ns_sendmail to one recipient through nssmtpd} -body {
+    ns_sendmail -to one@example.test -from sender@example.test -subject hi -body {some text}
+    list [basic_recipients] [nsv_get alias-test from] \
+        [string match {*some text*} [nsv_get alias-test body]]
+} -result {one@example.test sender@example.test 1}
 
-test nssmtpd-1.2 {basic ns_sendmail request to two recipients} -constraints {serverListen} -setup {
-    ns_register_proc GET /get {
-      if {[catch {
-          ns_sendmail -to {neumann@wu.ac.at neumann@wu-wien.ac.at} -from neumann@wu.ac.at -subject "hi" -body "some text"
-      } result]} {
-          ns_log warning "$::errorInfo"
-      } else {
-          set result "OK"
-      }
-        ns_return 200 text/plain $result
-    }
-} -body {
-    nstest::http -http 1.0 -getbody 1 GET /get
-} -cleanup {
-    ns_unregister_op GET /get
-} -result "200 OK"
+test nssmtpd-1.2 {ns_sendmail to two recipients through nssmtpd} -body {
+    ns_sendmail -to {one@example.test, two@example.test} -from sender@example.test -subject hi -body {two recipients}
+    list [basic_recipients] [string match {*two recipients*} [nsv_get alias-test body]]
+} -result {{one@example.test two@example.test} 1}
 
-test nssmtpd-1.3 {basic request ns_sendmail request with leading dot} -constraints {serverListen} -setup {
-    ns_register_proc GET /get {
-        if {[catch {
-            set fullMailMessage "some text\n.and more\nnext line single dot\n.\nend\nof everything."
-            ns_sendmail -to neumann@wu.ac.at -from neumann@wu.ac.at -subject "hi" -body $fullMailMessage
-        } result]} {
-            ns_log warning "$::errorInfo"
-        } else {
-            set result "OK"
-        }
-        ns_return 200 text/plain $result
-    }
-} -body {
-    nstest::http -http 1.0 -getbody 1 GET /get
-} -cleanup {
-    ns_unregister_op GET /get
-} -result "200 OK"
+test nssmtpd-1.3 {ns_sendmail dot-stuffing does not terminate DATA early} -body {
+    ns_sendmail -to one@example.test -from sender@example.test -subject hi \
+        -body "some text\n.and more\n.\nafter the dot"
+    # The current receive API exposes the raw, still dot-stuffed DATA.
+    set data [nsv_get alias-test body]
+    list [string match {*..and more*} $data] [string match {*after the dot*} $data]
+} -result {1 1}
 
-#
-# The following tests are just for local testing to check against a
-# "real" smtpd the validity of the mail submission dialog.
-#
-# One might start a plain mail server on e.g. macOS via
-#    sudo postfix start
-#
-if {0} {
-    test nssmtpd-2.0 {basic request via "ns_smtpd send"} -constraints {serverListen} -setup {
-        ns_register_proc GET /get {
-            if {[catch {
-                set fullMailMessage "some text\n.and more\nnext line single dot\n.\nend.\n"
-                #set port [ns_config ns/server/test/module/nssmtpd port]
-                set addr [ns_config ns/server/test/module/nssmtpd address]
-                set port 25
-                #set addr 137.208.116.20
-                ns_log notice "ns_smtpd send neumann@wu.ac.at neumann@wu.ac.at fullMailMessage $addr $port"
-                ns_smtpd send neumann@wu.ac.at neumann@wu.ac.at fullMailMessage $addr $port
-            } result]} {
-                ns_log warning "$::errorInfo"
-            } else {
-                set result "OK"
-            }
-            ns_return 200 text/plain $result
-        }
-    } -body {
-        nstest::http -http 1.0 -getbody 1 GET /get
-    } -cleanup {
-        ns_unregister_op GET /get
-    } -result "200 OK"
+test nssmtpd-2.0 {ns_smtpd send to one recipient preserves data-variable scope} -body {
+    set message "From: sender@example.test\r\nTo: one@example.test\r\n\r\nBody"
+    ns_smtpd send sender@example.test one@example.test message 127.0.0.1 $::env(ALIAS_TEST_PORT)
+    list [basic_recipients] [nsv_get alias-test from]
+} -result {one@example.test sender@example.test}
 
-    test nssmtpd-2.1 {request with two recipients via "ns_smtpd send"} -constraints {serverListen} -setup {
-        ns_register_proc GET /get {
-            if {[catch {
-                set fullMailMessage "some text\n.and more\nnext line single dot\n.\nend.\n"
-                #set port [ns_config ns/server/test/module/nssmtpd port]
-                set addr [ns_config ns/server/test/module/nssmtpd address]
-                set port 25
-                #set addr 137.208.116.20
-                set to {neumann@wu.ac.at neumann@wu-wien.ac.at}
-                ns_log notice "======== ns_smtpd send neumann@wu.ac.at 5to fullMailMessage $addr $port ========"
-                ns_smtpd send neumann@wu.ac.at $to fullMailMessage $addr $port
-                ns_log notice "======== DONE ========"
-            } result]} {
-                ns_log warning "$::errorInfo"
-            } else {
-                set result "OK"
-            }
-            ns_return 200 text/plain $result
-        }
-    } -body {
-        nstest::http -http 1.0 -getbody 1 GET /get
-    } -cleanup {
-        ns_unregister_op GET /get
-    } -result "200 OK"
-}
+test nssmtpd-2.1 {ns_smtpd send to two recipients with dot-stuffed DATA} -body {
+    set message "From: sender@example.test\r\n\r\n.leading\r\n.\r\nafter the dot"
+    ns_smtpd send sender@example.test {one@example.test two@example.test} message 127.0.0.1 $::env(ALIAS_TEST_PORT)
+    list [basic_recipients] [string match {*after the dot*} [nsv_get alias-test body]]
+} -result {{one@example.test two@example.test} 1}
 
-
-
+set failures $::tcltest::numTests(Failed)
 cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

@@ -180,6 +180,7 @@ typedef struct _smtpdConfig {
     const char *heloproc;
     const char *mailproc;
     const char *rcptproc;
+    const char *aliasproc;
     const char *dataproc;
     const char *errorproc;
     Ns_Mutex relaylock;
@@ -426,6 +427,9 @@ static void SmtpdConnFree(smtpdConn *conn);
 static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
+static int SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
+                              Tcl_Obj *recipients, int limit, Tcl_Obj **resolved);
+static void SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient);
 static void SmtpdConnParseData(smtpdConn *conn);
 static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
@@ -743,6 +747,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->heloproc = ns_strcopy(Ns_ConfigGetValue(section, "heloproc"));
     serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(section, "mailproc"));
     serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(section, "rcptproc", "smtpd::rcpt"));
+    serverPtr->aliasproc = ns_strcopy(Ns_ConfigGetValue(section, "aliasproc"));
     serverPtr->dataproc = ns_strcopy(Ns_ConfigString(section, "dataproc", "smtpd::data"));
     serverPtr->errorproc = ns_strcopy(Ns_ConfigString(section, "errorproc", "smtpd::error"));
 
@@ -1712,14 +1717,23 @@ static void SmtpdThread(smtpdConn *conn)
             }
             conn->rcpt.count++;
             /* Call Tcl callback */
+            /* Keep the original address alive if rcptproc deletes its node. */
+            data = ns_strdup(data);
             if (SmtpdConnEval(conn, config->rcptproc) != TCL_OK) {
+                ns_free(data);
                 SmtpdPuts(conn, "421 Service not available\r\n");
                 break;
+            }
+            if (config->aliasproc != NULL && *config->aliasproc != '\0'
+                && (conn->flags & SMTPD_ABORT) == 0u
+                && (conn->reply.length == 0 || conn->reply.string[0] == '2')) {
+                SmtpdAliasRcpt(conn, rcpt);
             }
             /* Callback might set its own reply code */
             if (!conn->reply.length) {
                 Ns_DStringPrintf(&conn->reply, "250 %s... Recipient OK\r\n", data);
             }
+            ns_free(data);
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 goto error;
             }
@@ -1967,6 +1981,146 @@ static int SmtpdConnEval(smtpdConn *conn, const char *proc)
     return TCL_OK;
 }
 
+/*
+ * Resolve without transport side effects. The caller owns one reference to
+ * the result on success. An unset/empty aliasproc takes the legacy path and
+ * does not even require the Tcl alias helper to be loaded.
+ */
+static int
+SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
+                    Tcl_Obj *recipients, int limit, Tcl_Obj **resolved)
+{
+    if (config->aliasproc == NULL || *config->aliasproc == '\0') {
+        *resolved = recipients;
+        Tcl_IncrRefCount(*resolved);
+        return TCL_OK;
+    } else {
+        Tcl_Obj *args[4];
+        int      i, result;
+
+        args[0] = Tcl_NewStringObj("::smtpd::resolvealiases", -1);
+        args[1] = Tcl_NewStringObj(config->aliasproc, -1);
+        args[2] = recipients;
+        args[3] = Tcl_NewIntObj(limit);
+        for (i = 0; i < 4; i++) {
+            Tcl_IncrRefCount(args[i]);
+        }
+        result = Tcl_EvalObjv(interp, 4, args, TCL_EVAL_GLOBAL);
+        if (result == TCL_OK) {
+            *resolved = Tcl_GetObjResult(interp);
+            Tcl_IncrRefCount(*resolved);
+        }
+        for (i = 0; i < 4; i++) {
+            Tcl_DecrRefCount(args[i]);
+        }
+        return result;
+    }
+}
+
+/*
+ * Apply aliases only after the original RCPT has passed relay authorization
+ * and rcptproc policy. Expanded recipients inherit that policy, while their
+ * transport routes are looked up again. Do not recursively invoke rcptproc.
+ */
+static void
+SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
+{
+    smtpdRcpt *rcpt, *head = NULL, *tail = NULL;
+    Tcl_Obj   *input, *resolved;
+    Tcl_Obj  **targets;
+    TCL_SIZE_T count, i;
+    int        index = 0;
+
+    /* rcptproc is allowed to remove the original recipient. */
+    for (rcpt = conn->rcpt.list; rcpt != NULL && rcpt != recipient; rcpt = rcpt->next) {
+        index++;
+    }
+    if (rcpt == NULL) {
+        return;
+    }
+    input = Tcl_NewListObj(0, NULL);
+    Tcl_IncrRefCount(input);
+    Tcl_ListObjAppendElement(conn->interp, input, Tcl_NewStringObj(recipient->addr, -1));
+    if (SmtpdResolveAliases(conn->config, conn->interp, input,
+                           conn->config->maxrcpt - conn->rcpt.count + 1,
+                           &resolved) != TCL_OK) {
+        Tcl_Obj *options = Tcl_GetReturnOptions(conn->interp, TCL_ERROR);
+        Tcl_Obj *key = Tcl_NewStringObj("-errorcode", -1), *errorCode = NULL;
+        const char *reply = "451 Alias resolution failed\r\n";
+
+        Tcl_IncrRefCount(options);
+        Tcl_IncrRefCount(key);
+        Tcl_DictObjGet(NULL, options, key, &errorCode);
+        if (errorCode != NULL) {
+            const char *code = Tcl_GetString(errorCode);
+
+            if (strcmp(code, "NSSMTPD ALIAS UNKNOWN") == 0) {
+                reply = "550 Unknown recipient\r\n";
+            } else if (strcmp(code, "NSSMTPD ALIAS LIMIT") == 0) {
+                reply = "452 Too many recipients after alias expansion\r\n";
+            }
+        }
+        (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd alias resolution)");
+        Tcl_DStringSetLength(&conn->reply, 0);
+        Tcl_DStringAppend(&conn->reply, reply, -1);
+        SmtpdRcptFree(conn, NULL, index, 0u);
+        Tcl_DecrRefCount(key);
+        Tcl_DecrRefCount(options);
+        Tcl_DecrRefCount(input);
+        return;
+    }
+    Tcl_DecrRefCount(input);
+    /* The shared Tcl helper has already validated and bounded this list. */
+    (void) Tcl_ListObjGetElements(conn->interp, resolved, &count, &targets);
+    for (i = 0; i < count; i++) {
+        char *address;
+        smtpdEmail parsed;
+
+        rcpt = ns_calloc(1, sizeof(smtpdRcpt));
+        rcpt->addr = ns_strdup(Tcl_GetString(targets[i]));
+        rcpt->flags = recipient->flags;
+        rcpt->data = ns_strcopy(recipient->data);
+        rcpt->spam_score = recipient->spam_score;
+        if (strcmp(rcpt->addr, recipient->addr) == 0) {
+            rcpt->relay.host = ns_strcopy(recipient->relay.host);
+            rcpt->relay.port = recipient->relay.port;
+        } else {
+            char *host = NULL;
+
+            address = ns_strdup(rcpt->addr);
+            if (parseEmail(&parsed, address)) {
+                (void) SmtpdCheckRelay(conn, &parsed, &host, &rcpt->relay.port);
+            }
+            rcpt->relay.host = host;
+            ns_free(address);
+        }
+        rcpt->prev = tail;
+        if (tail != NULL) {
+            tail->next = rcpt;
+        } else {
+            head = rcpt;
+        }
+        tail = rcpt;
+    }
+    head->prev = recipient->prev;
+    tail->next = recipient->next;
+    if (recipient->prev != NULL) {
+        recipient->prev->next = head;
+    } else {
+        conn->rcpt.list = head;
+    }
+    if (recipient->next != NULL) {
+        recipient->next->prev = tail;
+    }
+    conn->rcpt.count += (int)count - 1;
+    ns_free_const_local(recipient->addr);
+    ns_free_const_local(recipient->data);
+    ns_free_const_local(recipient->relay.host);
+    ns_free(recipient);
+    Tcl_DecrRefCount(resolved);
+    Tcl_ResetResult(conn->interp);
+}
+
 static void SmtpdConnFree(smtpdConn *conn)
 {
     Tcl_HashEntry *rec;
@@ -2143,6 +2297,22 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
      * different recipients use default relay.
      */
     for (rcpt = conn->rcpt.list; host != NULL && rcpt != NULL; rcpt = rcpt->next) {
+        if (conn->config->aliasproc != NULL && *conn->config->aliasproc != '\0'
+            && (rcpt->flags & SMTPD_VERIFIED) != 0u) {
+            const char *targetHost = rcpt->relay.host != NULL
+                ? rcpt->relay.host : conn->config->relayhost;
+            unsigned short targetPort = rcpt->relay.host != NULL
+                ? rcpt->relay.port : conn->config->relayport;
+
+            /* An alias can mix a domain-specific route and the default
+             * route. Compare both host and port before sharing a relay. */
+            if (targetHost == NULL || strcmp(targetHost, host) != 0
+                || (targetPort != 0 ? targetPort : DEFAULT_PORT)
+                   != (port != 0 ? port : DEFAULT_PORT)) {
+                host = NULL;
+                break;
+            }
+        }
         if ((rcpt->flags & SMTPD_VERIFIED) != 0u
             && rcpt->relay.host != NULL
             && strcmp(rcpt->relay.host, host)
@@ -4187,6 +4357,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdInfo,
         cmdFlag,
         cmdSend,
+        cmdResolve,
         cmdRelay,
         cmdLocal,
         cmdEncode,
@@ -4223,6 +4394,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "info",
         "flag",
         "send",
+        "resolve",
         "relay",
         "local",
         "encode",
@@ -4662,13 +4834,39 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         break;
 
+    case cmdResolve: {
+            Tcl_Obj *resolved;
+
+            if (objc != 3) {
+                Tcl_WrongNumArgs(interp, 2, objv, "recipients");
+                return TCL_ERROR;
+            }
+            if (SmtpdResolveAliases(config, interp, objv[2], config->maxrcpt, &resolved) != TCL_OK) {
+                return TCL_ERROR;
+            }
+            Tcl_SetObjResult(interp, resolved);
+            Tcl_DecrRefCount(resolved);
+            break;
+        }
+
     case cmdSend:{
             unsigned short port = 0u;
             char          *host = NULL;
+            bool           allocatedHost = NS_FALSE;
+            bool           aliases = config->aliasproc != NULL && *config->aliasproc != '\0';
+            TCL_SIZE_T     recipientCount = 0;
+            Tcl_Obj       *recipients;
+            Ns_ReturnCode  result;
 
             if (objc < 5) {
                 Tcl_WrongNumArgs(interp, 1, objv, "sender_email rcpt_email data_varname ?server? ?port?");
                 return TCL_ERROR;
+            }
+            if (SmtpdResolveAliases(config, interp, objv[3], config->maxrcpt, &recipients) != TCL_OK) {
+                return TCL_ERROR;
+            }
+            if (aliases) {
+                (void) Tcl_ListObjLength(interp, recipients, &recipientCount);
             }
             if (objc > 5) {
                 host = Tcl_GetString(objv[5]);
@@ -4676,19 +4874,40 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             if (objc > 6) {
                 port =  (unsigned short) strtol(Tcl_GetString(objv[6]), NULL, 10);
             }
-            if (host  == NULL || *host == '\0') {
+            /* An expanded list must not all be sent to the first target's
+             * domain-specific relay. Multiple targets use the default relay
+             * (or an explicitly supplied host); this is not MX fan-out. */
+            if ((host == NULL || *host == '\0') && (!aliases || recipientCount == 1)) {
                 smtpdEmail addr;
                 smtpdConn  sconn;
-                char      *email = ns_strdup(Tcl_GetString(objv[3]));
+                char      *email = ns_strdup(Tcl_GetString(recipients));
 
                 sconn.config = config;
+                host = NULL;
                 if (parseEmail(&addr, email)) {
                     SmtpdCheckRelay(&sconn, &addr, &host, &port);
+                    allocatedHost = NS_TRUE;
                 }
                 ns_free(email);
             }
-            if (SmtpdSend(config, interp, Tcl_GetString(objv[2]), objv[3],
-                          Tcl_GetString(objv[4]), host, port) != NS_OK) {
+            if (aliases && (host == NULL || *host == '\0')
+                && (config->relayhost == NULL || *config->relayhost == '\0')) {
+                Tcl_DecrRefCount(recipients);
+                if (allocatedHost) {
+                    ns_free(host);
+                }
+                Tcl_SetObjResult(interp, Tcl_NewStringObj(
+                    "nssmtpd: send: alias delivery requires a default relay or explicit server", -1));
+                return TCL_ERROR;
+            }
+            Tcl_ResetResult(interp);
+            result = SmtpdSend(config, interp, Tcl_GetString(objv[2]), recipients,
+                               Tcl_GetString(objv[4]), host, port);
+            Tcl_DecrRefCount(recipients);
+            if (allocatedHost) {
+                ns_free(host);
+            }
+            if (result != NS_OK) {
                 return TCL_ERROR;
             }
             break;
@@ -4990,6 +5209,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             rcpt->data = ns_strcopy(Tcl_GetString(objv[5]));
         }
         rcpt->next = conn->rcpt.list;
+        if (rcpt->next != NULL) {
+            rcpt->next->prev = rcpt;
+        }
         conn->rcpt.list = rcpt;
         conn->rcpt.count++;
         break;
@@ -5028,12 +5250,16 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
 
     case cmdCheckEmail:{
             smtpdEmail addr;
+            char *email;
             if (objc < 3) {
                 Tcl_WrongNumArgs(interp, 1, objv, "email");
                 return TCL_ERROR;
             }
-            if (parseEmail(&addr, Tcl_GetString(objv[2])))
+            /* parseEmail modifies its input; never mutate a Tcl object's bytes. */
+            email = ns_strdup(Tcl_GetString(objv[2]));
+            if (parseEmail(&addr, email))
                 Tcl_AppendResult(interp, addr.mailbox, "@", addr.domain, (char *)0L);
+            ns_free(email);
             break;
         }
 
@@ -5613,13 +5839,13 @@ static char *encodeqp(const char *in, size_t len)
 
 static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen)
 {
-    char       c2, *out, *buf, *ptr;
+    char       *out, *buf, *ptr;
     const char *s = in;
 
     ptr = buf = out = ns_malloc((unsigned) len + 1);
 
     while (s - in < len) {
-        char c;
+        char c, c2;
 
         switch (c = *s++) {
         case '=':
@@ -5637,19 +5863,24 @@ static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen)
                     ptr = out;
                     break;
                 default:
-                    if (!(isxdigit(c) && s - in < len && (c2 = *s++) && isxdigit(c2))) {
+                    if (!isxdigit((unsigned char)c) || s - in >= len) {
                         ns_free(buf);
-                        return 0;
+                        return NULL;
                     }
-                    if (isdigit(c)) {
+                    c2 = *s++;
+                    if (!isxdigit((unsigned char)c2)) {
+                        ns_free(buf);
+                        return NULL;
+                    }
+                    if (isdigit((unsigned char)c)) {
                         c = (char)(c - '0');
                     } else {
-                        c = (char) (c - (isupper(c) ? 'A' - 10 : 'a' - 10));
+                        c = (char) (c - (isupper((unsigned char)c) ? 'A' - 10 : 'a' - 10));
                     }
-                    if (isdigit(c2)) {
+                    if (isdigit((unsigned char)c2)) {
                         c2 = (char)(c2 - '0');
                     } else {
-                        c2 = (char)(c2 - (isupper(c2) ? 'A' - 10 : 'a' - 10));
+                        c2 = (char)(c2 - (isupper((unsigned char)c2) ? 'A' - 10 : 'a' - 10));
                     }
                     *out++ = (char)(c2 + (c << 4));
                     ptr = out;

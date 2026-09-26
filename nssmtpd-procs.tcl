@@ -7,6 +7,128 @@ namespace eval smtpd {
     variable version "Smtpd version 2.7"
 }
 
+# Shared by SMTP reception, ns_smtpd send, and ns_smtpd resolve.
+# The resolver is a command prefix returning FINAL envelope recipients.
+# Backend access and recursive alias policy belong to the configured proc.
+proc smtpd::resolvealiases {resolver recipients maxrcpt} {
+    set resolved {}
+    set seen [dict create]
+    foreach recipient $recipients {
+        set targets [uplevel #0 [list {*}$resolver $recipient]]
+        if {[llength $targets] == 0} {
+            return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} \
+                "unknown recipient: $recipient"
+        }
+        foreach target $targets {
+            # Require one bare envelope address, never SMTP commands or an
+            # address list embedded inside a single list element.
+            if {$target eq "" || [regexp {[\x00-\x1f\x7f]} $target]
+                || [ns_smtpd checkemail $target] ne $target} {
+                return -code error -errorcode {NSSMTPD ALIAS INVALID} \
+                    "alias resolver returned an invalid envelope recipient"
+            }
+            if {![dict exists $seen $target]} {
+                dict set seen $target 1
+                lappend resolved $target
+                if {[llength $resolved] > $maxrcpt} {
+                    return -code error -errorcode {NSSMTPD ALIAS LIMIT} \
+                        "too many recipients after alias expansion"
+                }
+            }
+        }
+    }
+    return $resolved
+}
+
+# Optional address-only aliases(5)/virtual(5) text-file backend. Read one
+# snapshot per lookup; administrators can replace the file atomically.
+proc smtpd::filealiases {format filename domains recipient} {
+    if {$format ni {aliases virtual}} {
+        ::error "alias file format must be aliases or virtual"
+    }
+    set domains [lmap domain $domains {string tolower $domain}]
+    set domain [string tolower [lindex [split $recipient @] end]]
+    if {$domain ni $domains} {return [list $recipient]}
+    set channel [open $filename r]
+    try {
+        fconfigure $channel -encoding utf-8
+        set lines {}
+        set logical ""
+        while {[gets $channel line] >= 0} {
+            if {[string trim $line] eq "" || [regexp {^\s*#} $line]} {continue}
+            if {[regexp {^\s} $line]} {
+                if {$logical eq ""} {::error "alias file has an orphan continuation"}
+                append logical " " [string trim $line]
+            } else {
+                if {$logical ne ""} {lappend lines $logical}
+                set logical $line
+            }
+        }
+        if {$logical ne ""} {lappend lines $logical}
+    } finally {
+        close $channel
+    }
+    set map {}
+    foreach line $lines {
+        if {$format eq "aliases"} {
+            set valid [regexp {^([^:\s]+)\s*:\s*(.+)$} $line -> key value]
+        } else {
+            set valid [regexp {^(\S+)\s+(.+)$} $line -> key value]
+        }
+        if {!$valid} {::error "invalid $format entry in $filename: $line"}
+        set key [string tolower $key]
+        if {$format eq "aliases"} {
+            set valid [regexp {^[a-z0-9_.+%-]+$} $key]
+        } else {
+            set valid [regexp {^([a-z0-9_.+%-]+)?@[a-z0-9.-]+$} $key]
+        }
+        if {!$valid} {::error "unsupported $format key: $key"}
+        if {[dict exists $map $key]} {::error "duplicate alias key: $key"}
+        set targets {}
+        foreach target [split $value ,] {
+            set target [string trim $target]
+            # Deliberately exclude programs, files, includes, quoted/display
+            # addresses and Tcl evaluation. This backend only forwards mail.
+            if {![regexp {^[a-zA-Z0-9_.+%-]+(@[a-zA-Z0-9.-]+)?$} $target]} {
+                ::error "unsupported alias destination for $key: $target"
+            }
+            lappend targets $target
+        }
+        dict set map $key $targets
+    }
+    set budget 10000
+    return [smtpd::ExpandFileAlias $format $map $domains $recipient {} budget]
+}
+
+# Bound both chain depth and total work, including wide recursive maps.
+proc smtpd::ExpandFileAlias {format map domains recipient path budgetVar} {
+    upvar 1 $budgetVar budget
+    if {[incr budget -1] < 0 || [llength $path] >= 32} {
+        ::error "alias expansion exceeds file resolver limit"
+    }
+    set address [string tolower $recipient]
+    lassign [split $address @] local domain
+    if {$domain ni $domains} {return [list $recipient]}
+    set key [expr {$format eq "aliases" ? $local : $address}]
+    if {![dict exists $map $key] && $format eq "virtual"} {set key @$domain}
+    if {![dict exists $map $key]} {return [list $recipient]}
+    if {$address in $path} {::error "alias cycle at $recipient"}
+    lappend path $address
+    set result {}
+    foreach target [dict get $map $key] {
+        if {[string first @ $target] < 0} {append target @$domain}
+        # A self destination is terminal, as in a virtual identity mapping.
+        if {[string equal -nocase $target $recipient]} {
+            dict set result $target 1
+        } else {
+            foreach final [smtpd::ExpandFileAlias $format $map $domains $target $path budget] {
+                dict set result $final 1
+            }
+        }
+    }
+    return [dict keys $result]
+}
+
 proc smtpd::init {} {
 
     set path "ns/server/[ns_info server]/module/nssmtpd"
