@@ -458,3 +458,20 @@ A copy of the MPL can be obtained from https://mozilla.org/MPL/2.0/.
 
 - **Vlad Seryakov** - <vlad@crystalballinc.com>
 - **Gustaf Neumann** - <neumann@wu-wien.ac.at>
+
+### SMTP receive failures
+
+Outgoing `ns_smtpd send` reports the SMTP phase and destination for receive
+failures, with Tcl error codes `{NSSMTPD READ TIMEOUT}`, `{NSSMTPD READ EOF}`
+or `{NSSMTPD READ ERROR}`. For example, a silent SMTP peer produces
+`nssmtpd: send: greeting read from mail-relay:25 failed: timeout after 60 seconds`
+instead of reporting a stale `Resource temporarily unavailable` error.
+Relay greeting failures use the captured receive error as well.
+
+The local receive implementation handles both would-block values, interrupted
+operations, and TLS WANT_READ/WANT_WRITE through readiness waits. Retries share
+one deadline per receive-buffer refill; this is not an overall SMTP transaction
+or line deadline. `readtimeout` retains its existing configuration and default.
+No private driver socket fields or new NaviServer socket accessors are required.
+The test suite includes silent peers, EOF, truncated greetings, EOF after HELO,
+and successful delivery after a delayed greeting, using `ns_connchan` fixtures.

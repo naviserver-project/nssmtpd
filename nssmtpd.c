@@ -225,6 +225,7 @@ typedef struct _smtpdConn {
     unsigned int flags;
     const char *host;
     Ns_Sock *sock;
+    char readError[256]; /* Captured locally: outgoing Ns_Sock is not a driver Sock. */
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -435,7 +436,7 @@ static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc);
 #endif
-static ssize_t SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr);
+static ssize_t SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr);
 static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr);
 static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length);
 static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len);
@@ -1884,6 +1885,7 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
 
     conn->sock = sock;
     conn->sock->arg = NULL;
+    conn->readError[0] = '\0';
     conn->flags = config->flags;
 
     Ns_MutexLock(&config->lock);
@@ -2365,7 +2367,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 
     if (SmtpdReadLine(relay, &relay->line, &rc) < 0) {
         Ns_Log(Error, "nssmtpd: relay: %lu/%d: %s:%d: Greeting read error: %s",
-               conn->id, getpid(), host, port, strerror(errno));
+               conn->id, getpid(), host, port, relay->readError);
         SmtpdConnFree(relay);
         SmtpdPuts(conn, "421 Service not available\r\n");
         return -1;
@@ -2727,7 +2729,10 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Ns_Log(SmtpdDebug,"SmtpdSend wait for greeting");
 
     if (SmtpdReadLine(conn, &conn->line, &rc) < 0) {
-        Tcl_AppendResult(interp, "greeting read error: ", strerror(errno), (char *)0L);
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: send: greeting read from %s:%hu failed: %s",
+                                             host, port, conn->readError));
+        Tcl_SetErrorCode(interp, "NSSMTPD", "READ",
+                         rc == NS_TIMEOUT ? "TIMEOUT" : (rc == NS_OK ? "EOF" : "ERROR"), (char *)0L);
         SmtpdConnFree(conn);
         SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "GREET_FAILURE", 0u);
         return NS_ERROR;
@@ -2886,12 +2891,14 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     return NS_OK;
 
  ioerror:
-    if (rc == NS_TIMEOUT) {
-        Tcl_AppendResult(interp, "nssmtpd: send: timeout during ", errorString, (char *)0L);
-
-    } else if (errno) {
-        Tcl_AppendResult(interp, "nssmtpd: send: I/O error during ", errorString, ": ",
-                         conn->line.string, ": ", strerror(errno), (char *)0L);
+    if (strncmp(errorString, "read ", 5) == 0) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: send: %s from %s:%hu failed: %s",
+                                             errorString, host, port, conn->readError));
+        Tcl_SetErrorCode(interp, "NSSMTPD", "READ",
+                         rc == NS_TIMEOUT ? "TIMEOUT" : (rc == NS_OK ? "EOF" : "ERROR"), (char *)0L);
+    } else {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: send: I/O error during %s to %s:%hu: %s",
+                                             errorString, host, port, strerror(errno)));
     }
     SmtpdConnFree(conn);
     SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "IO_ERROR", 0u);
@@ -2943,65 +2950,105 @@ SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags)
 }
 
 static ssize_t
-SmtpdRecv(Ns_Sock *sock, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr)
+SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr)
 {
-    Ns_ReturnCode rc = TCL_OK;
-    ssize_t       received;
+    Ns_Sock *sock = conn->sock;
+    Ns_Time deadline, now, remaining;
 
-    NS_NONNULL_ASSERT(sock != NULL);
     NS_NONNULL_ASSERT(buffer != NULL);
 
+    conn->readError[0] = '\0';
+    *rcPtr = NS_OK;
+    Ns_GetTime(&deadline);
+    Ns_IncrTime(&deadline, timeoutPtr->sec, timeoutPtr->usec);
 
-again:
-    if (sock->arg == NULL) {
-        received = ns_recv(sock->sock, buffer, length, 0);
+    for (;;) {
+        ssize_t received;
+        unsigned int direction = NS_SOCK_READ;
+        int socketError = 0;
+        bool interrupted = NS_FALSE;
 
-    } else {
+        if (sock->arg == NULL) {
+            received = ns_recv(sock->sock, buffer, length, 0);
+            if (received < 0) {
+                socketError = ns_sockerrno;
+                interrupted = (socketError == NS_EINTR);
+                if (!interrupted && socketError != NS_EAGAIN && socketError != NS_EWOULDBLOCK) {
+                    snprintf(conn->readError, sizeof(conn->readError), "%s", strerror(socketError));
+                    *rcPtr = NS_ERROR;
+                    return -1;
+                }
+            }
+        } else {
 #ifdef HAVE_OPENSSL_EVP_H
-        SSL *ssl = (SSL *)sock->arg;
+            SSL *ssl = (SSL *)sock->arg;
+            int sslError;
 
-        received = 0;
-        for (;;) {
-            int n = 0, err;
+            ERR_clear_error();
+            received = SSL_read(ssl, buffer, (int)MIN(length, INT_MAX));
+            socketError = ns_sockerrno;
+            sslError = SSL_get_error(ssl, (int)received);
+            if (sslError == SSL_ERROR_ZERO_RETURN) {
+                received = 0;
+            } else if (sslError != SSL_ERROR_NONE) {
+                if (sslError == SSL_ERROR_WANT_READ) {
+                    direction = NS_SOCK_READ;
+                } else if (sslError == SSL_ERROR_WANT_WRITE) {
+                    direction = NS_SOCK_WRITE;
+                } else if (sslError == SSL_ERROR_SYSCALL && received < 0 && socketError == NS_EINTR) {
+                    interrupted = NS_TRUE;
+                } else {
+                    unsigned long sslCode = ERR_get_error();
 
-            n = SSL_read(ssl, buffer+received, (int)(length - (size_t)received));
-            err = SSL_get_error(ssl, n);
-
-            switch (err) {
-            case SSL_ERROR_NONE:
-                if (n < 0) {
-                    Ns_Log(Error, "SSL_read failed but no error, should not happen");
-                    break;
+                    if (sslCode != 0) {
+                        ERR_error_string_n(sslCode, conn->readError, sizeof(conn->readError));
+                    } else if (sslError == SSL_ERROR_SYSCALL && received < 0 && socketError != 0) {
+                        snprintf(conn->readError, sizeof(conn->readError), "%s", strerror(socketError));
+                    } else {
+                        snprintf(conn->readError, sizeof(conn->readError),
+                                 "TLS read failed (SSL error %d, unexpected EOF or protocol failure)", sslError);
+                    }
+                    *rcPtr = NS_ERROR;
+                    return -1;
                 }
-                received += n;
-                break;
+                received = -1;
+            }
+#else
+            snprintf(conn->readError, sizeof(conn->readError), "TLS support unavailable");
+            *rcPtr = NS_ERROR;
+            return -1;
+#endif
+        }
+        if (received >= 0) {
+            *rcPtr = NS_OK;
+            if (received == 0) {
+                snprintf(conn->readError, sizeof(conn->readError), "peer closed connection (EOF)");
+            }
+            return received;
+        }
 
-            case SSL_ERROR_WANT_READ:
-                if (n < 0) {
-                    continue;
-                }
-                received += n;
+        /* Readiness races and interruptions must not restart the timeout. */
+        Ns_GetTime(&now);
+        if (Ns_DiffTime(&deadline, &now, &remaining) <= 0) {
+            *rcPtr = NS_TIMEOUT;
+        } else if (interrupted) {
+            continue;
+        } else {
+            *rcPtr = Ns_SockTimedWait(sock->sock, direction, &remaining);
+            socketError = ns_sockerrno;
+            if (*rcPtr == NS_ERROR && socketError == NS_EINTR) {
                 continue;
             }
-            break;
         }
-#else
-        received = -1;
-#endif
-    }
-
-    if (received == -1 && errno == EWOULDBLOCK) {
-        Ns_Log(SmtpdDebug, "SmtpdRecv: call again after timeout " NS_TIME_FMT "s",
-               (int64_t)timeoutPtr->sec, timeoutPtr->usec);
-        rc = Ns_SockTimedWait(sock->sock, (unsigned int)NS_SOCK_READ, timeoutPtr);
-        Ns_Log(SmtpdDebug, "SmtpdRecv: sock wait returned %s", Ns_ReturnCodeString(rc));
-        if (rc == NS_OK) {
-            goto again;
+        if (*rcPtr == NS_TIMEOUT) {
+            snprintf(conn->readError, sizeof(conn->readError), "timeout after %d seconds", conn->config->readtimeout);
+            return -1;
+        }
+        if (*rcPtr != NS_OK) {
+            snprintf(conn->readError, sizeof(conn->readError), "socket wait failed: %s", strerror(socketError));
+            return -1;
         }
     }
-
-    *rcPtr = rc;
-    return received;
 }
 
 static ssize_t
@@ -3013,6 +3060,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
 
     Ns_Log(SmtpdDebug,"SmtpdRead");
 
+    *rcPtr = NS_OK;
     nread = len;
     while (len > 0) {
         if (conn->buf.pos > 0) {
@@ -3031,7 +3079,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
         if (len > 0) {
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
-            conn->buf.pos = SmtpdRecv(conn->sock, conn->buf.data, conn->config->bufsize, &timeout, rcPtr);
+            conn->buf.pos = SmtpdRecv(conn, conn->buf.data, conn->config->bufsize, &timeout, rcPtr);
             if (conn->buf.pos <= 0) {
                 return -1;
             }
