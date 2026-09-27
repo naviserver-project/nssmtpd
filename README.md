@@ -313,7 +313,10 @@ webmaster@openacs.org alice@example.net, bob@example.net
 
 The arguments are `format filename domains recipient`; the module appends
 the recipient. Both formats support blank lines, full-line `#` comments,
-indented continuations and comma-separated destinations. Keys are matched
+indented continuations and comma-separated destinations. Virtual maps also
+accept destinations separated by spaces or tabs, including mixtures of
+commas and whitespace. Empty comma-separated entries remain errors.
+Classical aliases files require commas between destinations. Keys are matched
 case-insensitively. Virtual exact-address keys take precedence over
 `@domain` catch-alls. Bare targets acquire the domain of the address being
 expanded. Chains are resolved within the configured domains, with cycle

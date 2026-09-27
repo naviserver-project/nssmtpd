@@ -85,14 +85,24 @@ proc smtpd::filealiases {format filename domains recipient} {
         if {!$valid} {::error "unsupported $format key: $key"}
         if {[dict exists $map $key]} {::error "duplicate alias key: $key"}
         set targets {}
-        foreach target [split $value ,] {
-            set target [string trim $target]
-            # Deliberately exclude programs, files, includes, quoted/display
-            # addresses and Tcl evaluation. This backend only forwards mail.
-            if {![regexp {^[a-zA-Z0-9_.+%-]+(@[a-zA-Z0-9.-]+)?$} $target]} {
-                ::error "unsupported alias destination for $key: $target"
+        foreach group [split $value ,] {
+            set group [string trim $group]
+            if {$group eq ""} {::error "empty alias destination for $key"}
+            # Virtual maps also allow whitespace-separated destinations.
+            # Split comma groups first so empty comma entries remain errors.
+            if {$format eq "virtual"} {
+                set addresses [regexp -all -inline {\S+} $group]
+            } else {
+                set addresses [list $group]
             }
-            lappend targets $target
+            foreach target $addresses {
+                # Deliberately exclude programs, files, includes, quoted/display
+                # addresses and Tcl evaluation. This backend only forwards mail.
+                if {![regexp {^[a-zA-Z0-9_.+%-]+(@[a-zA-Z0-9.-]+)?$} $target]} {
+                    ::error "unsupported alias destination for $key: $target"
+                }
+                lappend targets $target
+            }
         }
         dict set map $key $targets
     }
