@@ -2072,9 +2072,20 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
         return;
     }
     Tcl_DecrRefCount(input);
-    /* The shared Tcl helper has already validated and bounded this list. */
-    (void) Tcl_ListObjGetElements(conn->interp, resolved, &count, &targets);
-    for (i = 0; i < count; i++) {
+    /* Validate the Tcl boundary even if the shared helper is replaced. */
+    if (Tcl_ListObjGetElements(conn->interp, resolved, &count, &targets) != TCL_OK
+        || count < 1) {
+        Ns_Log(Error, "nssmtpd: alias resolver must return a nonempty recipient list");
+        Tcl_DStringSetLength(&conn->reply, 0);
+        Tcl_DStringAppend(&conn->reply, "451 Alias resolution failed\r\n", -1);
+        SmtpdRcptFree(conn, NULL, index, 0u);
+        Tcl_DecrRefCount(resolved);
+        Tcl_ResetResult(conn->interp);
+        return;
+    }
+    /* At least one iteration: head and tail are set before linking the list. */
+    i = 0;
+    do {
         char *address;
         smtpdEmail parsed;
 
@@ -2103,7 +2114,7 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
             head = rcpt;
         }
         tail = rcpt;
-    }
+    } while (++i < count);
     head->prev = recipient->prev;
     tail->next = recipient->next;
     if (recipient->prev != NULL) {
