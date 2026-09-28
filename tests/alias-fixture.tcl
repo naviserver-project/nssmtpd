@@ -1,0 +1,62 @@
+# Test-only callbacks. Loaded into every interpreter of the isolated server.
+source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
+source [file join [ns_config alias-test source] tests alias-sink.tcl]
+
+# Exercise the C boundary when a replacement Tcl helper breaks its contract.
+rename ::smtpd::resolvealiases ::smtpd::test_resolvealiases
+proc ::smtpd::resolvealiases {resolver recipients maxrcpt} {
+    switch -- $recipients {
+        helper-empty@example.test {return {}}
+        helper-malformed@example.test {return "\{"}
+    }
+    return [::smtpd::test_resolvealiases $resolver $recipients $maxrcpt]
+}
+
+proc alias_test_resolver {tag recipient} {
+    if {$tag ne {prefix argument}} {error {command prefix was not preserved}}
+    nsv_incr alias-test calls
+    switch -- $recipient {
+        webmaster@example.test {return {one@remote.test two@remote.test one@remote.test}}
+        mixed@example.test {return {one@remote.test two@other.test}}
+        missing@example.test {return {}}
+        broken@example.test {error {backend unavailable}}
+        invalid@example.test {return [list "bad@remote.test\r\nRCPT TO:<victim@remote.test>"]}
+        empty@example.test {return [list {}]}
+        malformed@example.test {return "\{"}
+        many@example.test {return {a@remote.test b@remote.test c@remote.test d@remote.test}}
+        default {return [list $recipient]}
+    }
+}
+
+proc alias_test_rcpt {id} {
+    set recipient [lindex [ns_smtpd getrcpt $id 0] 0]
+    nsv_lappend alias-test policy $recipient
+    switch -- $recipient {
+        denied@example.test {
+            ns_smtpd delrcpt $id 0
+            ns_smtpd setreply $id "550 Policy rejected\r\n"
+        }
+        deleted@example.test {
+            ns_smtpd delrcpt $id 0
+        }
+        mutate@example.test {
+            ns_smtpd addrcpt $id added@remote.test [ns_smtpd flag VERIFIED]
+            ns_smtpd delrcpt $id $recipient
+        }
+        default {
+            ns_smtpd setflag $id 0 VERIFIED
+            ns_smtpd setrcptdata $id 0 original-policy
+        }
+    }
+}
+
+proc alias_test_data {id} {
+    set recipients {}
+    foreach recipient [ns_smtpd getrcpt $id] {
+        lappend recipients [lindex $recipient 0]
+    }
+    nsv_set alias-test body [lindex [ns_smtpd getbody $id] 0]
+    nsv_set alias-test from [ns_smtpd getfrom $id]
+    nsv_set alias-test recipients [ns_smtpd getrcpt $id]
+    ns_smtpd setreply $id "250 [list $recipients]\r\n"
+}

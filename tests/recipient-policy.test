@@ -1,0 +1,130 @@
+if {![info exists ::env(ALIAS_TEST_MODE)] || ![string match policy* $::env(ALIAS_TEST_MODE)]} {return}
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+set strict [expr {$::env(ALIAS_TEST_MODE) eq "policyexternal"}]
+set trusted [expr {$::env(ALIAS_TEST_MODE) eq "policytrusted"}]
+set aliasfile [file join $::env(ALIAS_TEST_HOME) aliases]
+proc policy_map {{text "known@example.test one@remote.test\nidentity@example.test identity@example.test\nchain@example.test known"}} {
+    set f [open $::aliasfile.new w]
+    try {puts $f $text} finally {close $f}
+    file rename -force $::aliasfile.new $::aliasfile
+}
+proc policy_command {s line} {
+    puts $s $line
+    flush $s
+    if {[gets $s response] < 0} {error "SMTP EOF"}
+    return $response
+}
+proc policy_session {recipients} {
+    set s [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $s -translation crlf -buffering line
+    try {
+        gets $s
+        policy_command $s {EHLO test.example}
+        # Consume the remaining multiline EHLO response.
+        while {[gets $s line] >= 0 && [string index $line 3] eq "-"} {}
+        # A local-looking sender must not grant trust.
+        policy_command $s {MAIL FROM:<sender@example.test>}
+        set replies {}
+        foreach recipient $recipients {
+            lappend replies [string range [policy_command $s "RCPT TO:<$recipient>"] 0 2]
+        }
+        set data [policy_command $s DATA]
+        set delivered {}
+        if {[string range $data 0 2] eq "354"} {
+            puts $s "To: test@example.test\nSubject: policy\n\nBody"
+            set data [policy_command $s .]
+            set delivered [lsort [lindex [string range $data 4 end] 0]]
+        }
+        policy_command $s QUIT
+        return [list $replies [string range $data 0 2] $delivered]
+    } finally {close $s}
+}
+
+test recipient-known {known alias expands for all peer/policy configurations} -body {
+    policy_map
+    policy_session known@example.test
+} -result {250 250 one@remote.test}
+
+test recipient-unknown {unknown original recipient rejected only for untrusted opted-in peer} -body {
+    policy_map
+    set expected [expr {$strict ? "550 503 {}" : "250 250 unknown@example.test"}]
+    expr {[policy_session unknown@example.test] eq $expected}
+} -result 1
+
+test recipient-external {relay authorization remains independent of alias policy} -body {
+    policy_map
+    set expected [expr {$trusted ? "250 250 one@remote.test" : "550 503 {}"}]
+    expr {[policy_session one@remote.test] eq $expected}
+} -result 1
+
+test recipient-identity {identity mapping is a known recipient} -body {
+    policy_map
+    policy_session identity@example.test
+} -result {250 250 identity@example.test}
+
+test recipient-chain {original alias and its chain are accepted} -body {
+    policy_map
+    policy_session chain@example.test
+} -result {250 250 one@remote.test}
+
+test recipient-catchall {virtual catch-all declares otherwise unknown recipients} -body {
+    policy_map "@example.test fallback@remote.test"
+    policy_session unknown@example.test
+} -result {250 250 fallback@remote.test}
+
+test recipient-rollback {rejection preserves previously accepted recipient} -body {
+    policy_map
+    set result [policy_session {known@example.test unknown@example.test}]
+    if {$strict} {
+        expr {$result eq "{250 550} 250 one@remote.test"}
+    } else {
+        expr {$result eq "{250 250} 250 {one@remote.test unknown@example.test}"}
+    }
+} -result 1
+
+test recipient-missing {missing map temporarily rejects, never unknown-user rejection} -body {
+    file delete -force $aliasfile
+    policy_session known@example.test
+} -result {451 503 {}}
+
+test recipient-malformed {malformed map temporarily rejects} -body {
+    policy_map "known@example.test |command"
+    policy_session known@example.test
+} -result {451 503 {}}
+
+test recipient-direct {transport-free resolver remains passthrough for unknown recipients} -body {
+    policy_map
+    ns_smtpd resolve {unknown@example.test one@remote.test}
+} -result {unknown@example.test one@remote.test}
+
+test recipient-send {direct outgoing send ignores incoming recipient policy} -body {
+    policy_map
+    nsv_set alias-sink messages {}
+    nsv_set alias-sink error ""
+    set sink [ns_connchan listen -bind 127.0.0.1 0 alias_sink_accept]
+    try {
+        set message "To: unknown@example.test\r\n\r\nBody"
+        ns_smtpd send sender@example.test {unknown@example.test one@remote.test} message 127.0.0.1 [dict get $sink port]
+        lindex [nsv_get alias-sink messages] 0 0
+    } finally {ns_connchan close [dict get $sink channel]}
+} -result {unknown@example.test one@remote.test}
+
+test recipient-filelookup {classical membership, case folding and out-of-scope bypass} -body {
+    policy_map "known: one@remote.test\nidentity: identity"
+    set results {}
+    foreach address {KNOWN@EXAMPLE.TEST identity@example.test unknown@example.test} {
+        lappend results [smtpd::filealiasexists aliases $aliasfile EXAMPLE.TEST $address]
+    }
+    file delete -force $aliasfile
+    lappend results [smtpd::filealiasexists virtual $aliasfile example.test one@remote.test]
+    set results
+} -result {1 1 0 1}
+
+file delete -force $aliasfile
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

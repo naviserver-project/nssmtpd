@@ -1,0 +1,213 @@
+# Run with run-alias-tests.tcl; does not use the legacy relay test setup.
+if {![info exists ::env(ALIAS_TEST_MODE)]} {return}
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+testConstraint fullsuite [expr {[configure -match] eq "*" && [configure -skip] eq ""}]
+set enabled [expr {$::env(ALIAS_TEST_MODE) in {enabled untrusted}}]
+testConstraint aliases $enabled
+testConstraint noaliases [expr {!$enabled}]
+testConstraint untrusted [expr {$::env(ALIAS_TEST_MODE) eq "untrusted"}]
+testConstraint trusted [expr {$::env(ALIAS_TEST_MODE) ne "untrusted"}]
+nsv_set alias-test calls 0
+nsv_set alias-test policy {}
+nsv_set alias-sink messages {}
+nsv_set alias-sink error ""
+set sink [ns_connchan listen -bind 127.0.0.1 0 alias_sink_accept]
+set ::env(ALIAS_TEST_RELAY) [dict get $sink port]
+
+proc smtp_command {socket command} {
+    puts $socket $command
+    flush $socket
+    if {[gets $socket reply] < 0} {error {unexpected SMTP EOF}}
+    return $reply
+}
+proc smtp_open {} {
+    set socket [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $socket -translation crlf -buffering line
+    gets $socket
+    smtp_command $socket {HELO test.example}
+    smtp_command $socket {MAIL FROM:<sender@remote.test>}
+    return $socket
+}
+proc smtp_deliver {socket} {
+    set result [smtp_command $socket DATA]
+    if {![string match {354 *} $result]} {return $result}
+    puts $socket "From: sender@remote.test\nTo: webmaster@example.test\nSubject: unchanged\n\nBody"
+    return [smtp_command $socket .]
+}
+proc smtp_close {socket} {
+    smtp_command $socket QUIT
+    close $socket
+}
+
+test alias-off-1 {unset/empty hook leaves resolver and duplicates untouched} -constraints noaliases -body {
+    list [ns_smtpd resolve {webmaster@example.test webmaster@example.test}] [nsv_get alias-test calls]
+} -result {{webmaster@example.test webmaster@example.test} 0}
+
+test alias-on-1 {one-to-many expansion and deduplication} -constraints aliases -body {
+    ns_smtpd resolve {webmaster@example.test one@remote.test}
+} -result {one@remote.test two@remote.test}
+
+test alias-on-2 {empty result is an explicit unknown recipient} -constraints aliases -body {
+    catch {ns_smtpd resolve missing@example.test} result options
+    dict get $options -errorcode
+} -result {NSSMTPD ALIAS UNKNOWN}
+
+test alias-on-3 {invalid destinations are rejected} -constraints aliases -body {
+    set errors {}
+    foreach recipient {invalid empty} {
+        catch {ns_smtpd resolve $recipient@example.test} result options
+        lappend errors [dict get $options -errorcode]
+    }
+    set errors
+} -result {{NSSMTPD ALIAS INVALID} {NSSMTPD ALIAS INVALID}}
+
+test alias-on-4 {expansion limit is enforced} -constraints aliases -body {
+    catch {ns_smtpd resolve many@example.test} result options
+    dict get $options -errorcode
+} -result {NSSMTPD ALIAS LIMIT}
+
+test alias-on-5 {backend failure and malformed lists are not passthrough} -constraints aliases -body {
+    list [catch {ns_smtpd resolve broken@example.test}] [catch {ns_smtpd resolve malformed@example.test}]
+} -result {1 1}
+
+test alias-common-1 {address validation does not mutate a shared Tcl value} -body {
+    set address one@remote.test
+    set original $address
+    list [ns_smtpd checkemail $address] $address $original
+} -result {one@remote.test one@remote.test one@remote.test}
+
+test alias-common-2 {outgoing send preserves local data-variable scope} -body {
+    apply {{} {
+        set message "From: sender@remote.test\r\nTo: webmaster@example.test\r\nSubject: unchanged\r\n\r\nBody"
+        ns_smtpd send sender@remote.test webmaster@example.test message 127.0.0.1 $::env(ALIAS_TEST_RELAY)
+    }}
+} -result {}
+
+test alias-on-6 {failed outgoing resolution occurs before any network transaction} -constraints aliases -body {
+    set message Body
+    list [catch {ns_smtpd send sender@remote.test missing@example.test message 127.0.0.1 $::env(ALIAS_TEST_RELAY)}] \
+        [catch {ns_smtpd send sender@remote.test {one@remote.test broken@example.test} message 127.0.0.1 $::env(ALIAS_TEST_RELAY)}]
+} -result {1 1}
+
+test alias-on-10 {multi-recipient expansion cannot use only the first domain route} -constraints aliases -body {
+    ns_smtpd relay set example.test remote.test:127.0.0.1:$::env(ALIAS_TEST_RELAY)
+    set message Body
+    set code [catch {ns_smtpd send sender@remote.test webmaster@example.test message} result]
+    ns_smtpd relay set example.test
+    list $code $result
+} -result {1 {nssmtpd: send: alias delivery requires a default relay or explicit server}}
+
+test alias-on-11 {empty explicit server can fall back without owning its Tcl string} -constraints aliases -body {
+    set message Body
+    catch {ns_smtpd send sender@remote.test plain@remote.test message ""} result
+    set result
+} -result {nssmtpd: send: alias delivery requires a default relay or explicit server}
+
+test alias-common-3 {incoming expansion with existing original-recipient policy} -body {
+    nsv_set alias-test policy {}
+    set socket [smtp_open]
+    set rcpt [smtp_command $socket {RCPT TO:<webmaster@example.test>}]
+    set delivery [smtp_deliver $socket]
+    smtp_close $socket
+    set expected [expr {$enabled ? "one@remote.test two@remote.test" : "webmaster@example.test"}]
+    list [string match {250 *} $rcpt] \
+        [expr {[lindex [string range $delivery 4 end] 0] eq $expected}] \
+        [nsv_get alias-test policy] \
+        [string match {*To: webmaster@example.test*} [nsv_get alias-test body]]
+} -result {1 1 webmaster@example.test 1}
+
+test alias-common-4 {custom RCPT rejection does not call alias resolver} -body {
+    set calls [nsv_get alias-test calls]
+    set socket [smtp_open]
+    set reply [smtp_command $socket {RCPT TO:<denied@example.test>}]
+    set data [smtp_command $socket DATA]
+    smtp_close $socket
+    list $reply [string range $data 0 2] [expr {$calls == [nsv_get alias-test calls]}]
+} -result {{550 Policy rejected} 503 1}
+
+test alias-common-5 {custom callback may delete a recipient without setting a reply} -body {
+    set socket [smtp_open]
+    set reply [smtp_command $socket {RCPT TO:<deleted@example.test>}]
+    set data [smtp_command $socket DATA]
+    smtp_close $socket
+    list $reply [string range $data 0 2]
+} -result {{250 deleted@example.test... Recipient OK} 503}
+
+test alias-common-6 {callback insertion then non-head deletion preserves the list} -body {
+    set socket [smtp_open]
+    smtp_command $socket {RCPT TO:<mutate@example.test>}
+    set delivery [smtp_deliver $socket]
+    smtp_close $socket
+    lindex [string range $delivery 4 end] 0
+} -result added@remote.test
+
+test alias-on-7 {incoming error codes and recipient rollback} -constraints aliases -body {
+    set replies {}
+    foreach {recipient expected} {missing 550 broken 451 invalid 451 empty 451 malformed 451 many 452} {
+        set socket [smtp_open]
+        set reply [smtp_command $socket "RCPT TO:<$recipient@example.test>"]
+        lappend replies [expr {[string range $reply 0 2] == $expected}]
+        lappend replies [string match {503 *} [smtp_command $socket DATA]]
+        smtp_close $socket
+    }
+    set replies
+} -result {1 1 1 1 1 1 1 1 1 1 1 1}
+
+test alias-helper-contract {invalid helper results reject only the current RCPT} -constraints aliases -body {
+    set results {}
+    foreach recipient {helper-empty helper-malformed} {
+        set socket [smtp_open]
+        smtp_command $socket {RCPT TO:<first@example.test>}
+        set reply [smtp_command $socket "RCPT TO:<$recipient@example.test>"]
+        set delivery [smtp_deliver $socket]
+        smtp_close $socket
+        lappend results [string range $reply 0 2] [lindex [string range $delivery 4 end] 0]
+    }
+    set results
+} -result {451 first@example.test 451 first@example.test}
+
+test alias-on-8 {limit accounts for earlier recipients and preserves them on failure} -constraints aliases -body {
+    set socket [smtp_open]
+    smtp_command $socket {RCPT TO:<first@example.test>}
+    smtp_command $socket {RCPT TO:<second@example.test>}
+    set reply [smtp_command $socket {RCPT TO:<webmaster@example.test>}]
+    set delivery [smtp_deliver $socket]
+    smtp_close $socket
+    list [string range $reply 0 2] [lsort [lindex [string range $delivery 4 end] 0]]
+} -result {452 {first@example.test second@example.test}}
+
+test alias-on-9 {reset permits another aliased transaction} -constraints aliases -body {
+    set socket [smtp_open]
+    smtp_command $socket {RCPT TO:<webmaster@example.test>}
+    smtp_command $socket RSET
+    smtp_command $socket {MAIL FROM:<sender@remote.test>}
+    set reply [smtp_command $socket {RCPT TO:<webmaster@example.test>}]
+    set delivery [smtp_deliver $socket]
+    smtp_close $socket
+    list [string range $reply 0 2] [lindex [string range $delivery 4 end] 0]
+} -result {250 {one@remote.test two@remote.test}}
+
+test alias-external-1 {untrusted external relaying is rejected before alias lookup} -constraints untrusted -body {
+    set calls [nsv_get alias-test calls]
+    set socket [smtp_open]
+    set reply [smtp_command $socket {RCPT TO:<unrelated@remote.test>}]
+    smtp_close $socket
+    list [string range $reply 0 2] [expr {$calls == [nsv_get alias-test calls]}]
+} -result {550 1}
+
+test alias-sink-1 {connchan sink sees the intended envelope and unchanged headers} -constraints fullsuite -body {
+    set messages [nsv_get alias-sink messages]
+    set expected [expr {$enabled ? "one@remote.test two@remote.test" : "webmaster@example.test"}]
+    list [nsv_get alias-sink error] [llength $messages] \
+        [expr {[lindex $messages 0 0] eq $expected}] \
+        [expr {[string first "To: webmaster@example.test\r\n" [lindex $messages 0 1]] >= 0}]
+} -result {{} 1 1 1}
+
+ns_connchan close [dict get $sink channel]
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

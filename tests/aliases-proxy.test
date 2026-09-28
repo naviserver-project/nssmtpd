@@ -1,0 +1,49 @@
+# Exercise the actual send -> SMTP listener -> STARTTLS relay path.
+if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ne "proxy"} {return}
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+testConstraint fullsuite [expr {[configure -match] eq "*" && [configure -skip] eq ""}]
+nsv_set alias-test calls 0
+nsv_set alias-test policy {}
+
+test alias-proxy-1 {send through the listener safely resolves aliases twice} -body {
+    set message "From: sender@remote.test\r\nTo: webmaster@example.test\r\n\r\nBody"
+    ns_smtpd send sender@remote.test webmaster@example.test message 127.0.0.1 $::env(ALIAS_TEST_PORT)
+} -result {}
+
+test alias-proxy-2 {mixed target routes fall back to the default relay} -body {
+    # Port 1 deliberately must not be used for a mixed-domain transaction.
+    ns_smtpd relay set example.test remote.test:127.0.0.1:1
+    set socket [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $socket -translation crlf -buffering line
+    gets $socket
+    foreach line {{HELO test.example} {MAIL FROM:<sender@remote.test>} {RCPT TO:<mixed@example.test>} DATA} {
+        puts $socket $line
+        gets $socket reply
+        if {[string index $reply 0] ni {2 3}} {error $reply}
+    }
+    puts $socket "From: sender@remote.test\nTo: mixed@example.test\n\nBody\n."
+    gets $socket reply
+    puts $socket QUIT
+    gets $socket
+    close $socket
+    string range $reply 0 2
+} -result 250
+
+test alias-proxy-3 {native STARTTLS sink receives the expected envelopes and headers} -constraints fullsuite -body {
+    set channel [open [file join $::env(ALIAS_TEST_HOME) sink-messages.list]]
+    fconfigure $channel -translation lf -encoding utf-8
+    set messages [read $channel]
+    close $channel
+    file delete [file join $::env(ALIAS_TEST_HOME) sink-messages.list]
+    list [llength $messages] [lsort [lindex $messages 0 0]] [lsort [lindex $messages 1 0]] \
+        [expr {[string first "To: webmaster@example.test\r\n" [lindex $messages 0 1]] >= 0}] \
+        [expr {[string first "To: mixed@example.test\r\n" [lindex $messages 1 1]] >= 0}]
+} -result {2 {one@remote.test two@remote.test} {one@remote.test two@other.test} 1 1}
+
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

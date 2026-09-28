@@ -1,0 +1,57 @@
+if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ne "io"} {return}
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+
+proc io_send {mode} {
+    nsv_set io-test accepted ""
+    nsv_set alias-sink messages {}
+    nsv_set alias-sink error ""
+    set sink [ns_connchan listen -bind 127.0.0.1 0 [list io_sink_accept $mode]]
+    set port [dict get $sink port]
+    set message "Subject: I/O test\r\n\r\nBody"
+    set start [clock milliseconds]
+    try {
+        set failed [catch {
+            ns_smtpd send sender@example.test target@remote.test message 127.0.0.1 $port
+        } result options]
+        set code [expr {$failed ? [dict get $options -errorcode] : {}}]
+        return [list $failed $result $code [expr {[clock milliseconds]-$start}] $port]
+    } finally {
+        ns_connchan close [dict get $sink channel]
+        set channel [nsv_get io-test accepted]
+        if {$channel ne ""} {catch {ns_connchan close $channel}}
+    }
+}
+
+test smtp-io-timeout {silent peer reports greeting timeout with destination} -body {
+    lassign [io_send silent] failed result code elapsed port
+    list $failed $code [string match "*greeting*127.0.0.1:$port*timeout after 3 seconds*" $result] \
+        [expr {$elapsed >= 2500 && $elapsed < 8000}]
+} -result {1 {NSSMTPD READ TIMEOUT} 1 1}
+
+test smtp-io-eof {EOF is not reported as stale EAGAIN} -body {
+    lassign [io_send eof] failed result code elapsed port
+    list $failed $code [string match {*greeting*peer closed connection (EOF)*} $result]
+} -result {1 {NSSMTPD READ EOF} 1}
+
+test smtp-io-partial {truncated greeting reports EOF} -body {
+    lassign [io_send partial] failed result code
+    list $failed $code [string match {*peer closed connection (EOF)*} $result]
+} -result {1 {NSSMTPD READ EOF} 1}
+
+test smtp-io-helo {later reply EOF has its SMTP phase} -body {
+    lassign [io_send helo-eof] failed result code
+    list $failed $code [string match {*read HELO reply*peer closed connection (EOF)*} $result]
+} -result {1 {NSSMTPD READ EOF} 1}
+
+test smtp-io-delayed {would-block followed by greeting succeeds; recycled connection state cleared} -body {
+    lassign [io_send delayed] failed result code elapsed
+    list $failed [llength [nsv_get alias-sink messages]] [nsv_get alias-sink error]
+} -result {0 1 {}}
+
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

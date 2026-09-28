@@ -1,0 +1,191 @@
+# Both text formats run through the configured module hook in separate servers.
+if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ni {files filevirtual}} {return}
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+set format [expr {$::env(ALIAS_TEST_MODE) eq "files" ? "aliases" : "virtual"}]
+testConstraint virtual [expr {$format eq "virtual"}]
+set aliasfile [file join $::env(ALIAS_TEST_HOME) aliases]
+proc write_map {text} {
+    set channel [open $::aliasfile.new w]
+    try {puts $channel $text} finally {close $channel}
+    file rename -force $::aliasfile.new $::aliasfile
+}
+proc entries {pairs} {
+    set text "# Forwarding addresses\n\n"
+    foreach {key targets} $pairs {
+        if {$::format eq "aliases"} {
+            append text "$key: $targets\n"
+        } else {
+            append text "$key@example.test $targets\n"
+        }
+    }
+    return $text
+}
+proc normal_map {} {
+    write_map [entries {webmaster {team,
+    two@remote.test} team one@remote.test identity identity}]
+}
+proc recipient_reply {} {
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    try {
+        gets $channel
+        foreach command {{HELO example.test} {MAIL FROM:<sender@remote.test>} {RCPT TO:<webmaster@example.test>}} {
+            puts $channel $command
+            flush $channel
+            gets $channel reply
+        }
+        return [string range $reply 0 2]
+    } finally {close $channel}
+}
+
+test file-alias-1 {comments, continuation, bare targets, chains and deduplication} -body {
+    normal_map
+    ns_smtpd resolve {webmaster@example.test one@remote.test}
+} -result {one@remote.test two@remote.test}
+
+test file-alias-2 {case insensitive keys and configured domains} -body {
+    normal_map
+    ns_smtpd resolve WEBMASTER@EXAMPLE.TEST
+} -result {one@remote.test two@remote.test}
+
+test file-alias-3 {unmapped addresses and other domains pass through} -body {
+    normal_map
+    ns_smtpd resolve {unknown@example.test webmaster@remote.test}
+} -result {unknown@example.test webmaster@remote.test}
+
+test file-alias-4 {identity destination terminates expansion} -body {
+    normal_map
+    ns_smtpd resolve identity@example.test
+} -result identity@example.test
+
+test file-alias-5 {cycles fail without falling back} -body {
+    write_map [entries {webmaster team team webmaster}]
+    list [catch {ns_smtpd resolve webmaster@example.test} message] $message [recipient_reply]
+} -result {1 {alias cycle at webmaster@example.test} 451}
+
+test file-alias-6 {unsupported destinations are errors, never executable} -body {
+    set results {}
+    foreach value {{|command} /tmp/mail :include:/tmp/list {"User" <a@remote.test>} {a@remote.test,} {$env(HOME)}} {
+        write_map [entries [list webmaster $value]]
+        lappend results [catch {ns_smtpd resolve webmaster@example.test}]
+    }
+    set results
+} -result {1 1 1 1 1 1}
+
+test file-alias-7 {duplicate keys fail case insensitively} -body {
+    write_map [entries {webmaster a@remote.test WEBMASTER b@remote.test}]
+    catch {ns_smtpd resolve webmaster@example.test} message
+    string match {*duplicate*} $message
+} -result 1
+
+test file-alias-8 {orphan continuation and malformed lines fail} -body {
+    set results {}
+    foreach text {{  webmaster a@remote.test} {no separator here}} {
+        write_map $text
+        lappend results [catch {ns_smtpd resolve webmaster@example.test}]
+    }
+    set results
+} -result {1 1}
+
+test file-alias-9 {missing file fails in scope, external recipient bypasses file} -body {
+    file delete -force $aliasfile
+    list [catch {ns_smtpd resolve webmaster@example.test}] [recipient_reply] [ns_smtpd resolve webmaster@remote.test]
+} -result {1 451 webmaster@remote.test}
+
+test file-alias-10 {replacement file is observed on next lookup} -body {
+    normal_map
+    set before [ns_smtpd resolve webmaster@example.test]
+    write_map [entries {webmaster new@remote.test}]
+    list $before [ns_smtpd resolve webmaster@example.test]
+} -result {{one@remote.test two@remote.test} new@remote.test}
+
+test file-alias-11 {module recipient limit still applies} -body {
+    write_map [entries {webmaster {a@remote.test,b@remote.test,c@remote.test,d@remote.test}}]
+    catch {ns_smtpd resolve webmaster@example.test} message options
+    list [dict get $options -errorcode] [recipient_reply]
+} -result {{NSSMTPD ALIAS LIMIT} 452}
+
+test file-alias-12 {long chains fail within bounded depth} -body {
+    set pairs {}
+    for {set i 0} {$i < 40} {incr i} {lappend pairs user$i user[expr {$i+1}]}
+    write_map [entries $pairs]
+    catch {ns_smtpd resolve user0@example.test} message
+    string match {*resolver limit*} $message
+} -result 1
+
+test file-alias-13 {virtual exact entry precedes catch-all; identity exempts destination} -constraints virtual -body {
+    write_map "webmaster@example.test one@remote.test\n@example.test fallback@remote.test\nidentity@example.test identity@example.test"
+    ns_smtpd resolve {webmaster@example.test unknown@example.test identity@example.test}
+} -result {one@remote.test fallback@remote.test identity@example.test}
+
+test file-alias-work {wide recursive maps have a total work bound} -body {
+    set pairs {}
+    for {set i 0} {$i < 15} {incr i} {
+        set next user[expr {$i+1}]
+        lappend pairs user$i "$next,$next"
+    }
+    write_map [entries $pairs]
+    catch {ns_smtpd resolve user0@example.test} message
+    set message
+} -result {alias expansion exceeds file resolver limit}
+
+test file-virtual-spaces {space-separated group does not block unrelated lookup} -constraints virtual -body {
+    write_map "gustafn@example.test neumann@remote.test\nconference2026@example.test bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test"
+    list [ns_smtpd resolve gustafn@example.test] \
+        [smtpd::filealiases virtual $aliasfile {example.test} conference2026@example.test]
+} -result {neumann@remote.test {bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test}}
+
+test file-virtual-mixed {spaces, tabs, commas, continuations and duplicates} -constraints virtual -body {
+    write_map "webmaster@example.test one@remote.test\ttwo@remote.test,\n    three@remote.test one@remote.test"
+    ns_smtpd resolve webmaster@example.test
+} -result {one@remote.test two@remote.test three@remote.test}
+
+test file-alias-empty-groups {whitespace must not hide empty comma entries} -body {
+    set results {}
+    foreach value {{,one@remote.test} {one@remote.test, ,two@remote.test} {one@remote.test, }} {
+        write_map [entries [list webmaster $value]]
+        lappend results [catch {ns_smtpd resolve webmaster@example.test}]
+    }
+    set results
+} -result {1 1 1}
+
+test file-alias-14 {actual outgoing envelope uses file aliases and preserves header} -body {
+    normal_map
+    nsv_set alias-sink messages {}
+    nsv_set alias-sink error ""
+    set sink [ns_connchan listen -bind 127.0.0.1 0 alias_sink_accept]
+    try {
+        set message "To: webmaster@example.test\r\n\r\nBody"
+        ns_smtpd send sender@remote.test webmaster@example.test message 127.0.0.1 [dict get $sink port]
+        set captured [lindex [nsv_get alias-sink messages] 0]
+        list [lindex $captured 0] [string match {*To: webmaster@example.test*} [lindex $captured 1]] [nsv_get alias-sink error]
+    } finally {ns_connchan close [dict get $sink channel]}
+} -result {{one@remote.test two@remote.test} 1 {}}
+
+test file-alias-15 {actual incoming DATA sees file-expanded recipients} -body {
+    normal_map
+    # Submit an original address over raw SMTP so only the receiver expands it.
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    try {
+        gets $channel
+        foreach command {{HELO example.test} {MAIL FROM:<sender@remote.test>} {RCPT TO:<webmaster@example.test>} DATA} {
+            puts $channel $command
+            flush $channel
+            gets $channel
+        }
+        puts $channel "To: webmaster@example.test\n\nBody\n."
+        flush $channel
+        gets $channel reply
+        list [string range $reply 0 2] [lsort [lmap rcpt [nsv_get alias-test recipients] {lindex $rcpt 0}]]
+    } finally {close $channel}
+} -result {250 {one@remote.test two@remote.test}}
+
+set failures $::tcltest::numTests(Failed)
+file delete -force $aliasfile
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever
