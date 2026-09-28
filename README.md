@@ -326,8 +326,8 @@ Duplicate destinations are removed; the module also enforces `maxrcpt`.
 
 Unmapped addresses and addresses outside `domains` pass through. This
 provider does not assert that an unmapped local mailbox exists: deployments
-that need unknown-user rejection must supply that policy in `rcptproc` or a
-custom resolver. Listing a domain here does not authorize incoming relaying;
+that need unknown-user rejection can enable the incoming recipient policy
+below. Listing a domain here does not authorize incoming relaying;
 the existing `relaydomains` and recipient policy checks still apply.
 
 This is an **address-forwarding subset**, not a full Postfix map interpreter.
@@ -347,6 +347,60 @@ visible between recipients of the same transaction. Large maps or frequent
 lookups can use a custom cached callback with the same interface. Nothing is
 read unless this callback is explicitly configured. Both sending and receiving
 use it; no PostgreSQL or other database dependency is added.
+
+### Optional incoming recipient validation
+
+The supplied `smtpd::rcpt` supports an optional `recipientcheckproc` command
+prefix. Unset or empty preserves its existing behavior. The check runs only
+for untrusted SMTP peers, after the module's relay authorization check and
+before alias expansion. Trust is determined by the connection's `LOCAL` flag
+(the `localdomains` peer-address configuration), never by the envelope sender.
+Direct `ns_smtpd send` and `ns_smtpd resolve` do not invoke this policy.
+
+For an alias-only incoming domain, add the following to the existing module
+section, retaining its listener, relay and other settings:
+
+```tcl
+ns_section "ns/server/$server/module/nssmtpd" {
+    ns_param rcptproc smtpd::rcpt
+    ns_param aliasproc [list smtpd::filealiases virtual \
+        /var/www/openacs/etc/mail/virtual {openacs.org}]
+    ns_param recipientcheckproc [list smtpd::filealiasexists virtual \
+        /var/www/openacs/etc/mail/virtual {openacs.org}]
+}
+```
+
+`filealiasexists` shares the parser and matching order with `filealiases`.
+An exact entry (including an identity mapping) or virtual catch-all declares
+the original recipient known. An unknown original recipient in the configured
+domains is rejected with `550 Unknown recipient`. Targets reached during alias
+expansion need not themselves have map entries. Addresses outside the configured
+domains pass this check; the existing relay authorization still applies.
+The domains list should contain only domains where map membership defines
+valid recipients, not domains with unlisted local mailboxes.
+
+Trusted peers bypass this additional check and retain passthrough behavior.
+Missing or malformed files and callback errors produce `451 Recipient lookup
+failed`. Rejection removes only the current recipient and preserves previously
+accepted recipients. Ordinary alias expansion errors retain their existing
+behavior, including for trusted submissions.
+
+The callback receives one original envelope address and must return a Tcl
+boolean: true to continue, false for unknown recipient. Errors or nonboolean
+results cause temporary failure. It must not modify SMTP sessions or send mail.
+It can use any backend; no database is required. Membership validation and
+expansion perform separate file reads, so a replacement can become visible
+between them. Use a stable map during a transaction if a consistent snapshot
+across both operations is required.
+
+This is a Tcl policy setting used by the supplied `smtpd::rcpt`, not an
+unconditional C-layer hook. Existing custom `rcptproc` implementations remain
+unchanged. To adopt it in a custom callback, call this before modifying the
+current recipient or setting its reply:
+
+```tcl
+if {![smtpd::checkrecipient $id]} {return}
+```
 
 To run the isolated tests (Tcl 8.6+, OpenSSL CLI and an installed
 NaviServer with OpenSSL support needed):

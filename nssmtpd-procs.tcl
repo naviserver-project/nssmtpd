@@ -49,6 +49,25 @@ proc smtpd::filealiases {format filename domains recipient} {
     set domains [lmap domain $domains {string tolower $domain}]
     set domain [string tolower [lindex [split $recipient @] end]]
     if {$domain ni $domains} {return [list $recipient]}
+    set map [smtpd::ReadAliasFile $format $filename]
+    set budget 10000
+    return [smtpd::ExpandFileAlias $format $map $domains $recipient {} budget]
+}
+
+# Test membership, not whether expansion changes the address. Identity
+# mappings and virtual catch-alls are valid recipient declarations.
+proc smtpd::filealiasexists {format filename domains recipient} {
+    set domains [lmap domain $domains {string tolower $domain}]
+    set domain [string tolower [lindex [split $recipient @] end]]
+    if {$domain ni $domains} {return 1}
+    set map [smtpd::ReadAliasFile $format $filename]
+    return [expr {[smtpd::FileAliasKey $format $map $recipient] ne ""}]
+}
+
+proc smtpd::ReadAliasFile {format filename} {
+    if {$format ni {aliases virtual}} {
+        ::error "alias file format must be aliases or virtual"
+    }
     set channel [open $filename r]
     try {
         fconfigure $channel -encoding utf-8
@@ -106,8 +125,17 @@ proc smtpd::filealiases {format filename domains recipient} {
         }
         dict set map $key $targets
     }
-    set budget 10000
-    return [smtpd::ExpandFileAlias $format $map $domains $recipient {} budget]
+    return $map
+}
+
+# Shared matching order for validation and expansion.
+proc smtpd::FileAliasKey {format map recipient} {
+    set address [string tolower $recipient]
+    lassign [split $address @] local domain
+    set key [expr {$format eq "aliases" ? $local : $address}]
+    if {[dict exists $map $key]} {return $key}
+    if {$format eq "virtual" && [dict exists $map @$domain]} {return @$domain}
+    return ""
 }
 
 # Bound both chain depth and total work, including wide recursive maps.
@@ -119,9 +147,8 @@ proc smtpd::ExpandFileAlias {format map domains recipient path budgetVar} {
     set address [string tolower $recipient]
     lassign [split $address @] local domain
     if {$domain ni $domains} {return [list $recipient]}
-    set key [expr {$format eq "aliases" ? $local : $address}]
-    if {![dict exists $map $key] && $format eq "virtual"} {set key @$domain}
-    if {![dict exists $map $key]} {return [list $recipient]}
+    set key [smtpd::FileAliasKey $format $map $recipient]
+    if {$key eq ""} {return [list $recipient]}
     if {$address in $path} {::error "alias cycle at $recipient"}
     lappend path $address
     set result {}
@@ -259,7 +286,34 @@ proc smtpd::mail { id } {
     ns_log Debug(smtpd) "### smtpd::mail $id"
 }
 
+# A false result means the current recipient was removed and a reply set.
+# Custom rcptproc implementations may call this helper explicitly.
+proc smtpd::checkrecipient {id} {
+    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd recipientcheckproc ""]
+    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {
+        return 1
+    }
+    set recipient [lindex [ns_smtpd getrcpt $id 0] 0]
+    try {
+        set accepted [uplevel #0 [list {*}$prefix $recipient]]
+        if {![string is boolean -strict $accepted]} {
+            ::error "recipientcheckproc must return a boolean"
+        }
+        if {$accepted} {
+            return 1
+        }
+        set reply "550 Unknown recipient\r\n"
+    } on error {message options} {
+        ns_log Error "smtpd recipient check failed: $message"
+        set reply "451 Recipient lookup failed\r\n"
+    }
+    ns_smtpd delrcpt $id 0
+    ns_smtpd setreply $id $reply
+    return 0
+}
+
 proc smtpd::rcpt { id } {
+    if {![smtpd::checkrecipient $id]} {return}
 
     # Current recipient
     lassign [ns_smtpd getrcpt $id 0] user_email user_flags spam_score
