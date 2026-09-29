@@ -216,6 +216,13 @@ typedef struct _smtpdConfig {
         int  fd;
         bool logging;
     } sendlog;
+    struct {
+        Ns_Mutex lock;
+        const char *filename, *rollfmt;
+        int fd, maxbackup;
+        bool enabled;
+        Ns_Time started;
+    } eventlog;
 } smtpdConfig;
 
 typedef struct _smtpdConn {
@@ -229,6 +236,8 @@ typedef struct _smtpdConn {
     char writeError[256];
     Ns_ReturnCode ioStatus;
     bool writing, peerFailure, lineTooLong;
+    unsigned int transaction;
+    const char *eventReason;
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -487,6 +496,11 @@ static Ns_SchedProc SchedLogRollCallback;
 static Ns_LogCallbackProc SendLogRoll;
 static Ns_LogCallbackProc SendLogOpen;
 static Ns_LogCallbackProc SendLogClose;
+static Ns_LogCallbackProc EventLogOpen, EventLogClose;
+static void EventLogRoll(void *arg, int id);
+static void SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details);
+static void EventPut(Tcl_Obj *dict, const char *key, const char *value);
+static void SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
@@ -713,6 +727,49 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     }
 
     serverPtr->deferaccept = Ns_ConfigBool(section, "deferaccept", NS_FALSE);
+    serverPtr->eventlog.fd = NS_INVALID_FD;
+    Ns_MutexSetName2(&serverPtr->eventlog.lock, "smtp:eventlog", module);
+    Ns_GetTime(&serverPtr->eventlog.started);
+    serverPtr->eventlog.enabled = Ns_ConfigBool(section, "eventlogging", NS_FALSE);
+    if (serverPtr->eventlog.enabled) {
+        Tcl_DString path;
+        const char *filename = Ns_ConfigString(section, "eventlogfile", NULL);
+
+        Tcl_DStringInit(&path);
+        if (filename == NULL) {
+            Ns_DStringPrintf(&path, "smtpevents-%s.log", server);
+            filename = path.string;
+        }
+        if (Ns_PathIsAbsolute(filename)) {
+            serverPtr->eventlog.filename = ns_strdup(filename);
+        } else {
+#if NS_VERSION_NUM >= 50000
+            serverPtr->eventlog.filename = Ns_ConfigFilename(section, "eventlogfile", 12,
+                                                              Ns_ServerLogDir(server), filename,
+                                                              NS_FALSE, NS_FALSE);
+#else
+            Tcl_DString full;
+            Tcl_DStringInit(&full);
+            Ns_HomePath(&full, "logs", filename, (char *)0L);
+            serverPtr->eventlog.filename = Ns_DStringExport(&full);
+#endif
+        }
+        Ns_SetIUpdateSz(Ns_ConfigCreateSection(section), "eventlogfile", 12,
+                        serverPtr->eventlog.filename, TCL_INDEX_NONE);
+        Tcl_DStringFree(&path);
+        serverPtr->eventlog.rollfmt = ns_strcopy(Ns_ConfigGetValue(section, "eventlogrollfmt"));
+        serverPtr->eventlog.maxbackup = Ns_ConfigIntRange(section, "eventlogmaxbackup", 100, 1, INT_MAX);
+        if (EventLogOpen(serverPtr) != NS_OK) {
+            return NS_ERROR;
+        }
+        if (Ns_ConfigBool(section, "eventlogroll", NS_TRUE)) {
+            Ns_ScheduleDaily(EventLogRoll, serverPtr, 0,
+                             Ns_ConfigIntRange(section, "eventlogrollhour", 0, 0, 23), 0, NULL);
+        }
+        if (Ns_ConfigBool(section, "eventlogrollonsignal", NS_FALSE)) {
+            Ns_RegisterAtSignal((Ns_Callback *)(ns_funcptr_t)EventLogRoll, serverPtr);
+        }
+    }
     serverPtr->nodelay = Ns_ConfigBool(section, "nodelay", NS_FALSE);
     serverPtr->server = server;
     Tcl_InitHashTable(&serverPtr->sessions, TCL_ONE_WORD_KEYS);
@@ -1602,6 +1659,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             SmtpdConnReset(conn);
             /* Check for optional SIZE parameter */
+            conn->transaction++;
             if ((data = SmtpdStrPos(&conn->line.string[10], " SIZE="))) {
                 if (atoi(data + 6) > config->maxdata) {
                     if (SmtpdPuts(conn, "552 Too much mail data\r\n") != NS_OK) {
@@ -1668,13 +1726,16 @@ static void SmtpdThread(smtpdConn *conn)
             unsigned int   flags = 0u;
 
             conn->cmd = SMTP_RCPT;
+            conn->eventReason = "recipient-policy";
             if ((conn->flags & SMTPD_GOTMAIL) == 0u) {
+                SmtpdRecipientEvent(conn, &conn->line.string[8], 503, "mail-required");
                 if (SmtpdPuts(conn, "503 Need MAIL before RCPT\r\n") != NS_OK) {
                     goto error;
                 }
                 continue;
             }
             if (conn->rcpt.count >= config->maxrcpt) {
+                SmtpdRecipientEvent(conn, &conn->line.string[8], 452, "recipient-limit");
                 if (SmtpdPuts(conn, "452 Too many recipients\r\n") != NS_OK) {
                     goto error;
                 }
@@ -1697,6 +1758,13 @@ static void SmtpdThread(smtpdConn *conn)
                     Ns_DStringPrintf(&conn->reply, "550 %s@%s... Relaying denied\r\n", addr.mailbox, addr.domain);
                     Ns_Log(Notice, "nssmtpd: %ld: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
                            conn->id, conn->host, Ns_ConnPeerAddr(nsconn), addr.mailbox, addr.domain);
+                    if (config->eventlog.enabled) {
+                        Tcl_DString address;
+                        Tcl_DStringInit(&address);
+                        Ns_DStringPrintf(&address, "%s@%s", addr.mailbox, addr.domain);
+                        SmtpdRecipientEvent(conn, address.string, 550, "relay-denied");
+                        Tcl_DStringFree(&address);
+                    }
                     if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                         goto error;
                     }
@@ -1706,6 +1774,7 @@ static void SmtpdThread(smtpdConn *conn)
                 sprintf(data, "%s@%s", addr.mailbox, addr.domain);
                 Ns_StrToLower(data);
             } else {
+                SmtpdRecipientEvent(conn, data, 553, "invalid-address");
                 if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                     goto error;
                 }
@@ -1733,6 +1802,7 @@ static void SmtpdThread(smtpdConn *conn)
              * original recipient. A resolution failure already set the reply. */
             if (config->aliasproc == NULL || *config->aliasproc == '\0' || resolved != NULL) {
                 if (SmtpdConnEval(conn, config->rcptproc) != TCL_OK) {
+                    SmtpdRecipientEvent(conn, data, 421, "callback-error");
                     if (resolved != NULL) {
                         Tcl_DecrRefCount(resolved);
                     }
@@ -1752,6 +1822,7 @@ static void SmtpdThread(smtpdConn *conn)
             if (!conn->reply.length) {
                 Ns_DStringPrintf(&conn->reply, "250 %s... Recipient OK\r\n", data);
             }
+            SmtpdRecipientEvent(conn, data, atoi(conn->reply.string), conn->eventReason);
             ns_free(data);
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 goto error;
@@ -1875,15 +1946,21 @@ static void SmtpdThread(smtpdConn *conn)
 static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
 {
     smtpdConn     *conn;
+    smtpdConn    **link;
     Tcl_HashEntry *rec;
     int            new;
 
     Ns_Log(SmtpdDebug,"SmtpdConnCreate");
 
     Ns_MutexLock(&connLock);
-    conn = connList;
+    /* A cached connection owns its configuration and receive-buffer capacity.
+     * Never reuse it across servers (including their policy and event logs). */
+    for (link = &connList; *link != NULL && (*link)->config != config; link = &(*link)->next) {
+        /* Find a connection allocated for this configuration. */
+    }
+    conn = *link;
     if (conn != NULL) {
-        connList = connList->next;
+        *link = conn->next;
     }
     Ns_MutexUnlock(&connLock);
 
@@ -1901,6 +1978,8 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
 
     conn->sock = sock;
     conn->cmd = SMTP_READ;
+    conn->transaction = 0;
+    conn->eventReason = "recipient-policy";
     conn->sock->arg = NULL;
     conn->readError[0] = '\0';
     conn->writeError[0] = '\0';
@@ -2061,6 +2140,7 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
         Tcl_Obj *options = Tcl_GetReturnOptions(conn->interp, TCL_ERROR);
         Tcl_Obj *key = Tcl_NewStringObj("-errorcode", -1), *errorCode = NULL;
         const char *reply = "451 Alias resolution failed\r\n";
+        conn->eventReason = "alias-error";
 
         Tcl_IncrRefCount(options);
         Tcl_IncrRefCount(key);
@@ -2070,8 +2150,10 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
 
             if (strcmp(code, "NSSMTPD ALIAS UNKNOWN") == 0) {
                 reply = "550 Unknown recipient\r\n";
+                conn->eventReason = "unknown-recipient";
             } else if (strcmp(code, "NSSMTPD ALIAS LIMIT") == 0) {
                 reply = "452 Too many recipients after alias expansion\r\n";
+                conn->eventReason = "alias-limit";
             }
         }
         (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd alias resolution)");
@@ -2088,6 +2170,7 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
     if (Tcl_ListObjGetElements(conn->interp, resolved, &count, &targets) != TCL_OK
         || count < 1) {
         Ns_Log(Error, "nssmtpd: alias resolver must return a nonempty recipient list");
+        conn->eventReason = "alias-error";
         Tcl_DStringSetLength(&conn->reply, 0);
         Tcl_DStringAppend(&conn->reply, "451 Alias resolution failed\r\n", -1);
         SmtpdRcptFree(conn, NULL, 0, 0u);
@@ -2123,6 +2206,7 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient, Tcl_Obj *resolved)
     }
     /* A custom rcptproc may have added recipients since the preflight. */
     if (count > conn->config->maxrcpt - conn->rcpt.count + 1) {
+        conn->eventReason = "alias-limit";
         Tcl_DStringSetLength(&conn->reply, 0);
         Tcl_DStringAppend(&conn->reply, "452 Too many recipients after alias expansion\r\n", -1);
         SmtpdRcptFree(conn, NULL, index, 0u);
@@ -2171,6 +2255,15 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient, Tcl_Obj *resolved)
         recipient->next->prev = tail;
     }
     conn->rcpt.count += (int)count - 1;
+    if (conn->config->eventlog.enabled
+        && (count != 1 || strcmp(recipient->addr, Tcl_GetString(targets[0])) != 0)) {
+        Tcl_Obj *details = Tcl_NewDictObj();
+        EventPut(details, "recipient", recipient->addr);
+        EventPut(details, "action", "expand");
+        EventPut(details, "reason", "alias");
+        Tcl_DictObjPut(NULL, details, Tcl_NewStringObj("targets", -1), resolved);
+        SmtpdEvent(conn, "alias", details);
+    }
     ns_free_const_local(recipient->addr);
     ns_free_const_local(recipient->data);
     ns_free_const_local(recipient->relay.host);
@@ -2689,6 +2782,121 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
  *----------------------------------------------------------------------
  */
 
+
+static Ns_ReturnCode
+EventLogOpen(void *arg)
+{
+    smtpdConfig *config = arg;
+    config->eventlog.fd = ns_open(config->eventlog.filename,
+                                  O_APPEND | O_WRONLY | O_CREAT | O_CLOEXEC, 0640);
+    if (config->eventlog.fd == NS_INVALID_FD) {
+        Ns_Log(Error, "nssmtpd: cannot open event log %s: %s", config->eventlog.filename, strerror(errno));
+        return NS_ERROR;
+    }
+    return NS_OK;
+}
+
+static Ns_ReturnCode
+EventLogClose(void *arg)
+{
+    smtpdConfig *config = arg;
+    if (config->eventlog.fd != NS_INVALID_FD) {
+        ns_close(config->eventlog.fd);
+        config->eventlog.fd = NS_INVALID_FD;
+    }
+    return NS_OK;
+}
+
+static void
+EventLogRoll(void *arg, int UNUSED(id))
+{
+    smtpdConfig *config = arg;
+    Ns_MutexLock(&config->eventlog.lock);
+    (void)Ns_RollFileCondFmt(EventLogOpen, EventLogClose, config,
+                           config->eventlog.filename, config->eventlog.rollfmt,
+                           config->eventlog.maxbackup);
+    Ns_MutexUnlock(&config->eventlog.lock);
+}
+
+static void
+EventPut(Tcl_Obj *dict, const char *key, const char *value)
+{
+    Tcl_DictObjPut(NULL, dict, Tcl_NewStringObj(key, -1), Tcl_NewStringObj(value != NULL ? value : "", -1));
+}
+
+/* Quote list elements without braces: even nested dictionaries and newlines
+ * stay on one physical line. Readers parse lists/dicts, never evaluate them. */
+static void
+EventElement(Tcl_DString *line, const char *value)
+{
+    int flags = 0;
+    TCL_SIZE_T length = Tcl_ScanElement(value, &flags);
+    char *quoted = ns_malloc(strlen(value) * 4u + 3u);
+    length = Tcl_ConvertElement(value, quoted, flags | TCL_DONT_USE_BRACES);
+    if (line->length != 0) Tcl_DStringAppend(line, " ", 1);
+    Tcl_DStringAppend(line, quoted, length);
+    ns_free(quoted);
+}
+
+static void
+SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
+{
+    smtpdConfig *config = conn->config;
+    Tcl_IncrRefCount(details);
+    if (config->eventlog.enabled) {
+        Tcl_Obj *record = Tcl_NewDictObj(), **elements;
+        TCL_SIZE_T count, i;
+        Tcl_DString line;
+        Ns_Time now;
+        Ns_ReturnCode status = NS_ERROR;
+        char buffer[100];
+
+        Tcl_IncrRefCount(record);
+        Ns_GetTime(&now);
+        EventPut(record, "version", "1");
+        Tcl_DictObjPut(NULL, record, Tcl_NewStringObj("timestamp", -1),
+                       Tcl_NewWideIntObj((Tcl_WideInt)now.sec * 1000 + now.usec / 1000));
+        EventPut(record, "server", config->server);
+        snprintf(buffer, sizeof(buffer), "%lld-%ld-%d-%lu",
+                 (long long)config->eventlog.started.sec, (long)config->eventlog.started.usec,
+                 getpid(), (unsigned long)conn->id);
+        EventPut(record, "session", buffer);
+        snprintf(buffer, sizeof(buffer), "%u", conn->transaction);
+        EventPut(record, "transaction", buffer);
+        EventPut(record, "peer", Ns_ConnPeerAddr(Ns_GetConn()));
+        EventPut(record, "sender", conn->from.addr);
+        EventPut(record, "event", event);
+        Tcl_DictObjPut(NULL, record, Tcl_NewStringObj("details", -1), details);
+        Tcl_DStringInit(&line);
+        Tcl_ListObjGetElements(NULL, record, &count, &elements);
+        for (i = 0; i < count; i++) EventElement(&line, Tcl_GetString(elements[i]));
+        Tcl_DStringAppend(&line, "\n", 1);
+        Ns_MutexLock(&config->eventlog.lock);
+        if (config->eventlog.fd != NS_INVALID_FD) {
+            status = NsAsyncWrite(config->eventlog.fd, line.string, (size_t)line.length);
+        }
+        Ns_MutexUnlock(&config->eventlog.lock);
+        if (status != NS_OK) {
+            Ns_Log(Error, "nssmtpd: event log write failed: %s", config->eventlog.filename);
+        }
+        Tcl_DStringFree(&line);
+        Tcl_DecrRefCount(record);
+    }
+    Tcl_DecrRefCount(details);
+}
+
+static void
+SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason)
+{
+    if (conn->config->eventlog.enabled) {
+        Tcl_Obj *details = Tcl_NewDictObj();
+        EventPut(details, "recipient", recipient);
+        EventPut(details, "action", code / 100 == 2 ? "accept" : code / 100 == 4 ? "defer" : "reject");
+        EventPut(details, "reason", reason);
+        Tcl_DictObjPut(NULL, details, Tcl_NewStringObj("code", -1), Tcl_NewIntObj(code));
+        SmtpdEvent(conn, "recipient", details);
+    }
+}
 
 static void
 SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
@@ -4589,6 +4797,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdTrainSpam,
         cmdCheckVirus,
         cmdSessions,
+        cmdLogEvent,
         cmdGetHdr,
         cmdGetHdrs,
         cmdGetBody,
@@ -4626,6 +4835,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "trainspam",
         "checkvirus",
         "sessions",
+        "logevent",
         "gethdr",
         "gethdrs",
         "getbody",
@@ -4658,6 +4868,10 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
 
     if (cmd > cmdSessions) {
         int i;
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "session ?args ...?");
+            return TCL_ERROR;
+        }
         if (Tcl_GetIntFromObj(interp, objv[2], &i) != TCL_OK) {
             return TCL_ERROR;
         } else {
@@ -4675,6 +4889,28 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
     }
 
     switch (cmd) {
+    case cmdLogEvent: {
+        TCL_SIZE_T size, length;
+        const char *event, *text;
+        if (objc != 5) {
+            Tcl_WrongNumArgs(interp, 2, objv, "session event detailsDict");
+            return TCL_ERROR;
+        }
+        event = Tcl_GetString(objv[3]);
+        text = Tcl_GetStringFromObj(objv[4], &length);
+        if (conn->interp != interp || Ns_GetConn() == NULL) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("logevent requires the current SMTP callback session", -1));
+            return TCL_ERROR;
+        }
+        if (*event == '\0' || strlen(event) > 64 || strspn(event, "abcdefghijklmnopqrstuvwxyz0123456789-_") != strlen(event)
+            || length > 16384 || strlen(text) != (size_t)length) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("invalid event name or oversized event details", -1));
+            return TCL_ERROR;
+        }
+        if (Tcl_DictObjSize(interp, objv[4], &size) != TCL_OK) return TCL_ERROR;
+        SmtpdEvent(conn, event, objv[4]);
+        break;
+    }
     case cmdFlag:
         if (objc < 3) {
             Tcl_WrongNumArgs(interp, 1, objv, "name");

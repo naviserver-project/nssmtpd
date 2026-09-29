@@ -315,7 +315,12 @@ proc smtpd::mail { id } {
 # callback sees the original envelope and must not mutate the SMTP session.
 proc smtpd::checkpolicy {id} {
     set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd recipientpolicyproc ""]
-    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {
+    if {$prefix eq ""} {
+        return 1
+    }
+    if {[ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL]} {
+        smtpd::logevent $id policy [dict create action accept reason local-bypass \
+                                      recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
         return 1
     }
     try {
@@ -327,7 +332,11 @@ proc smtpd::checkpolicy {id} {
         set result [uplevel #0 [list {*}$prefix $context]]
         set action [dict get $result action]
         switch -- $action {
-            accept {return 1}
+            accept {
+                smtpd::logevent $id policy [dict create action accept reason recipient-policy \
+                                              recipient [dict get $context recipient]]
+                return 1
+            }
             defer {set code "451 4.7.1"; set message "Please try again later"}
             reject {set code "550 5.7.1"; set message "Recipient rejected by policy"}
             default {::error "recipientpolicyproc returned an invalid action"}
@@ -338,9 +347,12 @@ proc smtpd::checkpolicy {id} {
             ::error "recipientpolicyproc returned an invalid message"
         }
         set reply "$code $message\r\n"
+        smtpd::logevent $id policy [dict create action $action reason recipient-policy \
+                                      recipient [dict get $context recipient] code [lindex $code 0]]
         ns_log Notice "smtpd policy: $action [list $context]"
     } on error {message options} {
         ns_log Error "smtpd recipient policy failed: $message"
+        smtpd::logevent $id policy [dict create action defer reason callback-error code 451]
         set reply "451 4.3.0 Recipient policy unavailable\r\n"
     }
     ns_smtpd delrcpt $id 0
@@ -377,11 +389,24 @@ proc smtpd::greylist {context} {
     set key [list [dict get $context peeraddr] \
                  [dict get $context sender] [dict get $context recipient]]
     set decision [smtpd::GreylistCheck $key [clock seconds]]
+    smtpd::logevent [dict get $context id] greylist \
+        [dict merge $decision [dict create recipient [dict get $context recipient]]]
     # No message body or subject is logged.
     if {[dict get $decision reason] in {new retry expired capacity}} {
         ns_log Notice "smtpd greylist: [dict get $decision reason] [list $key]"
     }
     return $decision
+}
+
+# Logging is observational: a logging failure must not change mail policy.
+# Custom callbacks can use this wrapper or ns_smtpd logevent directly.
+proc smtpd::logevent {id event details} {
+    if {![ns_config -bool ns/server/[ns_info server]/module/nssmtpd eventlogging false]} {return}
+    try {
+        ns_smtpd logevent $id $event $details
+    } on error {message options} {
+        ns_log Error "smtpd event logging failed: $message"
+    }
 }
 
 # The explicit time argument permits deterministic tests of expiry boundaries.

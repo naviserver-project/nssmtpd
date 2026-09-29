@@ -156,6 +156,78 @@ accepting the message. Oversized relay replies also fail explicitly. This
 limit is unchanged; the module no longer processes overlong lines as fragments.
 Write readiness retries, including TLS retries, honor `writetimeout`.
 
+### SMTP event logging
+
+The optional event log records incoming recipient decisions, applied alias
+expansions, greylisting outcomes, and custom policy events. It is separate from
+the existing SMTP send log and disabled by default:
+
+```tcl
+ns_section ns/server/${server}/module/nssmtpd {
+  ns_param eventlogging true
+  ns_param eventlogfile ${logroot}/smtpevents.log
+  # ns_param eventlogroll true
+  # ns_param eventlogrollhour 0
+  # ns_param eventlogrollfmt %Y-%m-%d
+  # ns_param eventlogmaxbackup 100
+  # ns_param eventlogrollonsignal false
+}
+```
+
+Without `eventlogfile`, the filename is `smtpevents-${server}.log`. Relative
+paths use the server log directory on NaviServer 5, or the home `logs`
+directory on older versions. The resolved filename is published in the
+configuration database for nsstats. Rotation is independent of send-log
+rotation, using NaviServer's asynchronous writer and log-rotation support.
+
+Each physical line is a versioned Tcl dictionary. Parse records with `dict`
+or list operations, **never `eval` or `source`**. The version 1 fields are:
+
+| Field | Meaning |
+|---|---|
+| `version` | Format version, currently `1` |
+| `timestamp` | Unix time in milliseconds |
+| `server` | Virtual server name |
+| `session` | Identifier containing module start time, process and connection IDs |
+| `transaction` | MAIL transaction counter within the session; zero before MAIL |
+| `peer`, `sender` | Actual socket peer and envelope sender |
+| `event` | `recipient`, `alias`, `greylist`, `policy`, or a custom event name |
+| `details` | Event-specific dictionary |
+
+Recipient events contain `recipient`, `action` (`accept`, `defer`, `reject`),
+`code`, and `reason`. Alias events retain the original `recipient` and its
+`targets`, and are emitted only for an applied, non-identity expansion.
+Greylisting records all decisions: `new`, `early`, `retry`, `known`, `expired`,
+and `capacity`. A configured policy bypass for a LOCAL submission is recorded
+as a `policy` event with reason `local-bypass`.
+
+Within an SMTP callback, custom Tcl policies can call:
+
+```tcl
+smtpd::logevent $id policy [dict create \
+    action reject reason denylist recipient $recipient code 550]
+```
+
+This wrapper does nothing when event logging is off and reports logging
+errors without changing the SMTP decision. The underlying command is
+`ns_smtpd logevent $id $event $detailsDict`; it requires the current callback
+session, a lowercase event name of at most 64 letters/digits/underscores/hyphens,
+and a dictionary of at most 16 KiB. Custom callbacks should use their own event
+name or `policy`, leaving `recipient`, `alias`, and `greylist` to the built-in
+emitters to avoid duplicate counts. Include only envelope/policy metadata,
+not message content. No database is required.
+
+The nsstats **SMTP Events** page provides separate charts for recipient
+decisions and greylisting reasons, event totals, and the latest 200 matching
+records. Its literal, case-insensitive filter covers peer, sender, original
+recipient, targets, session, transaction, event, action and reason. Rotated
+logs can be selected. Malformed or unsupported records are counted and skipped.
+
+Recipient counts are SMTP RCPT attempts, **not delivered messages**;
+greylisting deferrals are not spam classifications. Direct `ns_smtpd send`
+operations continue to use the existing send log. Message outcomes and
+connection/protocol events are not included in this first event-log version.
+
 ### Relay Authentication
 
 The `relay` parameter defines the SMTP server responsible for message

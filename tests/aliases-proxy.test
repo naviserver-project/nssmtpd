@@ -42,6 +42,24 @@ test alias-proxy-3 {native STARTTLS sink receives the expected envelopes and hea
         [expr {[string first "To: mixed@example.test\r\n" [lindex $messages 1 1]] >= 0}]
 } -result {2 {one@remote.test two@remote.test} {one@remote.test two@other.test} 1 1}
 
+test alias-proxy-event-servers {recycled connections retain per-server event log ownership} -constraints fullsuite -body {
+    set result {}
+    foreach {name expected minimum} {events.log test 4 sink-events.log sink 4} {
+        set path [file join $::env(ALIAS_TEST_HOME) $name]
+        set servers {}
+        for {set i 0} {$i < 200} {incr i} {
+            set channel [open $path]
+            try {set text [read $channel]} finally {close $channel}
+            set lines [split [string trimright $text \n] \n]
+            if {[llength $lines] >= $minimum} {break}
+            after 10
+        }
+        foreach line $lines {lappend servers [dict get $line server]}
+        lappend result [expr {[llength $lines] >= $minimum}] [lsort -unique $servers]
+    }
+    set result
+} -result {1 test 1 sink}
+
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"

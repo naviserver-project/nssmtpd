@@ -34,16 +34,27 @@ ns_section ns/server/test/module/nssock {
     ns_param port 0
 }
 ns_section ns/server/test/module/nssmtpd {
+    if {$::env(ALIAS_TEST_MODE) in {events eventsoff}} {
+        ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
+        if {$::env(ALIAS_TEST_MODE) eq "events"} {ns_param eventlogging true}
+        ns_param eventlogroll false
+        ns_param eventlogrollonsignal true
+        ns_param greylistdelay 1
+        ns_param greylistretrywindow 60
+        ns_param greylistlifetime 120
+        ns_param recipientpolicyproc smtpd::greylist
+        ns_param rejectunknownrecipients true
+    }
     ns_param address 127.0.0.1
     ns_param port $::env(ALIAS_TEST_PORT)
     ns_param readtimeout 3
     ns_param writetimeout 3
     ns_param maxrcpt 3
     ns_param relaydomains example.test
-    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
-    ns_param rcptproc [expr {([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
+    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
+    ns_param rcptproc [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff} ? "event_test_rcpt" : ([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
     ns_param dataproc alias_test_data
-    if {$::env(ALIAS_TEST_MODE) in {enabled untrusted proxy greyexternal greytrusted greyoff greyempty}} {
+    if {$::env(ALIAS_TEST_MODE) in {events eventsoff enabled untrusted proxy greyexternal greytrusted greyoff greyempty}} {
         ns_param aliasproc {alias_test_resolver {prefix argument}}
     } elseif {$::env(ALIAS_TEST_MODE) in {files filevirtual policyexternal policytrusted policyoff policyempty}} {
         set format [expr {$::env(ALIAS_TEST_MODE) eq "files" ? "aliases" : "virtual"}]
@@ -74,6 +85,9 @@ ns_section ns/server/test/module/nssmtpd {
     }
     if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
+        ns_param eventlogging true
+        ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
+        ns_param eventlogroll false
     }
 }
 ns_section alias-test {
@@ -89,6 +103,9 @@ if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
         ns_param nssmtpd [file join $root nssmtpd.so]
     }
     ns_section ns/server/sink/module/nssmtpd {
+        ns_param eventlogging true
+        ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) sink-events.log]
+        ns_param eventlogroll false
         ns_param address 127.0.0.1
         ns_param port $::env(ALIAS_TEST_RELAY)
         ns_param localdomains 127.0.0.1

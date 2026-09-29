@@ -49,7 +49,7 @@ proc alias_runner::run {nsroot root mode} {
         foreach {key value} [list ROOT $root NSROOT $nsroot HOME $home MODE $mode] {
             set ::env(ALIAS_TEST_$key) $value
         }
-        set testfile [dict get {greyexternal greylisting.test greytrusted greylisting.test greyoff greylisting.test greyempty greylisting.test policyexternal recipient-policy.test policytrusted recipient-policy.test policyoff recipient-policy.test policyempty recipient-policy.test io io-errors.test basic basic.test files aliases-files.test filevirtual aliases-files.test proxy aliases-proxy.test disabled aliases.test empty aliases.test enabled aliases.test untrusted aliases.test} $mode]
+        set testfile [dict get {events events.test eventsoff events.test greyexternal greylisting.test greytrusted greylisting.test greyoff greylisting.test greyempty greylisting.test policyexternal recipient-policy.test policytrusted recipient-policy.test policyoff recipient-policy.test policyempty recipient-policy.test io io-errors.test basic basic.test files aliases-files.test filevirtual aliases-files.test proxy aliases-proxy.test disabled aliases.test empty aliases.test enabled aliases.test untrusted aliases.test} $mode]
         set command [list [file join $nsroot bin nsd] -c -d -t \
                          [file join $root tests alias-config.tcl] [file join $root tests $testfile] {*}$testArgs]
         cd $home
@@ -91,7 +91,7 @@ if {[llength $argv] >= 2 && [lindex $argv 0] eq "--naviserver"} {
 }
 set alias_runner::testArgs $argv
 set root [file dirname [file dirname [file normalize [info script]]]]
-foreach mode {basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty} {
+foreach mode {events eventsoff basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty} {
     alias_runner::run [file normalize $nsroot] $root $mode
 }
 puts "All basic mail, alias and outgoing SMTP envelope tests passed."
