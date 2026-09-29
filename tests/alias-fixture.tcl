@@ -2,6 +2,12 @@
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
 
+proc io_log_filter {severity timestamp message} {
+    if {[string match {nssmtpd:*} $message]} {
+        nsv_lappend io-test logs [list $severity $message]
+    }
+}
+
 rename ::smtpd::ReadAliasFile ::smtpd::test_ReadAliasFile
 proc ::smtpd::ReadAliasFile {format filename} {
     nsv_incr alias-test reads

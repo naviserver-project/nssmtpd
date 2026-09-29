@@ -226,6 +226,9 @@ typedef struct _smtpdConn {
     const char *host;
     Ns_Sock *sock;
     char readError[256]; /* Captured locally: outgoing Ns_Sock is not a driver Sock. */
+    char writeError[256];
+    Ns_ReturnCode ioStatus;
+    bool writing, peerFailure, lineTooLong;
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -439,7 +442,10 @@ static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int all
 #endif
 static ssize_t SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_ReturnCode *rcPtr);
 static ssize_t SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr);
-static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length);
+static ssize_t SmtpdUnixSend(smtpdConn *conn, const char *buffer, size_t length);
+static void SmtpdLogIO(smtpdConn *conn);
+static void SmtpdLogInput(smtpdConn *conn, Ns_LogSeverity severity, const char *label,
+                          const Tcl_DString *line);
 static ssize_t SmtpdWrite(smtpdConn *conn, const void *vbuf, ssize_t len);
 static Ns_ReturnCode SmtpdWriteDString(smtpdConn *conn, Tcl_DString *dsPtr);
 static Ns_ReturnCode SmtpdPuts(smtpdConn *conn, const char *string);
@@ -1406,8 +1412,6 @@ static void SmtpdThread(smtpdConn *conn)
         Ns_StrTrim(conn->line.string);
         conn->line.length = (int)strlen(conn->line.string);
 
-        Ns_Log(SmtpdDebug, "SmtpdThread got cmd <%s>", conn->line.string);
-
         if (!strncasecmp(conn->line.string, "QUIT", 4)) {
             conn->cmd = SMTP_QUIT;
             SmtpdPuts(conn, "221 Bye\r\n");
@@ -1691,7 +1695,7 @@ static void SmtpdThread(smtpdConn *conn)
 
                 } else if ((conn->flags & SMTPD_LOCAL) == 0u) {
                     Ns_DStringPrintf(&conn->reply, "550 %s@%s... Relaying denied\r\n", addr.mailbox, addr.domain);
-                    Ns_Log(Error, "nssmtpd: %ld: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
+                    Ns_Log(Notice, "nssmtpd: %ld: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
                            conn->id, conn->host, Ns_ConnPeerAddr(nsconn), addr.mailbox, addr.domain);
                     if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                         goto error;
@@ -1857,15 +1861,13 @@ static void SmtpdThread(smtpdConn *conn)
     SmtpdConnFree(conn);
     return;
   error:
-    switch (errno) {
-    case EINTR:
-    case EAGAIN:
-    case 0:
-        break;
-    default:
-        Ns_Log(Error, "nssmtpd: %ld/%d: HOST: %s/%s, I/O error: %d/%d: %s: %s",
-               conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn),
-               conn->sock->sock, conn->cmd, strerror(errno), conn->line.string);
+    SmtpdLogIO(conn);
+    if (conn->lineTooLong) {
+        if (conn->cmd != SMTP_DATA) {
+            SmtpdLogInput(conn, Notice, "oversized command", &conn->line);
+        }
+        (void)SmtpdPuts(conn, conn->cmd == SMTP_DATA
+                       ? "552 Data line too long\r\n" : "500 Line too long\r\n");
     }
     SmtpdConnFree(conn);
 }
@@ -1898,8 +1900,12 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     Ns_SockSetNonBlocking(sock->sock);
 
     conn->sock = sock;
+    conn->cmd = SMTP_READ;
     conn->sock->arg = NULL;
     conn->readError[0] = '\0';
+    conn->writeError[0] = '\0';
+    conn->ioStatus = NS_OK;
+    conn->writing = conn->peerFailure = conn->lineTooLong = NS_FALSE;
     conn->flags = config->flags;
 
     Ns_MutexLock(&config->lock);
@@ -2610,6 +2616,10 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     /*
      * Sending mail data failed
      */
+    SmtpdLogIO(conn);
+    if (conn->lineTooLong) {
+        (void)SmtpdPuts(conn, "552 Data line too long\r\n");
+    }
     Ns_Log(SmtpdDebug,"SmtpdSend: sending mail data to the relay failed");
     SmtpdConnFree(relay);
     return -1;
@@ -2947,7 +2957,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
                          rc == NS_TIMEOUT ? "TIMEOUT" : (rc == NS_OK ? "EOF" : "ERROR"), (char *)0L);
     } else {
         Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: send: I/O error during %s to %s:%hu: %s",
-                                             errorString, host, port, strerror(errno)));
+                                             errorString, host, port, conn->writeError));
     }
     SmtpdConnFree(conn);
     SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "IO_ERROR", 0u);
@@ -3023,6 +3033,7 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
                 socketError = ns_sockerrno;
                 interrupted = (socketError == NS_EINTR);
                 if (!interrupted && socketError != NS_EAGAIN && socketError != NS_EWOULDBLOCK) {
+                    conn->peerFailure = (socketError == NS_ECONNRESET);
                     snprintf(conn->readError, sizeof(conn->readError), "%s", strerror(socketError));
                     *rcPtr = NS_ERROR;
                     return -1;
@@ -3049,6 +3060,8 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
                 } else {
                     unsigned long sslCode = ERR_get_error();
 
+                    conn->peerFailure = (sslError == SSL_ERROR_SYSCALL
+                                         && (received == 0 || socketError == NS_ECONNRESET));
                     if (sslCode != 0) {
                         ERR_error_string_n(sslCode, conn->readError, sizeof(conn->readError));
                     } else if (sslError == SSL_ERROR_SYSCALL && received < 0 && socketError != 0) {
@@ -3071,6 +3084,7 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
         if (received >= 0) {
             *rcPtr = NS_OK;
             if (received == 0) {
+                conn->peerFailure = NS_TRUE;
                 snprintf(conn->readError, sizeof(conn->readError), "peer closed connection (EOF)");
             }
             return received;
@@ -3090,6 +3104,7 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
             }
         }
         if (*rcPtr == NS_TIMEOUT) {
+            conn->peerFailure = NS_TRUE;
             snprintf(conn->readError, sizeof(conn->readError), "timeout after %d seconds", conn->config->readtimeout);
             return -1;
         }
@@ -3110,6 +3125,9 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
     Ns_Log(SmtpdDebug,"SmtpdRead");
 
     *rcPtr = NS_OK;
+    conn->writing = NS_FALSE;
+    conn->peerFailure = NS_FALSE;
+    conn->ioStatus = NS_OK;
     nread = len;
     while (len > 0) {
         if (conn->buf.pos > 0) {
@@ -3129,6 +3147,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
             /* Attempt to fill the read-ahead buffer. */
             conn->buf.ptr = conn->buf.data;
             conn->buf.pos = SmtpdRecv(conn, conn->buf.data, conn->config->bufsize, &timeout, rcPtr);
+            conn->ioStatus = *rcPtr;
             if (conn->buf.pos <= 0) {
                 return -1;
             }
@@ -3137,17 +3156,52 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
     return nread;
 }
 
-//static int FID = 0;
-
-static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
+/* A retry uses the original deadline, and captures errors before logging. */
+static Ns_ReturnCode
+SmtpdWriteWait(smtpdConn *conn, unsigned int direction, const Ns_Time *deadline)
 {
+    Ns_Time now, remaining;
+    int socketError = 0;
+
+    for (;;) {
+        Ns_GetTime(&now);
+        if (Ns_DiffTime(deadline, &now, &remaining) <= 0) {
+            conn->ioStatus = NS_TIMEOUT;
+        } else {
+            conn->ioStatus = Ns_SockTimedWait(conn->sock->sock, direction, &remaining);
+            socketError = ns_sockerrno;
+            if (conn->ioStatus == NS_ERROR && socketError == NS_EINTR) {
+                continue;
+            }
+        }
+        break;
+    }
+    if (conn->ioStatus == NS_TIMEOUT) {
+        conn->peerFailure = NS_TRUE;
+        snprintf(conn->writeError, sizeof(conn->writeError), "timeout after %d seconds", conn->config->writetimeout);
+    } else if (conn->ioStatus != NS_OK) {
+        snprintf(conn->writeError, sizeof(conn->writeError), "socket wait failed: %s", strerror(socketError));
+    }
+    return conn->ioStatus;
+}
+
+static ssize_t SmtpdUnixSend(smtpdConn *conn, const char *buffer, size_t length)
+{
+    Ns_Sock *sock = conn->sock;
+    Ns_Time deadline;
     ssize_t       sent;
 
     NS_NONNULL_ASSERT(sock != NULL);
     NS_NONNULL_ASSERT(buffer != NULL);
 
+    conn->writing = NS_TRUE;
+    conn->peerFailure = conn->lineTooLong = NS_FALSE;
+    conn->writeError[0] = '\0';
+    conn->ioStatus = NS_OK;
+    Ns_GetTime(&deadline);
+    Ns_IncrTime(&deadline, conn->config->writetimeout, 0);
+
     if (sock->arg == NULL) {
-        int         retry_count = 0;
         const char *buf = buffer;
         size_t      tosend = length;
 
@@ -3161,25 +3215,25 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
             if (n < 0) {
                 int error_code = ns_sockerrno;
 
-                if (Retry(error_code) && retry_count < 10) {
-                    Ns_Time timeout = {1, 0};
-
-                    Ns_Log(SmtpdDebug, "nssmtpd retry %d error code %d: %s",
-                           retry_count, error_code, strerror(error_code));
-
-                    Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout);
-                    retry_count++;
+                if (Retry(error_code)) {
+                    if (SmtpdWriteWait(conn, NS_SOCK_WRITE, &deadline) != NS_OK) {
+                        return -1;
+                    }
                     continue;
                 }
-                return n;
+                conn->ioStatus = NS_ERROR;
+                conn->peerFailure = (error_code == NS_ECONNRESET || error_code == EPIPE);
+                snprintf(conn->writeError, sizeof(conn->writeError), "%s", strerror(error_code));
+                return -1;
             } else {
-                //if (FID == 0) {
-                //    FID = open("/tmp/SEND", O_CREAT|O_WRONLY|O_TRUNC);
-                //}
-                //write(FID, buf, n);
+                if (n == 0) {
+                    conn->ioStatus = NS_ERROR;
+                    conn->peerFailure = NS_TRUE;
+                    snprintf(conn->writeError, sizeof(conn->writeError), "peer closed connection during write");
+                    return -1;
+                }
             }
 
-            retry_count = 0;
             sent += n;
             tosend -= (size_t)n;
             buf += n;
@@ -3194,27 +3248,49 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
         sent = 0;
         for (;;) {
             int     err;
+            int     socketError;
             ssize_t n;
 
+            ERR_clear_error();
             n = SSL_write(ssl, iov.iov_base, (int)iov.iov_len);
+            socketError = ns_sockerrno;
             err = SSL_get_error(ssl, (int)n);
-            if (err == SSL_ERROR_WANT_WRITE) {
-                Ns_Time timeout = { 0, 10000 }; /* 10ms */
-
-                Ns_SockTimedWait(sock->sock, NS_SOCK_WRITE, &timeout);
+            if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ
+                || (err == SSL_ERROR_SYSCALL && n < 0 && socketError == NS_EINTR)) {
+                if (SmtpdWriteWait(conn, err == SSL_ERROR_WANT_READ ? NS_SOCK_READ : NS_SOCK_WRITE,
+                                   &deadline) != NS_OK) {
+                    return -1;
+                }
                 continue;
             }
-            if (likely(n > -1)) {
+            if (likely(n > 0)) {
                 sent += n;
 
                 if (((size_t)n < iov.iov_len)) {
                     Ns_ResetVec(&iov, 1, (size_t)n);
                     continue;
                 }
+            } else {
+                unsigned long sslCode = ERR_get_error();
+
+                conn->ioStatus = NS_ERROR;
+                conn->peerFailure = (err == SSL_ERROR_ZERO_RETURN
+                                     || (err == SSL_ERROR_SYSCALL
+                                         && (socketError == NS_ECONNRESET || socketError == EPIPE)));
+                if (sslCode != 0) {
+                    ERR_error_string_n(sslCode, conn->writeError, sizeof(conn->writeError));
+                } else if (err == SSL_ERROR_SYSCALL && n < 0 && socketError != 0) {
+                    snprintf(conn->writeError, sizeof(conn->writeError), "%s", strerror(socketError));
+                } else {
+                    snprintf(conn->writeError, sizeof(conn->writeError), "TLS write failed (SSL error %d)", err);
+                }
+                return -1;
             }
             break;
         }
 #else
+        conn->ioStatus = NS_ERROR;
+        snprintf(conn->writeError, sizeof(conn->writeError), "TLS support unavailable");
         sent = -1;
 #endif
     }
@@ -3225,7 +3301,7 @@ static ssize_t SmtpdUnixSend(Ns_Sock *sock, const char *buffer, size_t length)
 
 static ssize_t SmtpdWrite(smtpdConn *conn, const void *buf, ssize_t len)
 {
-    return SmtpdUnixSend(conn->sock, buf, (size_t)len);
+    return SmtpdUnixSend(conn, buf, (size_t)len);
 }
 
 
@@ -3426,24 +3502,70 @@ SmtpdReadLine(smtpdConn *conn, Tcl_DString *dsPtr, Ns_ReturnCode *rcPtr)
     ssize_t len = 0, nread;
 
     Tcl_DStringSetLength(dsPtr, 0);
+    conn->lineTooLong = NS_FALSE;
     do {
         if ((nread = SmtpdRead(conn, buf, 1, rcPtr)) == 1) {
             Tcl_DStringAppend(dsPtr, buf, 1);
             ++len;
+            /* Include the terminator in the limit; never dispatch fragments. */
+            if (len > conn->config->maxline) {
+                conn->lineTooLong = NS_TRUE;
+                conn->ioStatus = *rcPtr = NS_ERROR;
+                snprintf(conn->readError, sizeof(conn->readError),
+                         "line exceeds maxline (%d bytes)", conn->config->maxline);
+                return -1;
+            }
             if (buf[0] == '\n') {
                 break;
             }
         }
-    } while (nread == 1 && dsPtr->length <= conn->config->maxline);
+    } while (nread == 1);
 
     if (nread > 0 && Ns_LogSeverityEnabled(SmtpdDebug) == NS_TRUE) {
-        char *end = &dsPtr->string[dsPtr->length-1], saved = *end;
-
-        *end = '\0';
-        Ns_Log(SmtpdDebug, "nssmtpd: %lu: <<< %s", conn->id, dsPtr->string);
-        *end = saved;
+        SmtpdLogInput(conn, SmtpdDebug, "received", dsPtr);
     }
     return (nread > 0 ? len : nread);
+}
+
+/* Limit input to 80 bytes, escaping control bytes and backslashes. */
+static void
+SmtpdLogInput(smtpdConn *conn, Ns_LogSeverity severity, const char *label,
+              const Tcl_DString *line)
+{
+    char excerpt[80 * 4 + 4], *p = excerpt;
+    TCL_SIZE_T i, length = MIN(line->length, 80);
+
+    for (i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)line->string[i];
+
+        if (c >= 32 && c <= 126 && c != '\\') {
+            *p++ = (char)c;
+        } else {
+            snprintf(p, 5, "\\x%02x", c);
+            p += 4;
+        }
+    }
+    if (line->length > length) {
+        memcpy(p, "...", 3);
+        p += 3;
+    }
+    *p = '\0';
+    Ns_Log(severity, "nssmtpd: %lu: %s: %s", conn->id, label, excerpt);
+}
+
+static void
+SmtpdLogIO(smtpdConn *conn)
+{
+    bool inData = (conn->cmd == SMTP_DATA);
+    Ns_LogSeverity severity = (!inData && (conn->peerFailure || conn->lineTooLong)) ? Notice : Error;
+
+    /* Do not log the reused line buffer: it can contain output or mail data. */
+    Ns_Log(severity, "nssmtpd: %lu: peer %s: %s during %s: %s: %s",
+           conn->id, Ns_ConnPeerAddr(Ns_GetConn()), conn->writing ? "write" : "read",
+           inData ? "DATA" : "command/reply",
+           (!conn->writing && conn->peerFailure && conn->ioStatus == NS_OK)
+           ? "EOF" : Ns_ReturnCodeString(conn->ioStatus),
+           conn->writing ? conn->writeError : conn->readError);
 }
 
 static NS_INLINE bool Retry(int errorCode)
@@ -3468,8 +3590,8 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
         Tcl_DString ds;
 
         Tcl_DStringInit(&ds);
-        Tcl_DStringAppend(&ds, buf, (int)(len-2));
-        Ns_Log(SmtpdDebug, "nssmtpd: %lu: >>> %s", conn->id, ds.string);
+        Tcl_DStringAppend(&ds, buf, (int)MIN(len, 81));
+        SmtpdLogInput(conn, SmtpdDebug, "sending", &ds);
         Tcl_DStringFree(&ds);
     }
 
@@ -3478,7 +3600,7 @@ static Ns_ReturnCode SmtpdWriteData(smtpdConn *conn, const char *buf, ssize_t le
     while (len > 0) {
         ssize_t nwrote = SmtpdWrite(conn, buf, len);
 
-        if (nwrote < 0) {
+        if (nwrote <= 0) {
             return NS_ERROR;
         }
         len -= nwrote;

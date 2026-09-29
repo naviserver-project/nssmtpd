@@ -141,6 +141,21 @@ ns_section ns/server/${server}/module/nssmtpd {
 ```
 
 
+The server log records ordinary relay denials and pre-DATA client EOF,
+connection resets, and timeouts at `Notice` level. I/O failures during
+DATA and internal errors remain at `Error` level. Diagnostics identify the
+read or write operation and use its captured error, including TLS errors,
+rather than a later value of `errno`. Input excerpts are limited to 80 bytes
+with control characters escaped; ordinary I/O diagnostics omit message data.
+
+The existing `maxline` parameter (default `4096`) limits a received line,
+including its line terminator. An oversized command receives `500 Line too
+long`; an oversized DATA line receives `552 Data line too long`. The connection
+is then closed without processing the remainder as another command or
+accepting the message. Oversized relay replies also fail explicitly. This
+limit is unchanged; the module no longer processes overlong lines as fragments.
+Write readiness retries, including TLS retries, honor `writetimeout`.
+
 ### Relay Authentication
 
 The `relay` parameter defines the SMTP server responsible for message

@@ -1,7 +1,7 @@
 # Test-only SMTP sink. Connchan callbacks run in other interpreters, so all
 # connection state is shared through nsv.
-proc alias_sink_accept {channel} {
-    nsv_set alias-sink $channel [dict create input "" recipients {} body "" data 0]
+proc alias_sink_accept {channel {stall false}} {
+    nsv_set alias-sink $channel [dict create input "" recipients {} body "" data 0 stall $stall]
     ns_connchan write $channel "220 alias-test SMTP\r\n"
     ns_connchan callback -timeout 5s $channel [list alias_sink_read $channel] rx
     return 1
@@ -38,6 +38,10 @@ proc alias_sink_read {channel reason} {
                 DATA* {
                     dict set state data 1
                     ns_connchan write $channel "354 Send data\r\n"
+                    if {[dict get $state stall]} {
+                        nsv_set alias-sink $channel $state
+                        return 2
+                    }
                 }
                 QUIT* {
                     ns_connchan write $channel "221 Bye\r\n"
@@ -79,6 +83,10 @@ proc io_sink_accept {mode channel} {
     } elseif {$mode eq "partial"} {
         ns_connchan write $channel "220 incomplete"
         ns_connchan close $channel
+    } elseif {$mode eq "long"} {
+        ns_connchan write $channel "220 [string repeat X 4096]\r\n"
+    } elseif {$mode eq "write-timeout"} {
+        alias_sink_accept $channel true
     } elseif {$mode eq "helo-eof"} {
         ns_connchan write $channel "220 test SMTP\r\n"
         ns_connchan callback -timeout 5s $channel [list io_sink_close $channel] rx

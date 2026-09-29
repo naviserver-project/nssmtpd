@@ -10,17 +10,25 @@ proc io_send {mode} {
     set sink [ns_connchan listen -bind 127.0.0.1 0 [list io_sink_accept $mode]]
     set port [dict get $sink port]
     set message "Subject: I/O test\r\n\r\nBody"
+    if {$mode eq "write-timeout"} {append message [string repeat "[string repeat X 998]\r\n" 32768]}
     set start [clock milliseconds]
     try {
-        set failed [catch {
+        set failed 0
+        set code {}
+        try {
             ns_smtpd send sender@example.test target@remote.test message 127.0.0.1 $port
-        } result options]
-        set code [expr {$failed ? [dict get $options -errorcode] : {}}]
+            set result ""
+        } on error {result options} {
+            set failed 1
+            set code [dict get $options -errorcode]
+        }
         return [list $failed $result $code [expr {[clock milliseconds]-$start}] $port]
     } finally {
         ns_connchan close [dict get $sink channel]
         set channel [nsv_get io-test accepted]
-        if {$channel ne ""} {catch {ns_connchan close $channel}}
+        if {$channel ne ""} {
+            try {ns_connchan close $channel} on error {} {# Peer may already have closed.}
+        }
     }
 }
 
@@ -50,6 +58,130 @@ test smtp-io-delayed {would-block followed by greeting succeeds; recycled connec
     list $failed [llength [nsv_get alias-sink messages]] [nsv_get alias-sink error]
 } -result {0 1 {}}
 
+test smtp-io-long-reply {overlong upstream reply fails rather than parsing fragments} -body {
+    lassign [io_send long] failed result code
+    list $failed $code [string match {*line exceeds maxline (4096 bytes)*} $result]
+} -result {1 {NSSMTPD READ ERROR} 1}
+
+test smtp-io-write-timeout {stalled DATA receiver produces bounded write timeout, not EAGAIN} -body {
+    lassign [io_send write-timeout] failed result code elapsed
+    list $failed [string match {*I/O error during *timeout after 3 seconds*} $result] \
+        [expr {$elapsed >= 2500 && $elapsed < 10000}]
+} -result {1 1 1}
+
+# Run the listener and log-filter callbacks in NaviServer interpreters.
+nsv_set io-test logs {}
+set logFilter [ns_logctl register io_log_filter]
+proc io_open {} {
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    gets $channel
+    return $channel
+}
+proc io_command {channel command} {
+    puts $channel $command
+    gets $channel reply
+    return $reply
+}
+proc io_find_log {pattern} {
+    for {set i 0} {$i < 100} {incr i} {
+        foreach entry [nsv_get io-test logs] {
+            if {[string match $pattern [lindex $entry 1]]} {return $entry}
+        }
+        after 10
+    }
+    error "missing log entry: $pattern"
+}
+
+test smtp-incoming-boundary {maxline includes CRLF; boundary accepted and next command intact} -body {
+    set channel [io_open]
+    try {
+        list [io_command $channel "NOOP [string repeat X 4089]"] [io_command $channel QUIT]
+    } finally {close $channel}
+} -result {{250 Noop OK} {221 Bye}}
+
+test smtp-incoming-long {overlong command rejected; pipelined suffix never dispatched} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        set reply [io_command $channel "HELO [string repeat X 4090]\nNOOP\nQUIT"]
+        set end [gets $channel]
+        lassign [io_find_log {*oversized command:*}] severity message
+        list $reply $end [eof $channel] $severity [expr {[string length $message] < 400}]
+    } finally {close $channel}
+} -result {{500 Line too long} {} 1 Notice 1}
+
+test smtp-incoming-escaped {binary command excerpt is bounded and escaped} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        set reply [io_command $channel "HELO \x01[string repeat X 4096]"]
+        lassign [io_find_log {*oversized command:*}] severity message
+        list $reply [expr {[string first {\x01} $message] >= 0}] \
+            [expr {[string first \x01 $message] < 0}] [expr {[string length $message] < 400}]
+    } finally {close $channel}
+} -result {{500 Line too long} 1 1 1}
+
+test smtp-incoming-eof {idle EOF is a Notice, independent of stale errno} -body {
+    nsv_set io-test logs {}
+    close [io_open]
+    lassign [io_find_log {*peer closed connection (EOF)*}] severity message
+    list $severity [string match {*read during command/reply*} $message]
+} -result {Notice 1}
+
+test smtp-incoming-timeout {idle timeout is identified and logged at Notice} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        gets $channel
+        lassign [io_find_log {*timeout after 3 seconds*}] severity message
+        list [eof $channel] $severity [string match {*read during command/reply*} $message]
+    } finally {close $channel}
+} -result {1 Notice 1}
+
+test smtp-incoming-denied {external relay denial remains 550 and logs Notice} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        io_command $channel {HELO test.example}
+        io_command $channel {MAIL FROM:<sender@example.test>}
+        set reply [io_command $channel {RCPT TO:<target@remote.test>}]
+        lassign [io_find_log {*Relaying denied*}] severity message
+        io_command $channel QUIT
+        list [string match {550 *Relaying denied} $reply] $severity
+    } finally {close $channel}
+} -result {1 Notice}
+
+proc io_data_open {} {
+    set channel [io_open]
+    io_command $channel {HELO test.example}
+    io_command $channel {MAIL FROM:<sender@example.test>}
+    io_command $channel {RCPT TO:<target@example.test>}
+    if {![string match {354 *} [io_command $channel DATA]]} {error {DATA not accepted}}
+    return $channel
+}
+
+test smtp-incoming-data-long {overlong DATA rejected without invoking delivery callback} -body {
+    nsv_set io-test logs {}
+    nsv_set alias-test body unchanged
+    set channel [io_data_open]
+    try {
+        set reply [io_command $channel [string repeat X 4095]]
+        gets $channel
+        lassign [io_find_log {*read during DATA*line exceeds maxline*}] severity message
+        list $reply [eof $channel] $severity [nsv_get alias-test body]
+    } finally {close $channel}
+} -result {{552 Data line too long} 1 Error unchanged}
+
+test smtp-incoming-data-eof {disconnect during DATA remains an Error and cannot deliver} -body {
+    nsv_set io-test logs {}
+    nsv_set alias-test body unchanged
+    close [io_data_open]
+    lassign [io_find_log {*read during DATA*peer closed connection (EOF)*}] severity message
+    list $severity [nsv_get alias-test body]
+} -result {Error unchanged}
+
+ns_logctl unregister $logFilter
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
