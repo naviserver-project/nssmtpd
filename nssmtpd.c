@@ -105,7 +105,7 @@
 #define SMTPD_GOTSTARTTLS    0x0200000u
 #define SMTPD_GOTAUTHPLAIN   0x0400000u
 
-#define SMTPD_VERSION              "2.5"
+#define SMTPD_VERSION              "2.7"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"

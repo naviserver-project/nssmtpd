@@ -1,7 +1,7 @@
 
 # SMTPD Server/Proxy for NaviServer
 
-**Release:** 2.5  
+**Release:** 2.7  
 **Author:** Vlad Seryakov (<vlad@crystalballinc.com>) Gustaf Neumann (<neumann@wu-wien.ac.at>)
 
 ---

@@ -1,9 +1,7 @@
 # Author: Vlad Seryakov vlad@crystalballinc.com
 # Gustaf Neumann
 
-namespace eval smtpd {
-    variable version "Smtpd version 2.7"
-}
+namespace eval smtpd {}
 
 # Shared by SMTP reception, ns_smtpd send, and ns_smtpd resolve.
 # The resolver is a command prefix returning FINAL envelope recipients.
