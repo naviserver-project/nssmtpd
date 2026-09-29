@@ -2,22 +2,36 @@
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
 
+rename ::smtpd::ReadAliasFile ::smtpd::test_ReadAliasFile
+proc ::smtpd::ReadAliasFile {format filename} {
+    nsv_incr alias-test reads
+    return [smtpd::test_ReadAliasFile $format $filename]
+}
+
 # Exercise the C boundary when a replacement Tcl helper breaks its contract.
 rename ::smtpd::resolvealiases ::smtpd::test_resolvealiases
-proc ::smtpd::resolvealiases {resolver recipients maxrcpt} {
+proc ::smtpd::resolvealiases {resolver recipients maxrcpt passthrough} {
     switch -- $recipients {
         helper-empty@example.test {return {}}
         helper-malformed@example.test {return "\{"}
     }
-    return [::smtpd::test_resolvealiases $resolver $recipients $maxrcpt]
+    return [::smtpd::test_resolvealiases $resolver $recipients $maxrcpt $passthrough]
 }
 
-proc alias_test_resolver {tag recipient} {
+proc alias_test_resolver {tag args} {
     if {$tag ne {prefix argument}} {error {command prefix was not preserved}}
+    ns_parseargs {-recipient -rejectunknown} $args
+    if {![info exists rejectunknown]} {
+        set rejectunknown [ns_config ns/server/[ns_info server]/module/nssmtpd rejectunknownrecipients false]
+    }
+    if {$recipient eq "unknown@example.test" && $rejectunknown} {
+        return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} {unknown recipient}
+    }
     nsv_incr alias-test calls
     switch -- $recipient {
         webmaster@example.test {return {one@remote.test two@remote.test one@remote.test}}
         mixed@example.test {return {one@remote.test two@other.test}}
+        grow@example.test {return {one@remote.test two@remote.test}}
         missing@example.test {return {}}
         broken@example.test {error {backend unavailable}}
         invalid@example.test {return [list "bad@remote.test\r\nRCPT TO:<victim@remote.test>"]}
@@ -43,6 +57,11 @@ proc alias_test_rcpt {id} {
             ns_smtpd addrcpt $id added@remote.test [ns_smtpd flag VERIFIED]
             ns_smtpd delrcpt $id $recipient
         }
+        grow@example.test {
+            ns_smtpd addrcpt $id added1@remote.test [ns_smtpd flag VERIFIED]
+            ns_smtpd addrcpt $id added2@remote.test [ns_smtpd flag VERIFIED]
+            ns_smtpd setflag $id $recipient VERIFIED
+        }
         default {
             ns_smtpd setflag $id 0 VERIFIED
             ns_smtpd setrcptdata $id 0 original-policy
@@ -61,9 +80,6 @@ proc alias_test_data {id} {
     ns_smtpd setreply $id "250 [list $recipients]\r\n"
 }
 
-proc grey_test_exists {recipient} {
-    expr {$recipient ne "unknown@example.test"}
-}
 proc grey_test_policy {tag context} {
     if {$tag ne {prefix argument}} {error {policy prefix lost}}
     nsv_incr grey-test calls

@@ -134,7 +134,7 @@ test file-alias-work {wide recursive maps have a total work bound} -body {
 test file-virtual-spaces {space-separated group does not block unrelated lookup} -constraints virtual -body {
     write_map "gustafn@example.test neumann@remote.test\nconference2026@example.test bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test"
     list [ns_smtpd resolve gustafn@example.test] \
-        [smtpd::filealiases virtual $aliasfile {example.test} conference2026@example.test]
+        [smtpd::resolvefilealiases -format virtual -file $aliasfile -domains {example.test} -recipient conference2026@example.test]
 } -result {neumann@remote.test {bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test}}
 
 test file-virtual-mixed {spaces, tabs, commas, continuations and duplicates} -constraints virtual -body {
@@ -182,6 +182,101 @@ test file-alias-15 {actual incoming DATA sees file-expanded recipients} -body {
         list [string range $reply 0 2] [lsort [lmap rcpt [nsv_get alias-test recipients] {lindex $rcpt 0}]]
     } finally {close $channel}
 } -result {250 {one@remote.test two@remote.test}}
+
+test file-options-order {named options are order independent} -body {
+    normal_map
+    set results {}
+    foreach address {webmaster@example.test identity@example.test unknown@example.test other@remote.test} {
+        set a [smtpd::resolvefilealiases -format $format -file $aliasfile -domains example.test -recipient $address]
+        set b [smtpd::resolvefilealiases -recipient $address -domains example.test -file $aliasfile -format $format]
+        lappend results [expr {$a eq $b}]
+    }
+    set results
+} -result {1 1 1 1}
+
+test file-options-path {file names and domain lists remain single literal arguments} -body {
+    normal_map
+    set filename [file join $::env(ALIAS_TEST_HOME) {map [literal] with spaces}]
+    file copy -force $aliasfile $filename
+    try {
+        smtpd::resolvefilealiases -file $filename -domains {other.test EXAMPLE.TEST} -format $format -recipient webmaster@example.test
+    } finally {file delete $filename}
+} -result {one@remote.test two@remote.test}
+
+test file-options-default {omitting format selects virtual} -constraints virtual -body {
+    normal_map
+    smtpd::resolvefilealiases -file $aliasfile -domains example.test -recipient webmaster@example.test
+} -result {one@remote.test two@remote.test}
+
+test file-options-invalid {invalid options, booleans and missing recipient fail} -body {
+    set errors {}
+    set options [list -format $format -file $aliasfile -domains example.test]
+    foreach arguments [list \
+        [list {*}$options -unknown yes -recipient webmaster@example.test] \
+        [list -format invalid -file $aliasfile -domains example.test -recipient webmaster@example.test] \
+        [list {*}$options -rejectunknown invalid -recipient webmaster@example.test] \
+        $options \
+        [list {*}$options -recipient webmaster@example.test extra]] {
+        try {smtpd::resolvefilealiases {*}$arguments; lappend errors 0} on error {message options} {lappend errors 1}
+    }
+    set errors
+} -result {1 1 1 1 1}
+
+test file-options-missing {missing option and module setting raises an error} -constraints virtual -body {
+    set errors {}
+    foreach arguments [list \
+        [list -domains example.test -recipient webmaster@example.test] \
+        [list -file $aliasfile -recipient webmaster@example.test]] {
+        try {smtpd::resolvefilealiases {*}$arguments; lappend errors 0} on error {message options} {
+            lappend errors [string match {provide -* or configure alias*} $message]
+        }
+    }
+    set errors
+} -result {1 1}
+
+test file-options-settings {omitted options inherit settings; empty domains overrides scope} -body {
+    normal_map
+    if {$format eq "aliases"} {
+        list [smtpd::resolvefilealiases -recipient webmaster@example.test] \
+            [smtpd::resolvefilealiases -domains {} -rejectunknown true -recipient unknown@example.test]
+    } else {
+        list [smtpd::resolvefilealiases -file $aliasfile -domains example.test -recipient webmaster@example.test] \
+            [smtpd::resolvefilealiases -file $aliasfile -domains {} -rejectunknown true -recipient unknown@example.test]
+    }
+} -result {{one@remote.test two@remote.test} unknown@example.test}
+
+test file-options-override {explicit options override module defaults} -body {
+    set otherfile [file join $::env(ALIAS_TEST_HOME) {override map}]
+    set f [open $otherfile w]
+    try {puts $f {user@other.test override@remote.test}} finally {close $f}
+    try {
+        smtpd::resolvefilealiases -format virtual -file $otherfile -domains other.test -recipient user@other.test
+    } finally {file delete $otherfile}
+} -result override@remote.test
+
+test file-options-recipient {dash-prefixed recipient is an option value and needs no separator} -body {
+    write_map [entries {-test one@remote.test}]
+    list [smtpd::resolvefilealiases -format $format -file $aliasfile -domains example.test -recipient -test@example.test] \
+        [ns_smtpd resolve -test@example.test]
+} -result {one@remote.test one@remote.test}
+
+test file-rejectunknown {strict lookup distinguishes unknown, identity and out-of-scope addresses} -body {
+    normal_map
+    set prefix [list smtpd::resolvefilealiases -format $format -file $aliasfile -domains example.test -rejectunknown true]
+    set results {}
+    foreach address {webmaster@example.test identity@example.test unknown@example.test other@remote.test} {
+        try {lappend results [{*}$prefix -recipient $address]} on error {message options} {
+            lappend results [dict get $options -errorcode]
+        }
+    }
+    set results
+} -result {{one@remote.test two@remote.test} identity@example.test {NSSMTPD ALIAS UNKNOWN} other@remote.test}
+
+test file-rejectunknown-override {passthrough override wins over a strict callback prefix} -body {
+    normal_map
+    set prefix [list smtpd::resolvefilealiases -format $format -file $aliasfile -domains example.test -rejectunknown true]
+    smtpd::test_resolvealiases $prefix unknown@example.test 10 true
+} -result unknown@example.test
 
 set failures $::tcltest::numTests(Failed)
 file delete -force $aliasfile

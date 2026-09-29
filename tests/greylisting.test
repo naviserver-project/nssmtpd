@@ -57,12 +57,12 @@ proc grey_seed {recipient first expires passed} {
     }
 }
 
-test grey-first {only opted-in untrusted submissions deferred, before alias expansion} -setup {
+test grey-first {only opted-in untrusted submissions deferred, after one alias lookup, before expansion} -setup {
     grey_reset
 } -body {
     set result [grey_codes [grey_session webmaster@example.test]]
     list $result [nsv_get alias-test calls] [nsv_get grey-test calls]
-} -result [expr {$active ? "{451 503 {}} 0 1" : "{250 250 {one@remote.test two@remote.test}} 1 0"}]
+} -result [expr {$active ? "{451 503 {}} 1 1" : "{250 250 {one@remote.test two@remote.test}} 1 0"}]
 
 test grey-context {policy receives actual socket peer and original envelope} -constraints active -setup {
     grey_reset
@@ -78,7 +78,7 @@ test grey-reply {normal greylisting uses the policy reply, not the backend failu
     lindex [lindex [grey_session webmaster@example.test] 0] 0
 } -result {451 4.7.1 Please try again later}
 
-test grey-unknown {unknown recipient is rejected before policy or alias lookup} -setup {
+test grey-unknown {resolver rejects unknown recipient before greylist policy} -setup {
     grey_reset
 } -body {
     list [grey_codes [grey_session unknown@example.test]] [nsv_get grey-test calls]

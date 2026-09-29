@@ -429,8 +429,9 @@ static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
 static int SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
-                              Tcl_Obj *recipients, int limit, Tcl_Obj **resolved);
-static void SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient);
+                               Tcl_Obj *recipients, int limit, bool passthrough, Tcl_Obj **resolved);
+static Tcl_Obj *SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient);
+static void SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient, Tcl_Obj *resolved);
 static void SmtpdConnParseData(smtpdConn *conn);
 static const char *SmtpdGetHeader(smtpdConn *conn, const char *name);
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
@@ -1657,6 +1658,7 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "RCPT TO:", 8)) {
             char          *host = NULL;
             smtpdRcpt     *rcpt;
+            Tcl_Obj       *resolved = NULL;
             smtpdEmail     addr;
             unsigned short port = 0u;
             unsigned int   flags = 0u;
@@ -1720,15 +1722,27 @@ static void SmtpdThread(smtpdConn *conn)
             /* Call Tcl callback */
             /* Keep the original address alive if rcptproc deletes its node. */
             data = ns_strdup(data);
-            if (SmtpdConnEval(conn, config->rcptproc) != TCL_OK) {
-                ns_free(data);
-                SmtpdPuts(conn, "421 Service not available\r\n");
-                break;
+            if (config->aliasproc != NULL && *config->aliasproc != '\0') {
+                resolved = SmtpdResolveRcpt(conn, rcpt);
             }
-            if (config->aliasproc != NULL && *config->aliasproc != '\0'
-                && (conn->flags & SMTPD_ABORT) == 0u
-                && (conn->reply.length == 0 || conn->reply.string[0] == '2')) {
-                SmtpdAliasRcpt(conn, rcpt);
+            /* Resolve once before policy; apply only after policy accepts the
+             * original recipient. A resolution failure already set the reply. */
+            if (config->aliasproc == NULL || *config->aliasproc == '\0' || resolved != NULL) {
+                if (SmtpdConnEval(conn, config->rcptproc) != TCL_OK) {
+                    if (resolved != NULL) {
+                        Tcl_DecrRefCount(resolved);
+                    }
+                    ns_free(data);
+                    SmtpdPuts(conn, "421 Service not available\r\n");
+                    break;
+                }
+                if (resolved != NULL) {
+                    if ((conn->flags & SMTPD_ABORT) == 0u
+                        && (conn->reply.length == 0 || conn->reply.string[0] == '2')) {
+                        SmtpdAliasRcpt(conn, rcpt, resolved);
+                    }
+                    Tcl_DecrRefCount(resolved);
+                }
             }
             /* Callback might set its own reply code */
             if (!conn->reply.length) {
@@ -1990,29 +2004,30 @@ static int SmtpdConnEval(smtpdConn *conn, const char *proc)
  */
 static int
 SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
-                    Tcl_Obj *recipients, int limit, Tcl_Obj **resolved)
+                    Tcl_Obj *recipients, int limit, bool passthrough, Tcl_Obj **resolved)
 {
     if (config->aliasproc == NULL || *config->aliasproc == '\0') {
         *resolved = recipients;
         Tcl_IncrRefCount(*resolved);
         return TCL_OK;
     } else {
-        Tcl_Obj *args[4];
+        Tcl_Obj *args[5];
         int      i, result;
 
         args[0] = Tcl_NewStringObj("::smtpd::resolvealiases", -1);
         args[1] = Tcl_NewStringObj(config->aliasproc, -1);
         args[2] = recipients;
         args[3] = Tcl_NewIntObj(limit);
-        for (i = 0; i < 4; i++) {
+        args[4] = Tcl_NewBooleanObj(passthrough);
+        for (i = 0; i < 5; i++) {
             Tcl_IncrRefCount(args[i]);
         }
-        result = Tcl_EvalObjv(interp, 4, args, TCL_EVAL_GLOBAL);
+        result = Tcl_EvalObjv(interp, 5, args, TCL_EVAL_GLOBAL);
         if (result == TCL_OK) {
             *resolved = Tcl_GetObjResult(interp);
             Tcl_IncrRefCount(*resolved);
         }
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < 5; i++) {
             Tcl_DecrRefCount(args[i]);
         }
         return result;
@@ -2020,31 +2035,22 @@ SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
 }
 
 /*
- * Apply aliases only after the original RCPT has passed relay authorization
- * and rcptproc policy. Expanded recipients inherit that policy, while their
- * transport routes are looked up again. Do not recursively invoke rcptproc.
+ * Resolve the original recipient once after relay authorization, before Tcl
+ * policy. Return an owned reference on success; on failure remove the current
+ * (newest) recipient and set its SMTP reply.
  */
-static void
-SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
+static Tcl_Obj *
+SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
 {
-    smtpdRcpt *rcpt, *head = NULL, *tail = NULL;
     Tcl_Obj   *input, *resolved;
     Tcl_Obj  **targets;
-    TCL_SIZE_T count, i;
-    int        index = 0;
-
-    /* rcptproc is allowed to remove the original recipient. */
-    for (rcpt = conn->rcpt.list; rcpt != NULL && rcpt != recipient; rcpt = rcpt->next) {
-        index++;
-    }
-    if (rcpt == NULL) {
-        return;
-    }
+    TCL_SIZE_T count;
     input = Tcl_NewListObj(0, NULL);
     Tcl_IncrRefCount(input);
     Tcl_ListObjAppendElement(conn->interp, input, Tcl_NewStringObj(recipient->addr, -1));
     if (SmtpdResolveAliases(conn->config, conn->interp, input,
                            conn->config->maxrcpt - conn->rcpt.count + 1,
+                           (conn->flags & SMTPD_LOCAL) != 0u,
                            &resolved) != TCL_OK) {
         Tcl_Obj *options = Tcl_GetReturnOptions(conn->interp, TCL_ERROR);
         Tcl_Obj *key = Tcl_NewStringObj("-errorcode", -1), *errorCode = NULL;
@@ -2065,11 +2071,11 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
         (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd alias resolution)");
         Tcl_DStringSetLength(&conn->reply, 0);
         Tcl_DStringAppend(&conn->reply, reply, -1);
-        SmtpdRcptFree(conn, NULL, index, 0u);
+        SmtpdRcptFree(conn, NULL, 0, 0u);
         Tcl_DecrRefCount(key);
         Tcl_DecrRefCount(options);
         Tcl_DecrRefCount(input);
-        return;
+        return NULL;
     }
     Tcl_DecrRefCount(input);
     /* Validate the Tcl boundary even if the shared helper is replaced. */
@@ -2078,9 +2084,42 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
         Ns_Log(Error, "nssmtpd: alias resolver must return a nonempty recipient list");
         Tcl_DStringSetLength(&conn->reply, 0);
         Tcl_DStringAppend(&conn->reply, "451 Alias resolution failed\r\n", -1);
-        SmtpdRcptFree(conn, NULL, index, 0u);
+        SmtpdRcptFree(conn, NULL, 0, 0u);
         Tcl_DecrRefCount(resolved);
         Tcl_ResetResult(conn->interp);
+        return NULL;
+    }
+    Tcl_ResetResult(conn->interp);
+    return resolved;
+}
+
+/* Apply the saved expansion only after policy accepts the original address.
+ * Destinations inherit its flags/data but receive their own transport routes. */
+static void
+SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient, Tcl_Obj *resolved)
+{
+    smtpdRcpt *rcpt, *head = NULL, *tail = NULL;
+    Tcl_Obj **targets;
+    TCL_SIZE_T count, i;
+    int index = 0;
+
+    for (rcpt = conn->rcpt.list; rcpt != NULL && rcpt != recipient; rcpt = rcpt->next) {
+        index++;
+    }
+    if (rcpt == NULL) {
+        return;
+    }
+    if (Tcl_ListObjGetElements(conn->interp, resolved, &count, &targets) != TCL_OK || count < 1) {
+        Tcl_DStringSetLength(&conn->reply, 0);
+        Tcl_DStringAppend(&conn->reply, "451 Alias resolution failed\r\n", -1);
+        SmtpdRcptFree(conn, NULL, index, 0u);
+        return;
+    }
+    /* A custom rcptproc may have added recipients since the preflight. */
+    if (count > conn->config->maxrcpt - conn->rcpt.count + 1) {
+        Tcl_DStringSetLength(&conn->reply, 0);
+        Tcl_DStringAppend(&conn->reply, "452 Too many recipients after alias expansion\r\n", -1);
+        SmtpdRcptFree(conn, NULL, index, 0u);
         return;
     }
     /* At least one iteration: head and tail are set before linking the list. */
@@ -2130,7 +2169,6 @@ SmtpdAliasRcpt(smtpdConn *conn, smtpdRcpt *recipient)
     ns_free_const_local(recipient->data);
     ns_free_const_local(recipient->relay.host);
     ns_free(recipient);
-    Tcl_DecrRefCount(resolved);
     Tcl_ResetResult(conn->interp);
 }
 
@@ -4900,7 +4938,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
                 Tcl_WrongNumArgs(interp, 2, objv, "recipients");
                 return TCL_ERROR;
             }
-            if (SmtpdResolveAliases(config, interp, objv[2], config->maxrcpt, &resolved) != TCL_OK) {
+            if (SmtpdResolveAliases(config, interp, objv[2], config->maxrcpt, true, &resolved) != TCL_OK) {
                 return TCL_ERROR;
             }
             Tcl_SetObjResult(interp, resolved);
@@ -4921,7 +4959,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
                 Tcl_WrongNumArgs(interp, 1, objv, "sender_email rcpt_email data_varname ?server? ?port?");
                 return TCL_ERROR;
             }
-            if (SmtpdResolveAliases(config, interp, objv[3], config->maxrcpt, &recipients) != TCL_OK) {
+            if (SmtpdResolveAliases(config, interp, objv[3], config->maxrcpt, true, &recipients) != TCL_OK) {
                 return TCL_ERROR;
             }
             if (aliases) {

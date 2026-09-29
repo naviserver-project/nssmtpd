@@ -8,11 +8,15 @@ namespace eval smtpd {
 # Shared by SMTP reception, ns_smtpd send, and ns_smtpd resolve.
 # The resolver is a command prefix returning FINAL envelope recipients.
 # Backend access and recursive alias policy belong to the configured proc.
-proc smtpd::resolvealiases {resolver recipients maxrcpt} {
+proc smtpd::resolvealiases {resolver recipients maxrcpt passthrough} {
     set resolved {}
     set seen [dict create]
     foreach recipient $recipients {
-        set targets [uplevel #0 [list {*}$resolver $recipient]]
+        set command [list {*}$resolver -recipient $recipient]
+        # Outgoing sends, resolve, and LOCAL submissions must override any
+        # rejection default in the configuration or callback prefix.
+        if {$passthrough} {lappend command -rejectunknown false}
+        set targets [uplevel #0 $command]
         if {[llength $targets] == 0} {
             return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} \
                 "unknown recipient: $recipient"
@@ -40,26 +44,48 @@ proc smtpd::resolvealiases {resolver recipients maxrcpt} {
 
 # Optional address-only aliases(5)/virtual(5) text-file backend. Read one
 # snapshot per lookup; administrators can replace the file atomically.
-proc smtpd::filealiases {format filename domains recipient} {
-    if {$format ni {aliases virtual}} {
-        ::error "alias file format must be aliases or virtual"
-    }
+proc smtpd::resolvefilealiases {args} {
+    lassign [smtpd::ParseFileAliasArgs $args] format filename domains recipient rejectunknown
     set domains [lmap domain $domains {string tolower $domain}]
     set domain [string tolower [lindex [split $recipient @] end]]
     if {$domain ni $domains} {return [list $recipient]}
     set map [smtpd::ReadAliasFile $format $filename]
+    if {$rejectunknown && [smtpd::FileAliasKey $format $map $recipient] eq ""} {
+        return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} \
+            "unknown recipient: $recipient"
+    }
     set budget 10000
     return [smtpd::ExpandFileAlias $format $map $domains $recipient {} budget]
 }
 
-# Test membership, not whether expansion changes the address. Identity
-# mappings and virtual catch-alls are valid recipient declarations.
-proc smtpd::filealiasexists {format filename domains recipient} {
-    set domains [lmap domain $domains {string tolower $domain}]
-    set domain [string tolower [lindex [split $recipient @] end]]
-    if {$domain ni $domains} {return 1}
-    set map [smtpd::ReadAliasFile $format $filename]
-    return [expr {[smtpd::FileAliasKey $format $map $recipient] ne ""}]
+# Named options for alias expansion and optional recipient validation.
+# The module appends -recipient and, for passthrough, -rejectunknown false.
+proc smtpd::ParseFileAliasArgs {arguments} {
+    ns_parseargs {-format -file -domains -recipient -rejectunknown} $arguments
+    if {![info exists recipient]} {::error "missing required option -recipient"}
+    set path ns/server/[ns_info server]/module/nssmtpd
+    if {![info exists rejectunknown]} {
+        set rejectunknown [ns_config $path rejectunknownrecipients false]
+    }
+    if {![string is boolean -strict $rejectunknown]} {
+        ::error "rejectunknownrecipients / -rejectunknown must be a boolean"
+    }
+    if {![info exists format]} {
+        set format [ns_config $path aliasformat virtual]
+    }
+    foreach option {file domains} {
+        if {![info exists $option]} {
+            set section [ns_configsection $path]
+            if {$section eq "" || [ns_set ifind $section alias$option] < 0} {
+                ::error "provide -$option or configure alias$option"
+            }
+            set $option [ns_config $path alias$option]
+        }
+    }
+    if {$format ni {aliases virtual}} {
+        ::error "alias file format must be aliases or virtual"
+    }
+    return [list $format $file $domains $recipient $rejectunknown]
 }
 
 proc smtpd::ReadAliasFile {format filename} {
@@ -287,32 +313,6 @@ proc smtpd::mail { id } {
     ns_log Debug(smtpd) "### smtpd::mail $id"
 }
 
-# A false result means the current recipient was removed and a reply set.
-# Custom rcptproc implementations may call this helper explicitly.
-proc smtpd::checkrecipient {id} {
-    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd recipientcheckproc ""]
-    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {
-        return 1
-    }
-    set recipient [lindex [ns_smtpd getrcpt $id 0] 0]
-    try {
-        set accepted [uplevel #0 [list {*}$prefix $recipient]]
-        if {![string is boolean -strict $accepted]} {
-            ::error "recipientcheckproc must return a boolean"
-        }
-        if {$accepted} {
-            return 1
-        }
-        set reply "550 Unknown recipient\r\n"
-    } on error {message options} {
-        ns_log Error "smtpd recipient check failed: $message"
-        set reply "451 Recipient lookup failed\r\n"
-    }
-    ns_smtpd delrcpt $id 0
-    ns_smtpd setreply $id $reply
-    return 0
-}
-
 # An optional RCPT policy, separate from recipient existence checks. The
 # callback sees the original envelope and must not mutate the SMTP session.
 proc smtpd::checkpolicy {id} {
@@ -425,7 +425,6 @@ proc smtpd::GreylistCheck {key now} {
 }
 
 proc smtpd::rcpt { id } {
-    if {![smtpd::checkrecipient $id]} {return}
     if {![smtpd::checkpolicy $id]} {return}
 
     # Current recipient

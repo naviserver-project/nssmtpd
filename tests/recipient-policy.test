@@ -47,6 +47,13 @@ test recipient-known {known alias expands for all peer/policy configurations} -b
     policy_session known@example.test
 } -result {250 250 one@remote.test}
 
+test recipient-snapshot {validation and expansion share one file read} -body {
+    policy_map
+    nsv_set alias-test reads 0
+    policy_session known@example.test
+    nsv_get alias-test reads
+} -result 1
+
 test recipient-unknown {unknown original recipient rejected only for untrusted opted-in peer} -body {
     policy_map
     set expected [expr {$strict ? "550 503 {}" : "250 250 unknown@example.test"}]
@@ -111,16 +118,18 @@ test recipient-send {direct outgoing send ignores incoming recipient policy} -bo
     } finally {ns_connchan close [dict get $sink channel]}
 } -result {unknown@example.test one@remote.test}
 
-test recipient-filelookup {classical membership, case folding and out-of-scope bypass} -body {
+test recipient-filelookup {strict classical lookup preserves identity and rejects missing entries} -body {
     policy_map "known: one@remote.test\nidentity: identity"
     set results {}
     foreach address {KNOWN@EXAMPLE.TEST identity@example.test unknown@example.test} {
-        lappend results [smtpd::filealiasexists aliases $aliasfile EXAMPLE.TEST $address]
+        try {
+            lappend results [smtpd::resolvefilealiases -format aliases -file $aliasfile -domains EXAMPLE.TEST -rejectunknown true -recipient $address]
+        } on error {message options} {lappend results [dict get $options -errorcode]}
     }
     file delete -force $aliasfile
-    lappend results [smtpd::filealiasexists virtual $aliasfile example.test one@remote.test]
+    lappend results [smtpd::resolvefilealiases -file $aliasfile -domains example.test -rejectunknown true -recipient one@remote.test]
     set results
-} -result {1 1 0 1}
+} -result {one@remote.test identity@example.test {NSSMTPD ALIAS UNKNOWN} one@remote.test}
 
 file delete -force $aliasfile
 set failures $::tcltest::numTests(Failed)

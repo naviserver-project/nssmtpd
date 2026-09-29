@@ -47,19 +47,25 @@ ns_section ns/server/test/module/nssmtpd {
         ns_param aliasproc {alias_test_resolver {prefix argument}}
     } elseif {$::env(ALIAS_TEST_MODE) in {files filevirtual policyexternal policytrusted policyoff policyempty}} {
         set format [expr {$::env(ALIAS_TEST_MODE) eq "files" ? "aliases" : "virtual"}]
-        ns_param aliasproc [list smtpd::filealiases $format \
-                               [file join $::env(ALIAS_TEST_HOME) aliases] {example.test}]
+        if {$::env(ALIAS_TEST_MODE) in {files policyexternal}} {
+            ns_param aliasformat $format
+            ns_param aliasfile [file join $::env(ALIAS_TEST_HOME) aliases]
+            ns_param aliasdomains {example.test}
+            ns_param aliasproc smtpd::resolvefilealiases
+        } else {
+            ns_param aliasproc [list smtpd::resolvefilealiases -format $format -file \
+                                   [file join $::env(ALIAS_TEST_HOME) aliases] -domains {example.test}]
+        }
     } elseif {$::env(ALIAS_TEST_MODE) eq "empty"} {
         ns_param aliasproc ""
     }
     if {$::env(ALIAS_TEST_MODE) in {policyexternal policytrusted}} {
-        ns_param recipientcheckproc [list smtpd::filealiasexists virtual \
-                                        [file join $::env(ALIAS_TEST_HOME) aliases] {example.test}]
+        ns_param rejectunknownrecipients true
     } elseif {$::env(ALIAS_TEST_MODE) eq "policyempty"} {
-        ns_param recipientcheckproc ""
+        ns_param rejectunknownrecipients false
     }
     if {[string match grey* $::env(ALIAS_TEST_MODE)]} {
-        ns_param recipientcheckproc grey_test_exists
+        ns_param rejectunknownrecipients true
         if {$::env(ALIAS_TEST_MODE) in {greyexternal greytrusted}} {
             ns_param recipientpolicyproc {grey_test_policy {prefix argument}}
         } elseif {$::env(ALIAS_TEST_MODE) eq "greyempty"} {

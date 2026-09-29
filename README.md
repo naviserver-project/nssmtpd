@@ -207,7 +207,8 @@ interpreter:
 
 ```tcl
 namespace eval mymail {}
-proc mymail::aliases {recipient} {
+proc mymail::aliases {args} {
+    ns_parseargs {-recipient {-rejectunknown false}} $args
     switch -- $recipient {
         webmaster@openacs.org {
             return {maintainer@example.net backup@example.net}
@@ -220,7 +221,9 @@ proc mymail::aliases {recipient} {
 }
 ```
 
-The callback receives one envelope recipient and returns a Tcl list of
+The module appends -recipient followed by the envelope address. For LOCAL
+submissions, direct sends and resolve calls it also appends -rejectunknown false.
+Custom callbacks must accept these named arguments. The callback returns a Tcl list of
 **final** envelope addresses. A command prefix with fixed arguments is also
 supported, e.g. `ns_param aliasproc {mymail::aliases tenant1}`. The module
 does not impose a storage backend: the proc can use a dictionary, file, or
@@ -236,7 +239,8 @@ Callback contract:
   request to discard mail silently. For an alias-only local domain, the
   callback should reject unmapped local addresses rather than pass them through.
 - Raise a Tcl error for a lookup/backend failure. Incoming SMTP returns
-  `451`; an empty result returns `550`; exceeding `maxrcpt` returns `452`.
+  `451`; an empty result or error code `NSSMTPD ALIAS UNKNOWN` returns `550`;
+  exceeding `maxrcpt` returns `452`.
   Direct send/resolve calls return Tcl errors. Resolver failures never fall
   back to sending to the unresolved address.
 - Resolve any alias chains inside the callback, with bounded recursion
@@ -249,8 +253,8 @@ Callback contract:
 
 Both SMTP reception and `ns_smtpd send` automatically use the configured
 hook. Message headers and the envelope sender are unchanged. For receiving,
-the original address first passes the existing peer/domain relay check and
-`rcptproc`. Only accepted recipients are expanded; targets inherit that
+the original address first passes the existing peer/domain relay check, then
+alias resolution, then `rcptproc`. Only accepted recipients are expanded; targets inherit that
 recipient's flags and data, and domain routes are looked up for the targets.
 `rcptproc` is not called again for each target. `dataproc` sees the expanded
 list. Thus allowing a local alias to forward externally does not authorize
@@ -283,12 +287,43 @@ the same approach with optional application-defined persistence procedures.
 
 ### Text alias files
 
-The supplied `smtpd::filealiases` callback accepts an uncompiled traditional
+`smtpd::resolvefilealiases` accepts named options
+parsed by `ns_parseargs`: `-format` (`virtual` or `aliases`),
+`-file` (map filename), and `-domains` (Tcl list of recipient domains).
+Omitted options use the module settings `aliasformat`, `aliasfile`, and
+`aliasdomains`, respectively. `aliasformat` defaults to `virtual`. File and
+domains must each be provided either by an option or a module setting;
+otherwise the callback raises a configuration error. Explicit options always
+take precedence, including an explicitly empty domains list.
+Options can appear in any order.
+An empty domains list matches no domains. The module supplies the recipient with
+`-recipient`, so a dash-prefixed address is unambiguous and no `--` separator is
+needed. The `-rejectunknown` option defaults to `rejectunknownrecipients`
+(`false` if unset). Custom command prefixes remain supported, but must accept
+the new named arguments.
+
+For a virtual map with strict incoming validation:
+
+```tcl
+ns_section "ns/server/$server/module/nssmtpd" {
+    ns_param aliasfile               /var/www/openacs/etc/mail/virtual
+    ns_param aliasdomains            {openacs.org}
+    # ns_param aliasformat           virtual ;# default
+    ns_param aliasproc               smtpd::resolvefilealiases
+    ns_param rejectunknownrecipients true
+}
+```
+
+These settings are read by the file resolver only and do not enable alias
+resolution without aliasproc. The callback prefix may override them, for example
+`{smtpd::resolvefilealiases -file /some/other/virtual}`.
+
+The supplied `smtpd::resolvefilealiases` callback accepts an uncompiled traditional
 `aliases` or Postfix `virtual` text file. For example:
 
 ```tcl
 ns_section ns/server/${server}/module/nssmtpd {
-    ns_param aliasproc [list smtpd::filealiases aliases /etc/aliases {openacs.org}]
+    ns_param aliasproc [list smtpd::resolvefilealiases -format aliases -file /etc/aliases -domains {openacs.org}]
     ns_param relaydomains openacs.org
     ns_param localdomains 127.0.0.1
 }
@@ -304,15 +339,15 @@ maintainers: alice@example.net,
 ```
 
 For virtual maps, use the command prefix
-`[list smtpd::filealiases virtual /etc/postfix/virtual {openacs.org}]`:
+`[list smtpd::resolvefilealiases -file /etc/postfix/virtual -domains {openacs.org}]`:
 
 ```text
 webmaster@openacs.org alice@example.net, bob@example.net
 @openacs.org fallback@example.net
 ```
 
-The arguments are `format filename domains recipient`; the module appends
-the recipient. Both formats support blank lines, full-line `#` comments,
+The module appends -recipient and the address after the configured options.
+Both formats support blank lines, full-line `#` comments,
 indented continuations and comma-separated destinations. Virtual maps also
 accept destinations separated by spaces or tabs, including mixtures of
 commas and whitespace. Empty comma-separated entries remain errors.
@@ -350,63 +385,49 @@ use it; no PostgreSQL or other database dependency is added.
 
 ### Optional incoming recipient validation
 
-The supplied `smtpd::rcpt` supports an optional `recipientcheckproc` command
-prefix. Unset or empty preserves its existing behavior. The check runs only
-for untrusted SMTP peers, after the module's relay authorization check and
-before alias expansion. Trust is determined by the connection's `LOCAL` flag
-(the `localdomains` peer-address configuration), never by the envelope sender.
-Direct `ns_smtpd send` and `ns_smtpd resolve` do not invoke this policy.
-
-For an alias-only incoming domain, add the following to the existing module
-section, retaining its listener, relay and other settings:
+The file resolver can reject unknown original recipients within `aliasdomains`:
 
 ```tcl
 ns_section "ns/server/$server/module/nssmtpd" {
-    ns_param rcptproc smtpd::rcpt
-    ns_param aliasproc [list smtpd::filealiases virtual \
-        /var/www/openacs/etc/mail/virtual {openacs.org}]
-    ns_param recipientcheckproc [list smtpd::filealiasexists virtual \
-        /var/www/openacs/etc/mail/virtual {openacs.org}]
+    ns_param aliasfile               /var/www/openacs/etc/mail/virtual
+    ns_param aliasdomains            {openacs.org}
+    ns_param aliasproc               smtpd::resolvefilealiases
+    ns_param rejectunknownrecipients true
 }
 ```
 
-`filealiasexists` shares the parser and matching order with `filealiases`.
-An exact entry (including an identity mapping) or virtual catch-all declares
-the original recipient known. An unknown original recipient in the configured
-domains is rejected with `550 Unknown recipient`. Targets reached during alias
-expansion need not themselves have map entries. Addresses outside the configured
-domains pass this check; the existing relay authorization still applies.
-The domains list should contain only domains where map membership defines
-valid recipients, not domains with unlisted local mailboxes.
+`rejectunknownrecipients` defaults to `false`. The resolver reads this setting
+unless its `-rejectunknown` option supplies an override. An exact entry,
+identity mapping or virtual catch-all establishes that a recipient is known.
+Unknown recipients within the configured domains return `550 Unknown recipient`
+when rejection is enabled. Other domains pass through this lookup; the existing
+relay authorization still applies. Missing or malformed maps cause temporary
+failure (`451`), never an unknown-user rejection.
 
-Trusted peers bypass this additional check and retain passthrough behavior.
-Missing or malformed files and callback errors produce `451 Recipient lookup
-failed`. Rejection removes only the current recipient and preserves previously
-accepted recipients. Ordinary alias expansion errors retain their existing
-behavior, including for trusted submissions.
+For SMTP peers marked `LOCAL`, direct `ns_smtpd send`, and `ns_smtpd resolve`,
+the module explicitly appends `-rejectunknown false`, overriding configuration
+and fixed callback options. Unknown addresses then pass through, while known
+aliases still expand. The connection peer determines LOCAL status, not the
+sender or recipient address. A direct call to `smtpd::resolvefilealiases` without
+`-rejectunknown` uses the configured default.
 
-The callback receives one original envelope address and must return a Tcl
-boolean: true to continue, false for unknown recipient. Errors or nonboolean
-results cause temporary failure. It must not modify SMTP sessions or send mail.
-It can use any backend; no database is required. Membership validation and
-expansion perform separate file reads, so a replacement can become visible
-between them. Use a stable map during a transaction if a consistent snapshot
-across both operations is required.
-
-This is a Tcl policy setting used by the supplied `smtpd::rcpt`, not an
-unconditional C-layer hook. Existing custom `rcptproc` implementations remain
-unchanged. To adopt it in a custom callback, call this before modifying the
-current recipient or setting its reply:
-
-```tcl
-if {![smtpd::checkrecipient $id]} {return}
-```
+Resolution and the existence check use one file snapshot per original recipient.
+The C module resolves after relay authorization and before `rcptproc` (including
+greylisting), retaining the result until policy accepts the original recipient.
+Only then does it replace the recipient with the saved destinations. Policy
+rejection discards that result, preserving earlier recipients. Custom `rcptproc`
+callbacks still see the original recipient. No separate membership callback is
+needed: remove the former `recipientcheckproc` setting when migrating, and use
+`rejectunknownrecipients true` to retain strict incoming validation. The removed
+`smtpd::checkrecipient` and `smtpd::filealiasexists` helpers must also be removed
+from custom Tcl code. Update custom alias callbacks to accept the named
+`-recipient` and optional `-rejectunknown` arguments.
 
 ### Optional incoming policy and greylisting
 
 To enable lightweight greylisting, add this to the existing module section.
-Keep `recipientcheckproc` configured so unknown recipients are rejected before
-creating greylist state. No C rebuild, database or additional daemon is needed.
+Enable rejectunknownrecipients in the file resolver so unknown recipients are rejected before
+creating greylist state. No database or additional daemon is needed.
 
 ```tcl
 ns_section "ns/server/$server/module/nssmtpd" {
@@ -419,14 +440,13 @@ ns_section "ns/server/$server/module/nssmtpd" {
 ```
 
 `recipientpolicyproc` is disabled when unset or empty. The supplied
-`smtpd::rcpt` invokes it after relay authorization and `recipientcheckproc`,
+`smtpd::rcpt` invokes it after relay authorization and alias resolution/recipient validation,
 before alias expansion and DATA. Trusted peers (`LOCAL`, set from
 `localdomains`) bypass it. `ns_smtpd send` and `ns_smtpd resolve` do not invoke
-it. Existing custom `rcptproc` callbacks are unchanged; to adopt both policies,
-call these helpers before modifying the recipient or reply:
+it. Existing custom `rcptproc` callbacks are unchanged; to adopt greylisting,
+call this helper before modifying the recipient or reply:
 
 ```tcl
-if {![smtpd::checkrecipient $id]} {return}
 if {![smtpd::checkpolicy $id]} {return}
 ```
 

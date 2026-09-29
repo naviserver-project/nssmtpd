@@ -118,13 +118,13 @@ test alias-common-3 {incoming expansion with existing original-recipient policy}
         [string match {*To: webmaster@example.test*} [nsv_get alias-test body]]
 } -result {1 1 webmaster@example.test 1}
 
-test alias-common-4 {custom RCPT rejection does not call alias resolver} -body {
+test alias-common-4 {custom RCPT rejection discards the preflight expansion} -body {
     set calls [nsv_get alias-test calls]
     set socket [smtp_open]
     set reply [smtp_command $socket {RCPT TO:<denied@example.test>}]
     set data [smtp_command $socket DATA]
     smtp_close $socket
-    list $reply [string range $data 0 2] [expr {$calls == [nsv_get alias-test calls]}]
+    list $reply [string range $data 0 2] [expr {$calls + $enabled == [nsv_get alias-test calls]}]
 } -result {{550 Policy rejected} 503 1}
 
 test alias-common-5 {custom callback may delete a recipient without setting a reply} -body {
@@ -142,6 +142,14 @@ test alias-common-6 {callback insertion then non-head deletion preserves the lis
     smtp_close $socket
     lindex [string range $delivery 4 end] 0
 } -result added@remote.test
+
+test alias-policy-limit {recipient limit is rechecked after policy inserts recipients} -constraints aliases -body {
+    set socket [smtp_open]
+    set reply [smtp_command $socket {RCPT TO:<grow@example.test>}]
+    set delivery [smtp_deliver $socket]
+    smtp_close $socket
+    list [string range $reply 0 2] [lsort [lindex [string range $delivery 4 end] 0]]
+} -result {452 {added1@remote.test added2@remote.test}}
 
 test alias-on-7 {incoming error codes and recipient rollback} -constraints aliases -body {
     set replies {}
