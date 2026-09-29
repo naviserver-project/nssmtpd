@@ -1,7 +1,5 @@
 # Author: Vlad Seryakov vlad@crystalballinc.com
 # Gustaf Neumann
-#
-# March 2006
 
 namespace eval smtpd {
     variable version "Smtpd version 2.7"
@@ -173,6 +171,9 @@ proc smtpd::init {} {
     ns_log notice "smtpd::init: Relay Domains: [ns_smtpd relay get]"
     ns_smtpd local set {*}[ns_config $path localdomains "localhost"]
     ns_log notice "smtpd::init: Local Domains: [ns_smtpd local get]"
+    if {[ns_config $path recipientpolicyproc ""] ne ""} {
+        smtpd::greylistinit
+    }
 }
 
 # Decode message header
@@ -312,8 +313,120 @@ proc smtpd::checkrecipient {id} {
     return 0
 }
 
+# An optional RCPT policy, separate from recipient existence checks. The
+# callback sees the original envelope and must not mutate the SMTP session.
+proc smtpd::checkpolicy {id} {
+    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd recipientpolicyproc ""]
+    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {
+        return 1
+    }
+    try {
+        set sender [ns_smtpd getfrom $id]
+        if {$sender eq "<>"} {set sender ""}
+        set context [dict create id $id peeraddr [ns_conn peeraddr] \
+                         sender $sender \
+                         recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
+        set result [uplevel #0 [list {*}$prefix $context]]
+        set action [dict get $result action]
+        switch -- $action {
+            accept {return 1}
+            defer {set code "451 4.7.1"; set message "Please try again later"}
+            reject {set code "550 5.7.1"; set message "Recipient rejected by policy"}
+            default {::error "recipientpolicyproc returned an invalid action"}
+        }
+        if {[dict exists $result message]} {set message [dict get $result message]}
+        # One bounded ASCII line: never let a callback inject SMTP replies.
+        if {[string length $message] > 400 || ![regexp {^[\x20-\x7e]+$} $message]} {
+            ::error "recipientpolicyproc returned an invalid message"
+        }
+        set reply "$code $message\r\n"
+        ns_log Notice "smtpd policy: $action [list $context]"
+    } on error {message options} {
+        ns_log Error "smtpd recipient policy failed: $message"
+        set reply "451 4.3.0 Recipient policy unavailable\r\n"
+    }
+    ns_smtpd delrcpt $id 0
+    ns_smtpd setreply $id $reply
+    return 0
+}
+
+# Called once at startup by smtpd::init when a recipient policy is enabled.
+# Custom initproc implementations using greylisting must call this too.
+proc smtpd::greylistinit {} {
+    set path ns/server/[ns_info server]/module/nssmtpd
+    set config {}
+    foreach {name default} {delay 300 retrywindow 14400 lifetime 604800 maxentries 10000} {
+        set value [ns_config $path greylist$name $default]
+        if {![string is integer -strict $value] || $value <= 0} {
+            ::error "greylist$name must be a positive integer (seconds for time values)"
+        }
+        dict set config $name $value
+    }
+    if {[dict get $config retrywindow] <= [dict get $config delay]} {
+        ::error "greylistretrywindow must exceed greylistdelay"
+    }
+    if {![nsv_exists smtpd-greylist mutex]} {
+        nsv_set smtpd-greylist mutex [ns_mutex create smtpd-greylist]
+    }
+    ns_mutex eval [nsv_get smtpd-greylist mutex] {
+        nsv_set smtpd-greylist config $config
+        nsv_set smtpd-greylist sweep 0
+        nsv_array reset smtpd-greylist-entries {}
+    }
+}
+
+proc smtpd::greylist {context} {
+    set key [list [dict get $context peeraddr] \
+                 [dict get $context sender] [dict get $context recipient]]
+    set decision [smtpd::GreylistCheck $key [clock seconds]]
+    # No message body or subject is logged.
+    if {[dict get $decision reason] in {new retry expired capacity}} {
+        ns_log Notice "smtpd greylist: [dict get $decision reason] [list $key]"
+    }
+    return $decision
+}
+
+# The explicit time argument permits deterministic tests of expiry boundaries.
+# The mutex covers both the transition and capacity checks across interpreters.
+proc smtpd::GreylistCheck {key now} {
+    ns_mutex eval [nsv_get smtpd-greylist mutex] {
+        set config [nsv_get smtpd-greylist config]
+        if {$now >= [nsv_get smtpd-greylist sweep]} {
+            foreach {entry record} [nsv_array get smtpd-greylist-entries] {
+                lassign $record first expires passed
+                if {$now >= $expires} {nsv_unset smtpd-greylist-entries $entry}
+            }
+            nsv_set smtpd-greylist sweep [expr {$now + 60}]
+        }
+        set reason new
+        if {[nsv_get smtpd-greylist-entries $key record]} {
+            lassign $record first expires passed
+            if {$now < $expires && $now >= $first} {
+                if {$passed || $now - $first >= [dict get $config delay]} {
+                    nsv_set smtpd-greylist-entries $key \
+                        [list $first [expr {$now + [dict get $config lifetime]}] 1]
+                    return [dict create action accept reason [expr {$passed ? "known" : "retry"}]]
+                }
+                # Early retries must not move the first-seen time or expiry.
+                return [dict create action defer reason early]
+            }
+            nsv_unset smtpd-greylist-entries $key
+            set reason expired
+        }
+        if {[nsv_array size smtpd-greylist-entries] >= [dict get $config maxentries]} {
+            # Preserve existing entries and mail availability under overload.
+            # New tuples pass without being remembered until space is reclaimed.
+            return [dict create action accept reason capacity]
+        }
+        nsv_set smtpd-greylist-entries $key \
+            [list $now [expr {$now + [dict get $config retrywindow]}] 0]
+        return [dict create action defer reason $reason]
+    }
+}
+
 proc smtpd::rcpt { id } {
     if {![smtpd::checkrecipient $id]} {return}
+    if {![smtpd::checkpolicy $id]} {return}
 
     # Current recipient
     lassign [ns_smtpd getrcpt $id 0] user_email user_flags spam_score

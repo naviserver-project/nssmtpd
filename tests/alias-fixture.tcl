@@ -60,3 +60,17 @@ proc alias_test_data {id} {
     nsv_set alias-test recipients [ns_smtpd getrcpt $id]
     ns_smtpd setreply $id "250 [list $recipients]\r\n"
 }
+
+proc grey_test_exists {recipient} {
+    expr {$recipient ne "unknown@example.test"}
+}
+proc grey_test_policy {tag context} {
+    if {$tag ne {prefix argument}} {error {policy prefix lost}}
+    nsv_incr grey-test calls
+    nsv_set grey-test context $context
+    if {[nsv_get grey-test override result]} {
+        if {$result eq "error"} {error {backend unavailable}}
+        return $result
+    }
+    return [smtpd::greylist $context]
+}

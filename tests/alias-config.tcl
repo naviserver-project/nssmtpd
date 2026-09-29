@@ -40,10 +40,10 @@ ns_section ns/server/test/module/nssmtpd {
     ns_param writetimeout 3
     ns_param maxrcpt 3
     ns_param relaydomains example.test
-    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {untrusted policyexternal policyoff policyempty} ? "" : "127.0.0.1"}]
-    ns_param rcptproc [expr {[string match policy* $::env(ALIAS_TEST_MODE)] ? "smtpd::rcpt" : "alias_test_rcpt"}]
+    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
+    ns_param rcptproc [expr {([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
     ns_param dataproc alias_test_data
-    if {$::env(ALIAS_TEST_MODE) in {enabled untrusted proxy}} {
+    if {$::env(ALIAS_TEST_MODE) in {enabled untrusted proxy greyexternal greytrusted greyoff greyempty}} {
         ns_param aliasproc {alias_test_resolver {prefix argument}}
     } elseif {$::env(ALIAS_TEST_MODE) in {files filevirtual policyexternal policytrusted policyoff policyempty}} {
         set format [expr {$::env(ALIAS_TEST_MODE) eq "files" ? "aliases" : "virtual"}]
@@ -57,6 +57,14 @@ ns_section ns/server/test/module/nssmtpd {
                                         [file join $::env(ALIAS_TEST_HOME) aliases] {example.test}]
     } elseif {$::env(ALIAS_TEST_MODE) eq "policyempty"} {
         ns_param recipientcheckproc ""
+    }
+    if {[string match grey* $::env(ALIAS_TEST_MODE)]} {
+        ns_param recipientcheckproc grey_test_exists
+        if {$::env(ALIAS_TEST_MODE) in {greyexternal greytrusted}} {
+            ns_param recipientpolicyproc {grey_test_policy {prefix argument}}
+        } elseif {$::env(ALIAS_TEST_MODE) eq "greyempty"} {
+            ns_param recipientpolicyproc ""
+        }
     }
     if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)

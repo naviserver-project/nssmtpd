@@ -1,0 +1,240 @@
+# No external services or sleeps: explicit times test the shared state machine.
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+set active [expr {$::env(ALIAS_TEST_MODE) eq "greyexternal"}]
+set trusted [expr {$::env(ALIAS_TEST_MODE) eq "greytrusted"}]
+testConstraint active $active
+proc grey_reset {} {
+    if {[nsv_exists smtpd-greylist mutex]} {
+        ns_mutex eval [nsv_get smtpd-greylist mutex] {
+            nsv_array reset smtpd-greylist-entries {}
+            nsv_set smtpd-greylist sweep 0
+        }
+    }
+    nsv_array reset grey-test {calls 0}
+    nsv_set alias-test calls 0
+}
+proc grey_command {s line} {
+    puts $s $line
+    flush $s
+    while {1} {
+        if {[gets $s reply] < 0} {error {unexpected SMTP EOF}}
+        if {[string index $reply 3] ne "-"} {return $reply}
+    }
+}
+proc grey_session {recipients {sender sender@example.test}} {
+    set s [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $s -translation crlf -buffering line
+    try {
+        gets $s
+        grey_command $s {EHLO test.example}
+        grey_command $s "MAIL FROM:<$sender>"
+        set replies {}
+        foreach recipient $recipients {
+            lappend replies [grey_command $s "RCPT TO:<$recipient>"]
+        }
+        set response [grey_command $s DATA]
+        set delivered {}
+        if {[string range $response 0 2] eq "354"} {
+            puts $s "Subject: greylist test\n\nBody"
+            set response [grey_command $s .]
+            set delivered [lsort [lindex [string range $response 4 end] 0]]
+        }
+        grey_command $s QUIT
+        return [list $replies [string range $response 0 2] $delivered]
+    } finally {close $s}
+}
+proc grey_codes {result} {
+    set codes {}
+    foreach reply [lindex $result 0] {lappend codes [string range $reply 0 2]}
+    return [list $codes {*}[lrange $result 1 end]]
+}
+proc grey_seed {recipient first expires passed} {
+    set key [list 127.0.0.1 sender@example.test $recipient]
+    ns_mutex eval [nsv_get smtpd-greylist mutex] {
+        nsv_set smtpd-greylist-entries $key [list $first $expires $passed]
+    }
+}
+
+test grey-first {only opted-in untrusted submissions deferred, before alias expansion} -setup {
+    grey_reset
+} -body {
+    set result [grey_codes [grey_session webmaster@example.test]]
+    list $result [nsv_get alias-test calls] [nsv_get grey-test calls]
+} -result [expr {$active ? "{451 503 {}} 0 1" : "{250 250 {one@remote.test two@remote.test}} 1 0"}]
+
+test grey-context {policy receives actual socket peer and original envelope} -constraints active -setup {
+    grey_reset
+    grey_session webmaster@example.test
+} -body {
+    set context [nsv_get grey-test context]
+    list [dict get $context peeraddr] [dict get $context sender] [dict get $context recipient] [string is integer -strict [dict get $context id]]
+} -result {127.0.0.1 sender@example.test webmaster@example.test 1}
+
+test grey-reply {normal greylisting uses the policy reply, not the backend failure reply} -constraints active -setup {
+    grey_reset
+} -body {
+    lindex [lindex [grey_session webmaster@example.test] 0] 0
+} -result {451 4.7.1 Please try again later}
+
+test grey-unknown {unknown recipient is rejected before policy or alias lookup} -setup {
+    grey_reset
+} -body {
+    list [grey_codes [grey_session unknown@example.test]] [nsv_get grey-test calls]
+} -result [expr {$trusted ? "{250 250 unknown@example.test} 0" : "{550 503 {}} 0"}]
+
+test grey-relay {untrusted external destination denied before policy} -setup {
+    grey_reset
+} -body {
+    list [grey_codes [grey_session victim@remote.test]] [nsv_get grey-test calls]
+} -result [expr {$trusted ? "{250 250 victim@remote.test} 0" : "{550 503 {}} 0"}]
+
+test grey-retry {mature retry is accepted and aliases expand; later deliveries pass} -constraints active -setup {
+    grey_reset
+    set now [clock seconds]
+    grey_seed webmaster@example.test [expr {$now - 301}] [expr {$now + 1000}] 0
+} -body {
+    list [grey_codes [grey_session webmaster@example.test]] [grey_codes [grey_session webmaster@example.test]]
+} -result {{250 250 {one@remote.test two@remote.test}} {250 250 {one@remote.test two@remote.test}}}
+
+test grey-rollback {deferral removes only the current recipient} -constraints active -setup {
+    grey_reset
+    set now [clock seconds]
+    grey_seed one@example.test [expr {$now - 301}] [expr {$now + 1000}] 1
+} -body {
+    grey_codes [grey_session {one@example.test webmaster@example.test}]
+} -result {{250 451} 250 one@example.test}
+
+test grey-null-sender {bounce envelope is a valid greylist tuple} -constraints active -setup {
+    grey_reset
+} -body {
+    list [grey_codes [grey_session webmaster@example.test {}]] [dict get [nsv_get grey-test context] sender]
+} -result {{451 503 {}} {}}
+
+test grey-errors {callback failure, invalid action and reply injection defer safely} -constraints active -body {
+    set replies {}
+    foreach result [list error {action invalid} "\{" {message absent-action} [dict create action reject message "bad\r\n250 injected"]] {
+        grey_reset
+        nsv_set grey-test override $result
+        lappend replies [lindex [lindex [grey_session webmaster@example.test] 0] 0]
+    }
+    lsort -unique $replies
+} -result {{451 4.3.0 Recipient policy unavailable}}
+
+test grey-decisions {explicit policy decisions map to fixed SMTP reply classes} -constraints active -body {
+    set results {}
+    foreach action {accept defer reject} {
+        grey_reset
+        nsv_set grey-test override [dict create action $action message Custom]
+        lappend results [grey_codes [grey_session webmaster@example.test]]
+    }
+    set results
+} -result {{250 250 {one@remote.test two@remote.test}} {451 503 {}} {550 503 {}}}
+
+test grey-resolve {resolver is independent of incoming greylisting} -setup {
+    grey_reset
+} -body {
+    list [ns_smtpd resolve webmaster@example.test] [nsv_get grey-test calls]
+} -result {{one@remote.test two@remote.test} 0}
+
+test grey-send {direct outbound SMTP is never greylisted} -setup {
+    grey_reset
+} -body {
+    nsv_set alias-sink messages {}
+    set sink [ns_connchan listen -bind 127.0.0.1 0 alias_sink_accept]
+    try {
+        set message "Subject: outgoing\r\n\r\nBody"
+        ns_smtpd send sender@example.test webmaster@example.test message 127.0.0.1 [dict get $sink port]
+        list [lindex [nsv_get alias-sink messages] 0 0] [nsv_get grey-test calls]
+    } finally {ns_connchan close [dict get $sink channel]}
+} -result {{one@remote.test two@remote.test} 0}
+
+test grey-timing {early retries do not reset timer; boundary retry grants sliding lifetime} -constraints active -setup {
+    grey_reset
+} -body {
+    set actions {}
+    foreach now {1000 1100 1299 1300 1400} {
+        lappend actions [dict get [smtpd::GreylistCheck tuple $now] action]
+    }
+    list $actions [nsv_get smtpd-greylist-entries tuple]
+} -result {{defer defer defer accept accept} {1000 606200 1}}
+
+test grey-expiry {pending window and passed lifetime expire} -constraints active -setup {
+    grey_reset
+} -body {
+    smtpd::GreylistCheck pending 1000
+    set pending [smtpd::GreylistCheck pending 15400]
+    smtpd::GreylistCheck passed 15400
+    smtpd::GreylistCheck passed 15700
+    set passed [smtpd::GreylistCheck passed 620500]
+    list [dict get $pending action] [dict get $passed action]
+} -result {defer defer}
+
+test grey-backwards-clock {clock rollback cannot create a premature allowance} -constraints active -setup {
+    grey_reset
+} -body {
+    smtpd::GreylistCheck tuple 1000
+    smtpd::GreylistCheck tuple 1300
+    list [dict get [smtpd::GreylistCheck tuple 900] action] [nsv_get smtpd-greylist-entries tuple]
+} -result {defer {900 15300 0}}
+
+test grey-capacity {bounded table preserves existing entries and bypasses new tuples at capacity} -constraints active -setup {
+    grey_reset
+    set saved [nsv_get smtpd-greylist config]
+    nsv_set smtpd-greylist config [dict replace $saved maxentries 2]
+} -body {
+    smtpd::GreylistCheck a 1000
+    smtpd::GreylistCheck b 1000
+    set full [smtpd::GreylistCheck c 1000]
+    set count [nsv_array size smtpd-greylist-entries]
+    set retry [smtpd::GreylistCheck a 1300]
+    set freed [smtpd::GreylistCheck c 15400]
+    list $full $count [dict get $retry action] [dict get $freed action] [nsv_array size smtpd-greylist-entries]
+} -cleanup {
+    nsv_set smtpd-greylist config $saved
+} -result {{action accept reason capacity} 2 accept defer 2}
+
+test grey-tuples {peer, sender and original recipient each distinguish tuples} -constraints active -setup {
+    grey_reset
+} -body {
+    set actions {}
+    foreach key {{192.0.2.1 a@x b@y} {192.0.2.2 a@x b@y} {192.0.2.1 c@x b@y} {192.0.2.1 a@x c@y}} {
+        lappend actions [dict get [smtpd::GreylistCheck $key 1000] action]
+    }
+    list $actions [nsv_array size smtpd-greylist-entries]
+} -result {{defer defer defer defer} 4}
+
+test grey-concurrent {concurrent interpreter requests cannot exceed the capacity bound} -constraints active -setup {
+    grey_reset
+    set saved [nsv_get smtpd-greylist config]
+    nsv_set smtpd-greylist config [dict replace $saved maxentries 7]
+} -body {
+    set threads {}
+    for {set i 0} {$i < 4} {incr i} {
+        lappend threads [ns_thread create [list apply {{worker} {
+            set counts {defer 0 accept 0}
+            for {set j 0} {$j < 25} {incr j} {
+                dict incr counts [dict get [smtpd::GreylistCheck [list $worker $j] 1000] action]
+            }
+            return $counts
+        }} $i]]
+    }
+    set totals {defer 0 accept 0}
+    foreach thread $threads {
+        dict for {action count} [ns_thread wait $thread] {dict incr totals $action $count}
+    }
+    list $totals [nsv_array size smtpd-greylist-entries]
+} -cleanup {
+    nsv_set smtpd-greylist config $saved
+} -result {{defer 7 accept 93} 7}
+
+test grey-disabled-state {unset/empty policy does not allocate greylist state} -body {
+    expr {[nsv_exists smtpd-greylist mutex] == ($::env(ALIAS_TEST_MODE) in {greyexternal greytrusted})}
+} -result 1
+
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever

@@ -402,6 +402,88 @@ current recipient or setting its reply:
 if {![smtpd::checkrecipient $id]} {return}
 ```
 
+### Optional incoming policy and greylisting
+
+To enable lightweight greylisting, add this to the existing module section.
+Keep `recipientcheckproc` configured so unknown recipients are rejected before
+creating greylist state. No C rebuild, database or additional daemon is needed.
+
+```tcl
+ns_section "ns/server/$server/module/nssmtpd" {
+    ns_param recipientpolicyproc smtpd::greylist
+    ns_param greylistdelay       300
+    ns_param greylistretrywindow 14400
+    ns_param greylistlifetime    604800
+    ns_param greylistmaxentries  10000
+}
+```
+
+`recipientpolicyproc` is disabled when unset or empty. The supplied
+`smtpd::rcpt` invokes it after relay authorization and `recipientcheckproc`,
+before alias expansion and DATA. Trusted peers (`LOCAL`, set from
+`localdomains`) bypass it. `ns_smtpd send` and `ns_smtpd resolve` do not invoke
+it. Existing custom `rcptproc` callbacks are unchanged; to adopt both policies,
+call these helpers before modifying the recipient or reply:
+
+```tcl
+if {![smtpd::checkrecipient $id]} {return}
+if {![smtpd::checkpolicy $id]} {return}
+```
+
+The callback is a Tcl command prefix receiving one dictionary with `id`
+(SMTP session ID), `peeraddr` (actual socket peer IP), `sender` (envelope sender,
+empty for a null sender), and `recipient` (original envelope recipient).
+It must return a dictionary with `action` equal to `accept`, `defer`, or
+`reject`. `accept` continues normal processing; it does not override later
+checks. `defer` returns `451 4.7.1`, and `reject` returns `550 5.7.1`.
+An optional `message` supplies 1–400 printable ASCII characters, without
+newlines; otherwise a default message is used. Extra result keys are allowed.
+Errors or invalid results produce `451 4.3.0 Recipient policy unavailable`.
+Only the current recipient is removed on failure. Callbacks must not modify
+SMTP sessions or send mail. The same interface can support a custom blacklist
+or allowlist backed by Tcl or the OpenACS API, without a module database dependency.
+
+`smtpd::greylist` uses the exact tuple of peer IP, envelope sender and original
+recipient. A first attempt receives a temporary rejection. A retry at least
+`greylistdelay` seconds later, but before `greylistretrywindow` seconds from the
+first attempt, is accepted. Early retries do not extend either timer. Successful
+retries allow that tuple for `greylistlifetime` seconds, refreshed on each
+accepted attempt. A different sender or recipient creates a different tuple;
+there is no blanket peer allowlist. The default values are five minutes, four
+hours, seven days and 10,000 entries respectively. All values must be positive
+integers; the retry window must exceed the delay.
+
+State is shared by the server's Tcl interpreters and protected by a mutex.
+Expired entries are reclaimed on incoming traffic, at most once per minute,
+and an accessed expired entry is also removed immediately. At the configured
+entry limit, new tuples **pass without being stored**, preserving existing
+retry state and mail availability; the `capacity` log reason makes this visible.
+This overload behavior weakens filtering and should be monitored.
+
+`smtpd::init` initializes greylisting when a recipient policy is configured.
+A custom `initproc` using greylisting must call `smtpd::greylistinit` once at
+startup. Initialization clears previous state; do not call it per connection.
+State is in memory only: restarting NaviServer resets it, and the next delivery
+may be delayed again. There is no persistence or cross-instance coordination
+in this first implementation. Missing initialization causes a temporary policy
+failure, not an unfiltered acceptance.
+
+Notice logs record policy deferrals/rejections and greylist `new`, `retry`,
+`expired` and `capacity` decisions with envelope information. They contain no
+message content. A passed greylist retry proves retry behavior, not sender
+identity or absence of spam. Legitimate messages are delayed; sending systems
+that change IP addresses between retries may be delayed repeatedly. Spammers
+that retry can pass. This is a small SMTP policy, not content filtering. The
+existing streaming relay still forwards before its message-data/spamd checks.
+
+For deployment, first run `make test`. After enabling the setting, verify from
+an **untrusted external client** that a known alias receives `451` initially,
+then `250` when the identical tuple retries after five minutes; send the message
+with DATA to confirm delivery. An unknown local recipient should still receive
+`550 Unknown recipient`, and an unrelated external destination should still
+receive `550 ... Relaying denied`. Confirm outgoing OpenACS mail still works.
+A manual `ns_smtpd resolve` does not exercise this incoming policy.
+
 To run the isolated tests (Tcl 8.6+, OpenSSL CLI and an installed
 NaviServer with OpenSSL support needed):
 
