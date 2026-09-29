@@ -2824,18 +2824,29 @@ EventPut(Tcl_Obj *dict, const char *key, const char *value)
     Tcl_DictObjPut(NULL, dict, Tcl_NewStringObj(key, -1), Tcl_NewStringObj(value != NULL ? value : "", -1));
 }
 
-/* Quote list elements without braces: even nested dictionaries and newlines
- * stay on one physical line. Readers parse lists/dicts, never evaluate them. */
+/* Keep each positional field a single token and each record a single line.
+ * Readers can split on spaces without decoding untrusted log content. */
 static void
-EventElement(Tcl_DString *line, const char *value)
+EventField(Tcl_DString *line, const char *value)
 {
-    int flags = 0;
-    TCL_SIZE_T length = Tcl_ScanElement(value, &flags);
-    char *quoted = ns_malloc(strlen(value) * 4u + 3u);
-    length = Tcl_ConvertElement(value, quoted, flags | TCL_DONT_USE_BRACES);
-    if (line->length != 0) Tcl_DStringAppend(line, " ", 1);
-    Tcl_DStringAppend(line, quoted, length);
-    ns_free(quoted);
+    const unsigned char *p = (const unsigned char *)(value != NULL && *value != '\0' ? value : "-");
+    for (; *p != '\0'; p++) {
+        if (*p <= 32 || *p == 127 || *p == '\\') {
+            Ns_DStringPrintf(line, "\\x%02x", *p);
+        } else {
+            Tcl_DStringAppend(line, (const char *)p, 1);
+        }
+    }
+}
+
+static Tcl_Obj *
+EventGet(Tcl_Obj *details, const char *name)
+{
+    Tcl_Obj *key = Tcl_NewStringObj(name, -1), *value = NULL;
+    Tcl_IncrRefCount(key);
+    Tcl_DictObjGet(NULL, details, key, &value);
+    Tcl_DecrRefCount(key);
+    return value;
 }
 
 static void
@@ -2844,32 +2855,64 @@ SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
     smtpdConfig *config = conn->config;
     Tcl_IncrRefCount(details);
     if (config->eventlog.enabled) {
-        Tcl_Obj *record = Tcl_NewDictObj(), **elements;
+        Tcl_Obj *value, *key, **targets;
+        Tcl_DictSearch search;
         TCL_SIZE_T count, i;
+        int code = 0, done;
         Tcl_DString line;
-        Ns_Time now;
         Ns_ReturnCode status = NS_ERROR;
-        char buffer[100];
+        char timestamp[41], codeString[16];
 
-        Tcl_IncrRefCount(record);
-        Ns_GetTime(&now);
-        EventPut(record, "version", "1");
-        Tcl_DictObjPut(NULL, record, Tcl_NewStringObj("timestamp", -1),
-                       Tcl_NewWideIntObj((Tcl_WideInt)now.sec * 1000 + now.usec / 1000));
-        EventPut(record, "server", config->server);
-        snprintf(buffer, sizeof(buffer), "%lld-%ld-%d-%lu",
-                 (long long)config->eventlog.started.sec, (long)config->eventlog.started.usec,
-                 getpid(), (unsigned long)conn->id);
-        EventPut(record, "session", buffer);
-        snprintf(buffer, sizeof(buffer), "%u", conn->transaction);
-        EventPut(record, "transaction", buffer);
-        EventPut(record, "peer", Ns_ConnPeerAddr(Ns_GetConn()));
-        EventPut(record, "sender", conn->from.addr);
-        EventPut(record, "event", event);
-        Tcl_DictObjPut(NULL, record, Tcl_NewStringObj("details", -1), details);
         Tcl_DStringInit(&line);
-        Tcl_ListObjGetElements(NULL, record, &count, &elements);
-        for (i = 0; i < count; i++) EventElement(&line, Tcl_GetString(elements[i]));
+        value = EventGet(details, "code");
+        if (value != NULL) (void)Tcl_GetIntFromObj(NULL, value, &code);
+        if (code >= 100 && code <= 599) {
+            snprintf(codeString, sizeof(codeString), "%d", code);
+        } else {
+            snprintf(codeString, sizeof(codeString), "-");
+        }
+        Ns_DStringPrintf(&line, "%s %s %s %s [%s] %lld-%ld-%d-%lu %u ",
+                         Ns_LogTime(timestamp), Ns_ThreadGetName(), codeString, event,
+                         Ns_ConnPeerAddr(Ns_GetConn()),
+                         (long long)config->eventlog.started.sec, (long)config->eventlog.started.usec,
+                         getpid(), (unsigned long)conn->id, conn->transaction);
+        EventField(&line, config->server);
+        Tcl_DStringAppend(&line, " ", 1);
+        EventField(&line, conn->from.addr);
+        value = EventGet(details, "recipient");
+        Tcl_DStringAppend(&line, " ", 1);
+        EventField(&line, value != NULL ? Tcl_GetString(value) : NULL);
+        value = EventGet(details, "action");
+        Tcl_DStringAppend(&line, " ", 1);
+        EventField(&line, value != NULL ? Tcl_GetString(value) : NULL);
+        value = EventGet(details, "reason");
+        Tcl_DStringAppend(&line, " ", 1);
+        EventField(&line, value != NULL ? Tcl_GetString(value) : NULL);
+        value = EventGet(details, "targets");
+        Tcl_DStringAppend(&line, " ", 1);
+        if (value != NULL && Tcl_ListObjGetElements(NULL, value, &count, &targets) == TCL_OK && count > 0) {
+            Tcl_DString joined;
+            Tcl_DStringInit(&joined);
+            for (i = 0; i < count; i++) {
+                if (i > 0) Tcl_DStringAppend(&joined, ",", 1);
+                Tcl_DStringAppend(&joined, Tcl_GetString(targets[i]), -1);
+            }
+            EventField(&line, joined.string);
+            Tcl_DStringFree(&joined);
+        } else {
+            EventField(&line, NULL);
+        }
+        /* Optional metadata follows the fixed fields; chart readers ignore it. */
+        Tcl_DictObjFirst(NULL, details, &search, &key, &value, &done);
+        for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
+            const char *name = Tcl_GetString(key);
+            if (strcmp(name, "code") == 0 || strcmp(name, "recipient") == 0
+                || strcmp(name, "action") == 0 || strcmp(name, "reason") == 0
+                || strcmp(name, "targets") == 0) continue;
+            Ns_DStringPrintf(&line, " %s=", name);
+            EventField(&line, Tcl_GetString(value));
+        }
+        Tcl_DictObjDone(&search);
         Tcl_DStringAppend(&line, "\n", 1);
         Ns_MutexLock(&config->eventlog.lock);
         if (config->eventlog.fd != NS_INVALID_FD) {
@@ -2880,7 +2923,6 @@ SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
             Ns_Log(Error, "nssmtpd: event log write failed: %s", config->eventlog.filename);
         }
         Tcl_DStringFree(&line);
-        Tcl_DecrRefCount(record);
     }
     Tcl_DecrRefCount(details);
 }
@@ -4891,6 +4933,9 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
     switch (cmd) {
     case cmdLogEvent: {
         TCL_SIZE_T size, length;
+        Tcl_DictSearch search;
+        Tcl_Obj *key, *value;
+        int done;
         const char *event, *text;
         if (objc != 5) {
             Tcl_WrongNumArgs(interp, 2, objv, "session event detailsDict");
@@ -4908,6 +4953,28 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             return TCL_ERROR;
         }
         if (Tcl_DictObjSize(interp, objv[4], &size) != TCL_OK) return TCL_ERROR;
+        Tcl_DictObjFirst(interp, objv[4], &search, &key, &value, &done);
+        for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
+            const char *name = Tcl_GetString(key);
+            if (*name == '\0' || strlen(name) > 64
+                || strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != strlen(name)) {
+                Tcl_DictObjDone(&search);
+                Tcl_SetObjResult(interp, Tcl_NewStringObj("event detail names must contain only letters, digits, underscores or hyphens (1-64 characters)", -1));
+                return TCL_ERROR;
+            }
+        }
+        Tcl_DictObjDone(&search);
+        value = EventGet(objv[4], "code");
+        if (value != NULL) {
+            int code;
+            if (Tcl_GetIntFromObj(interp, value, &code) != TCL_OK) return TCL_ERROR;
+            if (code < 100 || code > 599) {
+                Tcl_SetObjResult(interp, Tcl_NewStringObj("event code must be an SMTP code from 100 to 599", -1));
+                return TCL_ERROR;
+            }
+        }
+        value = EventGet(objv[4], "targets");
+        if (value != NULL && Tcl_ListObjLength(interp, value, &size) != TCL_OK) return TCL_ERROR;
         SmtpdEvent(conn, event, objv[4]);
         break;
     }

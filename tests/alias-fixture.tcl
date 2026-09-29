@@ -11,7 +11,7 @@ proc io_log_filter {severity timestamp message} {
 proc event_test_rcpt {id} {
     smtpd::rcpt $id
     ns_smtpd logevent $id custom [dict create action observe \
-        reason "line1\nline2\r\t\\\"{}\[x\]\$x" recipient {<tag>@example.test}]
+        reason "line1\nline2\r\t\\\"{}\[x\]\$x" recipient {<tag>@example.test} tag {Grüße world}]
 }
 
 rename ::smtpd::ReadAliasFile ::smtpd::test_ReadAliasFile

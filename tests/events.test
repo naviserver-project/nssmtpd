@@ -1,6 +1,7 @@
 package require tcltest 2.2
 namespace import ::tcltest::*
 configure {*}$argv
+source [file join [file dirname [info script]] event-log-support.tcl]
 set enabled [expr {$::env(ALIAS_TEST_MODE) eq "events"}]
 testConstraint enabled $enabled
 testConstraint disabled [expr {!$enabled}]
@@ -29,8 +30,7 @@ proc event_records {{minimum 1}} {
         set result {}
         foreach line [split [string trimright $text \n] \n] {
             if {$line eq ""} {continue}
-            dict size $line
-            lappend result $line
+            lappend result [event_parse_line $line]
         }
         if {[llength $result] >= $minimum} {return $result}
         after 10
@@ -78,14 +78,26 @@ test events-records {one recipient event per RCPT, applied aliases only, stable 
         [dict get [lindex $aliases 0] details recipient] [dict get [lindex $aliases 0] details targets]
 } -result {5 2 {new retry known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
 
-test events-escaping {nested data, newlines, quotes and Tcl metacharacters survive one-line serialization} -constraints enabled -body {
+test events-escaping {control bytes and backslashes remain escaped in positional fields} -constraints enabled -body {
     set row [lindex [event_select [event_records 16] custom] 0]
-    list [dict get $row details reason] [dict get $row details recipient] [dict get $row version]
-} -result [list "line1\nline2\r\t\\\"{}\[x\]\$x" {<tag>@example.test} 1]
+    list [dict get $row details reason] [dict get $row details recipient] [dict get $row event]
+} -result [list {line1\x0aline2\x0d\x09\x5c"{}[x]$x} {<tag>@example.test} custom]
 
 test events-disabled {default logging off creates no event file, mail behavior unchanged} -constraints disabled -body {
     file exists $logfile
 } -result 0
+
+test events-access-format {writer uses send-log timestamp, fixed fields and escaped extension values} -constraints enabled -body {
+    event_records 16
+    set f [open $logfile]
+    try {set text [read $f]} finally {close $f}
+    set valid 1
+    foreach line [split [string trimright $text \n] \n] {
+        if {![regexp {^\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9:]+ [+-][0-9]{4}\] \S+ (451|250|550|-) [a-z]+ \[127\.0\.0\.1\]} $line]} {set valid 0}
+    }
+    list $valid [expr {[string first {tag=Grüße\x20world} $text] >= 0}] \
+        [expr {[string first {line1\x0aline2\x0d\x09} $text] >= 0}]
+} -result {1 1 1}
 
 test events-rotation {SIGHUP rotates and subsequent events remain writable} -constraints enabled -body {
     set before [llength [event_records 16]]

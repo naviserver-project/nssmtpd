@@ -180,19 +180,47 @@ directory on older versions. The resolved filename is published in the
 configuration database for nsstats. Rotation is independent of send-log
 rotation, using NaviServer's asynchronous writer and log-rotation support.
 
-Each physical line is a versioned Tcl dictionary. Parse records with `dict`
-or list operations, **never `eval` or `source`**. The version 1 fields are:
+Each physical line follows the access-log convention used by the SMTP send
+log: a bracketed timestamp from `Ns_LogTime()`, the thread name, and fixed
+positional fields separated by single spaces. The layout is:
+
+```text
+[timestamp] thread code event [peer] session transaction server sender recipient action reason target1,target2 key=value ...
+```
+
+For example, a greylisting deferral is recorded as:
+
+```text
+[29/Sep/2026:15:10:00 +0200] -nssmptd:12- - greylist [91.114.61.250] 1790690000-123456-8-12 1 openacs.org neumann@wu.ac.at webmaster@openacs.org defer new -
+```
+
+A separate `recipient` event records the resulting SMTP code, such as `451`.
+The fixed fields are:
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, currently `1` |
-| `timestamp` | Unix time in milliseconds |
-| `server` | Virtual server name |
+| `timestamp` | `DD/Mon/YYYY:HH:MM:SS ±HHMM`, including the UTC offset, as in the send log |
+| `thread` | NaviServer thread name, as in the send log |
+| `code` | SMTP response code, or `-` when the event has no response code |
+| `event` | `recipient`, `alias`, `greylist`, `policy`, or a custom event name |
+| `peer` | Actual socket peer address, bracketed to support IPv6 |
 | `session` | Identifier containing module start time, process and connection IDs |
 | `transaction` | MAIL transaction counter within the session; zero before MAIL |
-| `peer`, `sender` | Actual socket peer and envelope sender |
-| `event` | `recipient`, `alias`, `greylist`, `policy`, or a custom event name |
-| `details` | Event-specific dictionary |
+| `server` | Virtual server name |
+| `sender` | Envelope sender |
+| `recipient` | Original envelope recipient |
+| `action` | Decision or operation, such as `accept`, `defer`, `reject`, or `expand` |
+| `reason` | Reason such as `unknown-recipient`, `relay-denied`, `new`, or `retry` |
+| `targets` | Comma-separated alias destinations |
+
+Absent or empty fields are written as `-`. Within a field, spaces, control
+bytes and backslashes are escaped as `\xHH`; for example, a space becomes
+`\x20`. Quotes have no special meaning. Each field remains a single token,
+so readers can split on spaces (the timestamp occupies two tokens).
+Additional custom metadata is appended as `key=value` tokens with the same
+escaping. The nsstats parser ignores this trailing metadata and displays
+escaped field values literally, without decoding or evaluating log content.
+The existing send-log format is unchanged.
 
 Recipient events contain `recipient`, `action` (`accept`, `defer`, `reject`),
 `code`, and `reason`. Alias events retain the original `recipient` and its
@@ -212,7 +240,11 @@ This wrapper does nothing when event logging is off and reports logging
 errors without changing the SMTP decision. The underlying command is
 `ns_smtpd logevent $id $event $detailsDict`; it requires the current callback
 session, a lowercase event name of at most 64 letters/digits/underscores/hyphens,
-and a dictionary of at most 16 KiB. Custom callbacks should use their own event
+and a dictionary of at most 16 KiB. The dictionary remains the Tcl API input;
+it is serialized into the fixed fields above, with additional keys becoming
+trailing `key=value` tokens. Keys must contain 1–64 letters, digits,
+underscores or hyphens. A supplied `code` must be an integer from 100 to 599;
+`targets` must be a Tcl list. Custom callbacks should use their own event
 name or `policy`, leaving `recipient`, `alias`, and `greylist` to the built-in
 emitters to avoid duplicate counts. Include only envelope/policy metadata,
 not message content. No database is required.
@@ -222,6 +254,7 @@ decisions and greylisting reasons, event totals, and the latest 200 matching
 records. Its literal, case-insensitive filter covers peer, sender, original
 recipient, targets, session, transaction, event, action and reason. Rotated
 logs can be selected. Malformed or unsupported records are counted and skipped.
+Never evaluate log records as Tcl code.
 
 Recipient counts are SMTP RCPT attempts, **not delivered messages**;
 greylisting deferrals are not spam classifications. Direct `ns_smtpd send`
