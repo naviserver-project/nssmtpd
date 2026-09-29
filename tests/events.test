@@ -1,0 +1,112 @@
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+set enabled [expr {$::env(ALIAS_TEST_MODE) eq "events"}]
+testConstraint enabled $enabled
+testConstraint disabled [expr {!$enabled}]
+set logfile [ns_config ns/server/test/module/nssmtpd eventlogfile]
+nsv_set alias-test calls 0
+nsv_set alias-test policy {}
+
+proc event_command {channel text} {
+    puts $channel $text
+    gets $channel reply
+    return [lindex $reply 0]
+}
+proc event_open {} {
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    gets $channel
+    event_command $channel {HELO test.example}
+    event_command $channel {MAIL FROM:<sender@example.test>}
+    return $channel
+}
+proc event_records {{minimum 1}} {
+    global logfile
+    for {set attempt 0} {$attempt < 200} {incr attempt} {
+        set f [open $logfile]
+        try {set text [read $f]} finally {close $f}
+        set result {}
+        foreach line [split [string trimright $text \n] \n] {
+            if {$line eq ""} {continue}
+            dict size $line
+            lappend result $line
+        }
+        if {[llength $result] >= $minimum} {return $result}
+        after 10
+    }
+    error "expected $minimum event records; got [llength $result]"
+}
+proc event_select {records kind {reason ""}} {
+    set result {}
+    foreach row $records {
+        if {[dict get $row event] eq $kind
+            && ($reason eq "" || [dict get $row details reason] eq $reason)} {lappend result $row}
+    }
+    return $result
+}
+
+test events-decisions {greylist retry, unknown recipient and relay denial keep separate records} -body {
+    set channel [event_open]
+    try {
+        set codes [list [event_command $channel {RCPT TO:<webmaster@example.test>}]]
+        set key {127.0.0.1 sender@example.test webmaster@example.test}
+        ns_mutex eval [nsv_get smtpd-greylist mutex] {
+            set now [clock seconds]
+            nsv_set smtpd-greylist-entries $key [list [expr {$now-2}] [expr {$now+60}] 0]
+        }
+        lappend codes [event_command $channel {RCPT TO:<webmaster@example.test>}]
+        lappend codes [event_command $channel {RCPT TO:<unknown@example.test>}]
+        lappend codes [event_command $channel {RCPT TO:<target@remote.test>}]
+        event_command $channel RSET
+        event_command $channel {MAIL FROM:<sender@example.test>}
+        lappend codes [event_command $channel {RCPT TO:<webmaster@example.test>}]
+        event_command $channel QUIT
+        set codes
+    } finally {close $channel}
+} -result {451 250 550 550 250}
+
+test events-records {one recipient event per RCPT, applied aliases only, stable IDs and transactions} -constraints enabled -body {
+    set rows [event_records 16]
+    set recipients [event_select $rows recipient]
+    set aliases [event_select $rows alias]
+    set grey [event_select $rows greylist]
+    set reasons [lmap row $grey {dict get $row details reason}]
+    set transactions [lmap row $recipients {dict get $row transaction}]
+    set sessions [lsort -unique [lmap row $rows {dict get $row session}]]
+    list [llength $recipients] [llength $aliases] $reasons $transactions [llength $sessions] \
+        [dict get [lindex $aliases 0] details recipient] [dict get [lindex $aliases 0] details targets]
+} -result {5 2 {new retry known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
+
+test events-escaping {nested data, newlines, quotes and Tcl metacharacters survive one-line serialization} -constraints enabled -body {
+    set row [lindex [event_select [event_records 16] custom] 0]
+    list [dict get $row details reason] [dict get $row details recipient] [dict get $row version]
+} -result [list "line1\nline2\r\t\\\"{}\[x\]\$x" {<tag>@example.test} 1]
+
+test events-disabled {default logging off creates no event file, mail behavior unchanged} -constraints disabled -body {
+    file exists $logfile
+} -result 0
+
+test events-rotation {SIGHUP rotates and subsequent events remain writable} -constraints enabled -body {
+    set before [llength [event_records 16]]
+    exec kill -HUP [pid]
+    set rotated {}
+    for {set i 0} {$i < 200} {incr i} {
+        set rotated [glob -nocomplain ${logfile}.*]
+        if {[llength $rotated]} {break}
+        after 10
+    }
+    set channel [event_open]
+    try {
+        event_command $channel {RCPT TO:<unknown@example.test>}
+        event_command $channel QUIT
+    } finally {close $channel}
+    set rows [event_records]
+    list [expr {[llength $rotated] > 0}] [llength $rows] [dict get [lindex $rows 0] details reason]
+} -result {1 1 unknown-recipient}
+
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever
