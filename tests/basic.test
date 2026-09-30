@@ -11,6 +11,24 @@ namespace import ::tcltest::*
 configure {*}$argv
 nsv_set alias-test policy {}
 
+test nssmtpd-session-validation {session commands reject missing and nonexistent IDs} -body {
+    set failures {}
+    foreach command {logevent gethdr gethdrs getbody getfrom getfromdata setfrom
+        setfromdata getrcpt getrcptdata addrcpt setrcptdata delrcpt setflag
+        unsetflag getflag setreply getline dump} {
+        foreach args [list {} {-1}] {
+            try {
+                ns_smtpd $command {*}$args
+                lappend failures "$command accepted $args"
+            } on error {message} {
+                set expected [expr {$args eq "" ? "wrong # args:*" : "invalid session id: -1"}]
+                if {![string match $expected $message]} {lappend failures $message}
+            }
+        }
+    }
+    set failures
+} -result {}
+
 proc basic_recipients {} {
     set addresses {}
     foreach recipient [nsv_get alias-test recipients] {

@@ -4986,13 +4986,17 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         Ns_MutexLock(&config->lock);
         rec = Tcl_FindHashEntry(&config->sessions, (char *)(long) id);
+        if (rec != NULL) {
+            conn = Tcl_GetHashValue(rec);
+        }
         Ns_MutexUnlock(&config->lock);
-        if (!rec) {
+        /* Every session command below requires an actual connection, not
+         * merely an existing hash entry. */
+        if (conn == NULL) {
             Tcl_AppendResult(interp, "invalid session id: ",
                              Tcl_GetString(objv[2]), (char *)0L);
             return TCL_ERROR;
         }
-        conn = Tcl_GetHashValue(rec);
     }
 
     switch (cmd) {
