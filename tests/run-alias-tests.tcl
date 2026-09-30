@@ -41,7 +41,7 @@ proc alias_runner::run {nsroot root mode} {
             set ::env(ALIAS_TEST_$name) [lindex [fconfigure $probe -sockname] 2]
         }
         foreach probe $probes {close $probe}
-        if {$mode eq "proxy"} {
+        if {$mode in {proxy io}} {
             exec openssl req -x509 -newkey rsa:2048 -nodes \
                 -keyout [file join $home key.pem] -out [file join $home cert.pem] \
                 -days 1 -subj /CN=localhost >[file join $home openssl.log] 2>@1

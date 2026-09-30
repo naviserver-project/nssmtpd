@@ -45,6 +45,13 @@ ns_section ns/server/test/module/nssmtpd {
         ns_param recipientpolicyproc smtpd::greylist
         ns_param rejectunknownrecipients true
     }
+    if {$::env(ALIAS_TEST_MODE) eq "io"} {
+        ns_param certificate [file join $::env(ALIAS_TEST_HOME) cert.pem]
+        ns_param key [file join $::env(ALIAS_TEST_HOME) key.pem]
+        ns_param eventlogging true
+        ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
+        ns_param eventlogroll false
+    }
     ns_param address 127.0.0.1
     ns_param port $::env(ALIAS_TEST_PORT)
     ns_param readtimeout 3

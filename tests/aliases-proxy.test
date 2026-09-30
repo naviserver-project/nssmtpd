@@ -31,6 +31,15 @@ test alias-proxy-2 {mixed target routes fall back to the default relay} -body {
     string range $reply 0 2
 } -result 250
 
+test alias-proxy-received {streaming relay and TLS receiving sink each add a trace header} -constraints fullsuite -body {
+    set f [open [file join $::env(ALIAS_TEST_HOME) sink-messages.list]]
+    fconfigure $f -translation lf -encoding utf-8
+    try {set messages [read $f]} finally {close $f}
+    set data [lindex $messages 0 1]
+    list [regexp -all {Received: from \[127\.0\.0\.1\]} $data] \
+         [regexp {with ESMTPS\r\n} $data] [regexp {with SMTP\r\n} $data]
+} -result {2 1 1}
+
 test alias-proxy-3 {native STARTTLS sink receives the expected envelopes and headers} -constraints fullsuite -body {
     set channel [open [file join $::env(ALIAS_TEST_HOME) sink-messages.list]]
     fconfigure $channel -translation lf -encoding utf-8

@@ -50,6 +50,14 @@ test nssmtpd-2.1 {ns_smtpd send to two recipients with dot-stuffed DATA} -body {
     list [basic_recipients] [string match {*after the dot*} [nsv_get alias-test body]]
 } -result {{one@example.test two@example.test} 1}
 
+test nssmtpd-received {listener prepends its trace header and retains existing headers and body} -body {
+    set message "Received: from original.example by upstream.example; Wed, 30 Sep 2026 00:00:00 +0000\r\nSubject: trace\r\n\r\nBody"
+    ns_smtpd send sender@example.test one@example.test message 127.0.0.1 $::env(ALIAS_TEST_PORT)
+    set data [nsv_get alias-test body]
+    list [regexp {^Received: from \[127\.0\.0\.1\]\r\n\tby [A-Za-z0-9.-]+ \(nssmtpd\) with SMTP\r\n\tid [0-9-]+\.[0-9]+; [^\r\n]+ GMT\r\nReceived: from original\.example} $data] \
+         [expr {[string first $message $data] >= 0}]
+} -result {1 1}
+
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"

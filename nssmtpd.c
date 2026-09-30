@@ -500,6 +500,10 @@ static Ns_LogCallbackProc EventLogOpen, EventLogClose;
 static void EventLogRoll(void *arg, int id);
 static void SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details);
 static void EventPut(Tcl_Obj *dict, const char *key, const char *value);
+static void SmtpdReceived(smtpdConn *conn);
+#ifdef HAVE_OPENSSL_EVP_H
+static void SmtpdTLSFailure(smtpdConn *conn, const char *phase);
+#endif
 static void SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason);
 
 NS_EXPORT int Ns_ModuleVersion = 1;
@@ -1614,12 +1618,13 @@ static void SmtpdThread(smtpdConn *conn)
                 result = Ns_TLS_SSLAccept(conn->interp, conn->sock->sock, ctx, &ssl);
                 Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept result=%d", result);
                 if (result != TCL_OK) {
-                    Ns_Log(SmtpdDebug, "STARTTLS-ssl-accept failed");
-                    goto error;
+                    SmtpdTLSFailure(conn, "handshake");
+                    goto done;
                 }
                 conn->sock->arg = ssl;
             } else {
-                goto error;
+                SmtpdTLSFailure(conn, "context");
+                goto done;
             }
             Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
 
@@ -1844,6 +1849,7 @@ static void SmtpdThread(smtpdConn *conn)
                 }
                 continue;
             }
+            SmtpdReceived(conn);
             /* RelayHost verified recipients to remote SMTPD server and queue others */
             Ns_Log(SmtpdDebug, "DATA relayhost <%s>", config->relayhost);
             if (config->relayhost != NULL) {
@@ -2670,6 +2676,10 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (SmtpdPuts(conn, "354 Start mail input; end with <CRLF>.<CRLF>\r\n") != NS_OK) {
         goto error;
     }
+    /* Forward our trace header before the client's original DATA. */
+    if (SmtpdWriteDString(relay, &conn->body.data) != NS_OK) {
+        goto error421;
+    }
     do {
         if (SmtpdReadLine(conn, &relay->line, &rc) < 0) {
             goto error;
@@ -2818,6 +2828,30 @@ EventLogRoll(void *arg, int UNUSED(id))
     Ns_MutexUnlock(&config->eventlog.lock);
 }
 
+/* Add one trace field at the receiving boundary, before either buffered or
+ * streaming delivery. Use the actual socket peer, never client header text. */
+static void
+SmtpdReceived(smtpdConn *conn)
+{
+    const char *peer = Ns_ConnPeerAddr(Ns_GetConn());
+    const char *host = Ns_InfoHostname();
+    smtpdConfig *config = conn->config;
+
+    /* A configured hostname must not inject header syntax. */
+    if (*host == '\0' || strspn(host, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-") != strlen(host)) {
+        host = "localhost";
+    }
+    Ns_DStringPrintf(&conn->body.data,
+                     "Received: from [%s%s]\r\n\tby %s (nssmtpd) with %s\r\n"
+                     "\tid %lld-%ld-%d-%lu.%u; ",
+                     strchr(peer, ':') != NULL ? "IPv6:" : "", peer, host,
+                     (conn->flags & SMTPD_GOTSTARTTLS) != 0u ? "ESMTPS" : "SMTP",
+                     (long long)config->eventlog.started.sec, (long)config->eventlog.started.usec,
+                     getpid(), (unsigned long)conn->id, conn->transaction);
+    Ns_HttpTime(&conn->body.data, 0);
+    Tcl_DStringAppend(&conn->body.data, "\r\n", 2);
+}
+
 static void
 EventPut(Tcl_Obj *dict, const char *key, const char *value)
 {
@@ -2926,6 +2960,37 @@ SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
     }
     Tcl_DecrRefCount(details);
 }
+
+#ifdef HAVE_OPENSSL_EVP_H
+/* TLS helpers return their diagnostic in the interpreter, not the I/O state.
+ * Copy it before logging; the preceding successful 220 write is unrelated. */
+static void
+SmtpdTLSFailure(smtpdConn *conn, const char *phase)
+{
+    const char *result = Tcl_GetStringResult(conn->interp);
+    Tcl_DString diagnostic;
+    Tcl_Obj *details = Tcl_NewDictObj();
+
+    if (*result == '\0') {
+        result = "TLS operation failed without a diagnostic";
+    }
+    EventPut(details, "action", "fail");
+    EventPut(details, "reason", phase);
+    EventPut(details, "message", result);
+    Tcl_DStringInit(&diagnostic);
+    for (const unsigned char *p = (const unsigned char *)result; *p != '\0'; p++) {
+        if (*p < 32 || *p == 127 || *p == '\\') {
+            Ns_DStringPrintf(&diagnostic, "\\x%02x", *p);
+        } else {
+            Tcl_DStringAppend(&diagnostic, (const char *)p, 1);
+        }
+    }
+    Ns_Log(Error, "nssmtpd: %lu: peer %s: STARTTLS %s failed: %s",
+           conn->id, Ns_ConnPeerAddr(Ns_GetConn()), phase, diagnostic.string);
+    SmtpdEvent(conn, "starttls", details);
+    Tcl_DStringFree(&diagnostic);
+}
+#endif
 
 static void
 SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason)

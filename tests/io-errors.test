@@ -181,7 +181,75 @@ test smtp-incoming-data-eof {disconnect during DATA remains an Error and cannot 
     list $severity [nsv_get alias-test body]
 } -result {Error unchanged}
 
+test smtp-starttls-context {context failure logs its diagnostic rather than the successful 220 write} -body {
+    nsv_set io-test logs {}
+    set cert [file join $::env(ALIAS_TEST_HOME) cert.pem]
+    file rename $cert ${cert}.saved
+    set channel [io_open]
+    try {
+        io_command $channel {HELO test.example}
+        set reply [io_command $channel STARTTLS]
+        gets $channel
+        lassign [io_find_log {*STARTTLS context failed:*}] severity message
+        list $reply [eof $channel] $severity \
+            [string match {*peer 127.0.0.1:*} $message] \
+            [expr {[string first {NS_OK:} $message] < 0}] \
+            [expr {[string length [lindex [split $message :] end]] > 0}]
+    } finally {
+        close $channel
+        file rename ${cert}.saved $cert
+    }
+} -result {{220 Go Ahead} 1 Error 1 1 1}
+
+test smtp-starttls-handshake {invalid TLS input logs handshake failure with the actual peer} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        io_command $channel {HELO test.example}
+        set reply [io_command $channel STARTTLS]
+        puts $channel {This is not a TLS ClientHello}
+        flush $channel
+        lassign [io_find_log {*STARTTLS handshake failed:*}] severity message
+        list $reply $severity [string match {*peer 127.0.0.1:*} $message] \
+            [expr {[string first {NS_OK:} $message] < 0}]
+    } finally {close $channel}
+} -result {{220 Go Ahead} Error 1 1}
+
+test smtp-starttls-aborted {disconnect after 220 reports handshake failure rather than NS_OK} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        io_command $channel {HELO test.example}
+        set reply [io_command $channel STARTTLS]
+    } finally {close $channel}
+    lassign [io_find_log {*STARTTLS handshake failed:*}] severity message
+    list $reply $severity [expr {[string first {NS_OK:} $message] < 0}]
+} -result {{220 Go Ahead} Error 1}
+
+test smtp-starttls-events {TLS failures preserve peer and phase in the positional event log} -body {
+    source [file join [file dirname [info script]] event-log-support.tcl]
+    set path [file join $::env(ALIAS_TEST_HOME) events.log]
+    set phases {}
+    for {set i 0} {$i < 100} {incr i} {
+        set f [open $path]
+        try {set lines [read $f]} finally {close $f}
+        set phases {}
+        foreach line [split [string trimright $lines \n] \n] {
+            set row [event_parse_line $line]
+            if {[dict get $row event] eq "starttls"} {
+                lappend phases [list [dict get $row peer] [dict get $row details action] \
+                                     [dict get $row details reason] \
+                                     [expr {[string first " message=" $line] >= 0}]]
+            }
+        }
+        if {[llength $phases] == 3} {break}
+        after 10
+    }
+    set phases
+} -result {{127.0.0.1 fail context 1} {127.0.0.1 fail handshake 1} {127.0.0.1 fail handshake 1}}
+
 ns_logctl unregister $logFilter
+
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"

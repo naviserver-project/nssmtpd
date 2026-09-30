@@ -202,7 +202,7 @@ The fixed fields are:
 | `timestamp` | `DD/Mon/YYYY:HH:MM:SS ±HHMM`, including the UTC offset, as in the send log |
 | `thread` | NaviServer thread name, as in the send log |
 | `code` | SMTP response code, or `-` when the event has no response code |
-| `event` | `recipient`, `alias`, `greylist`, `policy`, or a custom event name |
+| `event` | `recipient`, `alias`, `greylist`, `policy`, `starttls`, or a custom event name |
 | `peer` | Actual socket peer address, bracketed to support IPv6 |
 | `session` | Identifier containing module start time, process and connection IDs |
 | `transaction` | MAIL transaction counter within the session; zero before MAIL |
@@ -229,7 +229,22 @@ Greylisting records all decisions: `new`, `early`, `retry`, `known`, `expired`,
 and `capacity`. A configured policy bypass for a LOCAL submission is recorded
 as a `policy` event with reason `local-bypass`.
 
+STARTTLS failures produce a `starttls` event with action `fail`, reason
+`context` or `handshake`, and the TLS diagnostic in a trailing `message=`
+field. The fixed peer and session fields identify the actual connecting
+client, even when failure occurs before MAIL or RCPT. No SMTP response code
+is recorded for these events. The system log reports the same phase and
+diagnostic, rather than the status of the preceding successful write.
+
+Received messages acquire a leading `Received` header before buffered
+processing or streaming relay. It records the actual socket peer (including
+IPv6), server hostname, SMTP or ESMTPS transport, UTC time, and an identifier
+of the form `session.transaction`, matching the event log's session and
+transaction fields. Existing headers are preserved. This trace header is
+added independently of event logging; direct `ns_smtpd send` does not add it.
+
 Within an SMTP callback, custom Tcl policies can call:
+
 
 ```tcl
 smtpd::logevent $id policy [dict create \
