@@ -242,6 +242,7 @@ typedef struct _smtpdConn {
     bool writing, peerFailure, lineTooLong;
     unsigned int transaction;
     const char *eventReason;
+    Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -1739,6 +1740,10 @@ static void SmtpdThread(smtpdConn *conn)
 
             conn->cmd = SMTP_RCPT;
             conn->eventReason = "recipient-policy";
+            if (conn->policyDetails != NULL) {
+                Tcl_DecrRefCount(conn->policyDetails);
+                conn->policyDetails = NULL;
+            }
             if ((conn->flags & SMTPD_GOTMAIL) == 0u) {
                 SmtpdRecipientEvent(conn, &conn->line.string[8], 503, "mail-required");
                 if (SmtpdPuts(conn, "503 Need MAIL before RCPT\r\n") != NS_OK) {
@@ -2016,6 +2021,11 @@ static void
 SmtpdConnReset(smtpdConn *conn)
 {
     //Ns_Log(SmtpdDebug,"SmtpdConnReset");
+
+    if (conn->policyDetails != NULL) {
+        Tcl_DecrRefCount(conn->policyDetails);
+        conn->policyDetails = NULL;
+    }
 
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
@@ -3029,12 +3039,29 @@ static void
 SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason)
 {
     if (conn->config->eventlog.enabled) {
-        Tcl_Obj *details = Tcl_NewDictObj();
+        const char *action = code / 100 == 2 ? "accept" : code / 100 == 4 ? "defer" : "reject";
+        Tcl_Obj *details;
+        Tcl_Obj *policyAction = conn->policyDetails != NULL
+            ? EventGet(conn->policyDetails, "action") : NULL;
+
+        /* Alias failures and subsequent callback overrides take precedence. */
+        if (strcmp(reason, "recipient-policy") == 0 && policyAction != NULL
+            && strcmp(Tcl_GetString(policyAction), action) == 0) {
+            details = Tcl_DuplicateObj(conn->policyDetails);
+        } else {
+            details = Tcl_NewDictObj();
+        }
         EventPut(details, "recipient", recipient);
-        EventPut(details, "action", code / 100 == 2 ? "accept" : code / 100 == 4 ? "defer" : "reject");
-        EventPut(details, "reason", reason);
+        EventPut(details, "action", action);
+        if (EventGet(details, "reason") == NULL) {
+            EventPut(details, "reason", reason);
+        }
         Tcl_DictObjPut(NULL, details, Tcl_NewStringObj("code", -1), Tcl_NewIntObj(code));
         SmtpdEvent(conn, "recipient", details);
+    }
+    if (conn->policyDetails != NULL) {
+        Tcl_DecrRefCount(conn->policyDetails);
+        conn->policyDetails = NULL;
     }
 }
 
@@ -5077,7 +5104,16 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         value = EventGet(objv[4], "targets");
         if (value != NULL && Tcl_ListObjLength(interp, value, &size) != TCL_OK) return TCL_ERROR;
-        SmtpdEvent(conn, event, objv[4]);
+        if (conn->cmd == SMTP_RCPT && strcmp(event, "policy") == 0) {
+            /* Defer policy logging until the final recipient decision. */
+            Tcl_IncrRefCount(objv[4]);
+            if (conn->policyDetails != NULL) {
+                Tcl_DecrRefCount(conn->policyDetails);
+            }
+            conn->policyDetails = objv[4];
+        } else {
+            SmtpdEvent(conn, event, objv[4]);
+        }
         break;
     }
     case cmdFlag:

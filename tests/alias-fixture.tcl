@@ -9,6 +9,13 @@ proc io_log_filter {severity timestamp message} {
 }
 
 proc event_test_rcpt {id} {
+    if {[nsv_exists alias-test event-policy]} {
+        lassign [nsv_get alias-test event-policy] details reply
+        ns_smtpd logevent $id policy $details
+        if {[string index $reply 0] ne "2"} {ns_smtpd delrcpt $id 0}
+        ns_smtpd setreply $id "$reply\r\n"
+        return
+    }
     smtpd::rcpt $id
     ns_smtpd logevent $id custom [dict create action observe \
         reason "line1\nline2\r\t\\\"{}\[x\]\$x" recipient {<tag>@example.test} tag {Grüße world}]

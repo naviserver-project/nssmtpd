@@ -331,10 +331,11 @@ proc smtpd::checkpolicy {id} {
                          recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
         set result [uplevel #0 [list {*}$prefix $context]]
         set action [dict get $result action]
+        set details [dict merge {reason recipient-policy} $result \
+                         [dict create recipient [dict get $context recipient]]]
         switch -- $action {
             accept {
-                smtpd::logevent $id policy [dict create action accept reason recipient-policy \
-                                              recipient [dict get $context recipient]]
+                smtpd::logevent $id policy $details
                 return 1
             }
             defer {set code "451 4.7.1"; set message "Please try again later"}
@@ -347,8 +348,7 @@ proc smtpd::checkpolicy {id} {
             ::error "recipientpolicyproc returned an invalid message"
         }
         set reply "$code $message\r\n"
-        smtpd::logevent $id policy [dict create action $action reason recipient-policy \
-                                      recipient [dict get $context recipient] code [lindex $code 0]]
+        smtpd::logevent $id policy $details
         ns_log Notice "smtpd policy: $action [list $context]"
     } on error {message options} {
         ns_log Error "smtpd recipient policy failed: $message"
@@ -389,12 +389,11 @@ proc smtpd::greylist {context} {
     set key [list [dict get $context peeraddr] \
                  [dict get $context sender] [dict get $context recipient]]
     set decision [smtpd::GreylistCheck $key [clock seconds]]
-    smtpd::logevent [dict get $context id] greylist \
-        [dict merge $decision [dict create recipient [dict get $context recipient]]]
     # No message body or subject is logged.
     if {[dict get $decision reason] in {new retry expired capacity}} {
         ns_log Notice "smtpd greylist: [dict get $decision reason] [list $key]"
     }
+    dict set decision reason greylist-[dict get $decision reason]
     return $decision
 }
 

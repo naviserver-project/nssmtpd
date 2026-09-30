@@ -209,7 +209,7 @@ positional fields separated by single spaces. The layout is:
 For example, a greylisting deferral is recorded as:
 
 ```text
-[29/Sep/2026:15:10:00 +0200] -nssmptd:12- - greylist [91.114.61.250] 1790690000-123456-8-12 1 openacs.org neumann@wu.ac.at webmaster@openacs.org defer new -
+[29/Sep/2026:15:10:00 +0200] -nssmptd:12- 451 recipient [91.114.61.250] 1790690000-123456-8-12 1 openacs.org neumann@wu.ac.at webmaster@openacs.org defer greylist-new -
 ```
 
 A separate `recipient` event records the resulting SMTP code, such as `451`.
@@ -220,7 +220,7 @@ The fixed fields are:
 | `timestamp` | `DD/Mon/YYYY:HH:MM:SS ±HHMM`, including the UTC offset, as in the send log |
 | `thread` | NaviServer thread name, as in the send log |
 | `code` | SMTP response code, or `-` when the event has no response code |
-| `event` | `recipient`, `alias`, `greylist`, `policy`, `starttls`, or a custom event name |
+| `event` | `recipient`, `alias`, `starttls`, or a custom event name |
 | `peer` | Actual socket peer address, bracketed to support IPv6 |
 | `session` | Identifier containing module start time, process and connection IDs |
 | `transaction` | MAIL transaction counter within the session; zero before MAIL |
@@ -243,9 +243,14 @@ The existing send-log format is unchanged.
 Recipient events contain `recipient`, `action` (`accept`, `defer`, `reject`),
 `code`, and `reason`. Alias events retain the original `recipient` and its
 `targets`, and are emitted only for an applied, non-identity expansion.
-Greylisting records all decisions: `new`, `early`, `retry`, `known`, `expired`,
-and `capacity`. A configured policy bypass for a LOCAL submission is recorded
-as a `policy` event with reason `local-bypass`.
+Each RCPT attempt has one final `recipient` event. Policy details are folded
+into it, with reasons `greylist-new`, `greylist-early`, `greylist-retry`,
+`greylist-known`, `greylist-expired`, or `greylist-capacity`. LOCAL policy
+bypasses use `local-bypass`. Custom policy results may supply a `reason`;
+otherwise it defaults to `recipient-policy`. The final SMTP code and action
+remain authoritative; a later alias failure or changed action takes precedence.
+nsstats derives both recipient and greylisting charts from these records and
+continues to read standalone greylist events in older logs.
 
 STARTTLS failures produce a `starttls` event with action `fail`, reason
 `context` or `handshake`, and the TLS diagnostic in a trailing `message=`
@@ -260,6 +265,10 @@ IPv6), server hostname, SMTP or ESMTPS transport, UTC time, and an identifier
 of the form `session.transaction`, matching the event log's session and
 transaction fields. Existing headers are preserved. This trace header is
 added independently of event logging; direct `ns_smtpd send` does not add it.
+
+During RCPT processing, `ns_smtpd logevent $id policy $details` attaches
+metadata to the final recipient event instead of writing a separate row.
+Other event names retain their independent logging behavior.
 
 Within an SMTP callback, custom Tcl policies can call:
 

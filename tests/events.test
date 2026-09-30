@@ -67,19 +67,18 @@ test events-decisions {greylist retry, unknown recipient and relay denial keep s
 } -result {451 250 550 550 250}
 
 test events-records {one recipient event per RCPT, applied aliases only, stable IDs and transactions} -constraints enabled -body {
-    set rows [event_records 16]
+    set rows [event_records 10]
     set recipients [event_select $rows recipient]
     set aliases [event_select $rows alias]
-    set grey [event_select $rows greylist]
-    set reasons [lmap row $grey {dict get $row details reason}]
+    set reasons [lmap row $recipients {dict get $row details reason}]
     set transactions [lmap row $recipients {dict get $row transaction}]
     set sessions [lsort -unique [lmap row $rows {dict get $row session}]]
-    list [llength $recipients] [llength $aliases] $reasons $transactions [llength $sessions] \
+    list [llength $rows] [llength [event_select $rows policy]] [llength [event_select $rows greylist]] [llength $recipients] [llength $aliases] $reasons $transactions [llength $sessions] \
         [dict get [lindex $aliases 0] details recipient] [dict get [lindex $aliases 0] details targets]
-} -result {5 2 {new retry known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
+} -result {10 0 0 5 2 {greylist-new greylist-retry unknown-recipient relay-denied greylist-known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
 
 test events-escaping {control bytes and backslashes remain escaped in positional fields} -constraints enabled -body {
-    set row [lindex [event_select [event_records 16] custom] 0]
+    set row [lindex [event_select [event_records 10] custom] 0]
     list [dict get $row details reason] [dict get $row details recipient] [dict get $row event]
 } -result [list {line1\x0aline2\x0d\x09\x5c"{}[x]$x} {<tag>@example.test} custom]
 
@@ -88,7 +87,7 @@ test events-disabled {default logging off creates no event file, mail behavior u
 } -result 0
 
 test events-access-format {writer uses send-log timestamp, fixed fields and escaped extension values} -constraints enabled -body {
-    event_records 16
+    event_records 10
     set f [open $logfile]
     try {set text [read $f]} finally {close $f}
     set valid 1
@@ -100,7 +99,7 @@ test events-access-format {writer uses send-log timestamp, fixed fields and esca
 } -result {1 1 1}
 
 test events-rotation {SIGHUP rotates and subsequent events remain writable} -constraints enabled -body {
-    set before [llength [event_records 16]]
+    set before [llength [event_records 10]]
     exec kill -HUP [pid]
     set rotated {}
     for {set i 0} {$i < 200} {incr i} {
@@ -116,6 +115,29 @@ test events-rotation {SIGHUP rotates and subsequent events remain writable} -con
     set rows [event_records]
     list [expr {[llength $rotated] > 0}] [llength $rows] [dict get [lindex $rows 0] details reason]
 } -result {1 1 unknown-recipient}
+
+test events-policy-metadata {custom reason retained; final code wins; changed action discards stale reason} -constraints enabled -body {
+    set before [llength [event_records]]
+    set channel [event_open]
+    try {
+        nsv_set alias-test event-policy [list {action defer reason rate-limit code 550 tag custom} {451 Try later}]
+        event_command $channel {RCPT TO:<ordinary@example.test>}
+        nsv_set alias-test event-policy [list {action accept reason greylist-known} {550 Rejected afterwards}]
+        event_command $channel {RCPT TO:<ordinary@example.test>}
+        nsv_set alias-test event-policy [list {action accept} {250 OK}]
+        event_command $channel {RCPT TO:<ordinary@example.test>}
+        event_command $channel QUIT
+    } finally {
+        close $channel
+        nsv_unset alias-test event-policy
+    }
+    set result {}
+    foreach row [lrange [event_records [expr {$before+3}]] $before end] {
+        lappend result [list [dict get $row event] [dict get $row details action] \
+                            [dict get $row details reason] [dict get $row details code]]
+    }
+    set result
+} -result {{recipient defer rate-limit 451} {recipient reject recipient-policy 550} {recipient accept recipient-policy 250}}
 
 set failures $::tcltest::numTests(Failed)
 cleanupTests
