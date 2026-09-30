@@ -163,7 +163,12 @@ The server log records ordinary relay denials and pre-DATA client EOF,
 connection resets, and timeouts at `Notice` level. I/O failures during
 DATA and internal errors remain at `Error` level. Diagnostics identify the
 read or write operation and use its captured error, including TLS errors,
-rather than a later value of `errno`. Input excerpts are limited to 80 bytes
+rather than a later value of `errno`. I/O diagnostics also include `last`
+(the last SMTP command or connection stage, without arguments), and cumulative
+connection byte counts `rx` and `tx`. These count successful SMTP reads and
+writes, including partial transfers and traffic before and after STARTTLS,
+but exclude TLS handshake and record framing bytes. Receive counts include
+buffered read-ahead. RSET and new mail transactions do not reset the counters. Input excerpts are limited to 80 bytes
 with control characters escaped; ordinary I/O diagnostics omit message data.
 
 The existing `maxline` parameter (default `4096`) limits a received line,

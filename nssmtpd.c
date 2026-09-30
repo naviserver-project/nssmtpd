@@ -233,6 +233,8 @@ typedef struct _smtpdConn {
     struct _smtpdConn *next;
     uintptr_t id;
     int cmd;
+    const char *lastStage; /* Fixed command label; never includes arguments. */
+    uint64_t bytesReceived, bytesSent; /* SMTP bytes, excluding TLS framing. */
     unsigned int flags;
     const char *host;
     Ns_Sock *sock;
@@ -1472,6 +1474,7 @@ static void SmtpdThread(smtpdConn *conn)
     Ns_MutexUnlock(&config->locallock);
     /* Our greeting message */
     Tcl_DStringSetLength(&conn->line, 0);
+    conn->lastStage = "GREETING";
     Ns_DStringPrintf(&conn->line, "220 %s SMTP nssmtpd %s ", Ns_InfoHostname(), SMTPD_VERSION);
     Ns_HttpTime(&conn->line, 0);
     Tcl_DStringAppend(&conn->line, "\r\n", 2);
@@ -1493,12 +1496,14 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "QUIT", 4)) {
             conn->cmd = SMTP_QUIT;
+            conn->lastStage = "QUIT";
             SmtpdPuts(conn, "221 Bye\r\n");
             break;
         }
 
         if (!strncasecmp(conn->line.string, "NOOP", 4)) {
             conn->cmd = SMTP_NOOP;
+            conn->lastStage = "NOOP";
             if (SmtpdPuts(conn, "250 Noop OK\r\n") != NS_OK) {
                 goto error;
             }
@@ -1507,6 +1512,7 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "VRFY", 4)) {
             conn->cmd = SMTP_VRFY;
+            conn->lastStage = "VRFY";
             if (SmtpdPuts(conn, "252 Cannot VRFY\r\n") != NS_OK) {
                 goto error;
             }
@@ -1517,6 +1523,7 @@ static void SmtpdThread(smtpdConn *conn)
             Tcl_DString ds;
 
             conn->cmd = SMTP_HELP;
+            conn->lastStage = "HELP";
             Tcl_DStringInit(&ds);
             Ns_DStringPrintf(&ds, "214- This is nssmtpd version %s\r\n", SMTPD_VERSION);
             Ns_DStringPrintf(&ds, "214- Supported commands:\r\n");
@@ -1532,6 +1539,7 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "HELO", 4) || !strncasecmp(conn->line.string, "EHLO", 4)) {
             conn->cmd = SMTP_HELO;
+            conn->lastStage = conn->line.string[0] == 'e' ? "EHLO" : "HELO";
             /* Duplicate HELO RFC 1651 4.2 */
             if ((conn->flags & SMTPD_GOTHELO) != 0u) {
                 if (SmtpdPuts(conn, "501 Duplicate HELO\r\n") != NS_OK) {
@@ -1595,6 +1603,7 @@ static void SmtpdThread(smtpdConn *conn)
             int result;
 
             conn->cmd = SMTP_STARTTLS;
+            conn->lastStage = "STARTTLS";
 
             if (SmtpdPuts(conn, "220 Go Ahead\r\n") != NS_OK) {
                 goto error;
@@ -1645,6 +1654,7 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "RSET", 4)) {
             conn->cmd = SMTP_RSET;
+            conn->lastStage = "RSET";
             SmtpdConnReset(conn);
             if (SmtpdPuts(conn, "250 Reset OK\r\n") != NS_OK) {
                 goto error;
@@ -1654,6 +1664,7 @@ static void SmtpdThread(smtpdConn *conn)
 
         if (!strncasecmp(conn->line.string, "MAIL FROM:", 10)) {
             conn->cmd = SMTP_MAIL;
+            conn->lastStage = "MAIL";
             /* Duplicate MAIL */
             if ((conn->flags & SMTPD_GOTMAIL) != 0u) {
                 if (SmtpdPuts(conn, "501 Duplicate MAIL\r\n") != NS_OK) {
@@ -1739,6 +1750,7 @@ static void SmtpdThread(smtpdConn *conn)
             unsigned int   flags = 0u;
 
             conn->cmd = SMTP_RCPT;
+            conn->lastStage = "RCPT";
             conn->eventReason = "recipient-policy";
             if (conn->policyDetails != NULL) {
                 Tcl_DecrRefCount(conn->policyDetails);
@@ -1855,6 +1867,7 @@ static void SmtpdThread(smtpdConn *conn)
             smtpdRcpt *rcpt;
 
             conn->cmd = SMTP_DATA;
+            conn->lastStage = "DATA";
             if (!conn->rcpt.list) {
                 if (SmtpdPuts(conn, "503 Need RCPT (recipient)\r\n") != NS_OK) {
                     goto error;
@@ -1942,6 +1955,7 @@ static void SmtpdThread(smtpdConn *conn)
             SmtpdConnReset(conn);
             continue;
         }
+        conn->lastStage = "UNKNOWN";
         if (SmtpdPuts(conn, "500 Command unrecognized\r\n") != NS_OK) {
             goto error;
         }
@@ -1997,6 +2011,8 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     conn->sock = sock;
     conn->cmd = SMTP_READ;
     conn->transaction = 0;
+    conn->lastStage = "CONNECT";
+    conn->bytesReceived = conn->bytesSent = 0;
     conn->eventReason = "recipient-policy";
     conn->sock->arg = NULL;
     conn->readError[0] = '\0';
@@ -3457,6 +3473,7 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
 #endif
         }
         if (received >= 0) {
+            conn->bytesReceived += (uint64_t)received;
             *rcPtr = NS_OK;
             if (received == 0) {
                 conn->peerFailure = NS_TRUE;
@@ -3609,6 +3626,7 @@ static ssize_t SmtpdUnixSend(smtpdConn *conn, const char *buffer, size_t length)
                 }
             }
 
+            conn->bytesSent += (uint64_t)n;
             sent += n;
             tosend -= (size_t)n;
             buf += n;
@@ -3639,6 +3657,7 @@ static ssize_t SmtpdUnixSend(smtpdConn *conn, const char *buffer, size_t length)
                 continue;
             }
             if (likely(n > 0)) {
+                conn->bytesSent += (uint64_t)n;
                 sent += n;
 
                 if (((size_t)n < iov.iov_len)) {
@@ -3935,12 +3954,13 @@ SmtpdLogIO(smtpdConn *conn)
     Ns_LogSeverity severity = (!inData && (conn->peerFailure || conn->lineTooLong)) ? Notice : Error;
 
     /* Do not log the reused line buffer: it can contain output or mail data. */
-    Ns_Log(severity, "nssmtpd: %lu: peer %s: %s during %s: %s: %s",
+    Ns_Log(severity, "nssmtpd: %lu: peer %s: %s during %s: %s: %s; last=%s rx=%" PRIu64 " tx=%" PRIu64,
            conn->id, Ns_ConnPeerAddr(Ns_GetConn()), conn->writing ? "write" : "read",
            inData ? "DATA" : "command/reply",
            (!conn->writing && conn->peerFailure && conn->ioStatus == NS_OK)
            ? "EOF" : Ns_ReturnCodeString(conn->ioStatus),
-           conn->writing ? conn->writeError : conn->readError);
+           conn->writing ? conn->writeError : conn->readError,
+           conn->lastStage, conn->bytesReceived, conn->bytesSent);
 }
 
 static NS_INLINE bool Retry(int errorCode)
@@ -5033,89 +5053,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         return TCL_ERROR;
     }
 
-    if (cmd > cmdSessions) {
-        int i;
-        if (objc < 3) {
-            Tcl_WrongNumArgs(interp, 2, objv, "session ?args ...?");
-            return TCL_ERROR;
-        }
-        if (Tcl_GetIntFromObj(interp, objv[2], &i) != TCL_OK) {
-            return TCL_ERROR;
-        } else {
-            id = (unsigned int)i;
-        }
-        Ns_MutexLock(&config->lock);
-        rec = Tcl_FindHashEntry(&config->sessions, (char *)(long) id);
-        if (rec != NULL) {
-            conn = Tcl_GetHashValue(rec);
-        }
-        Ns_MutexUnlock(&config->lock);
-        /* Every session command below requires an actual connection, not
-         * merely an existing hash entry. */
-        if (conn == NULL) {
-            Tcl_AppendResult(interp, "invalid session id: ",
-                             Tcl_GetString(objv[2]), (char *)0L);
-            return TCL_ERROR;
-        }
-    }
-
+    /* Handle commands which do not need an existing SMTP session first. */
     switch (cmd) {
-    case cmdLogEvent: {
-        TCL_SIZE_T size, length;
-        Tcl_DictSearch search;
-        Tcl_Obj *key, *value;
-        int done;
-        const char *event, *text;
-        if (objc != 5) {
-            Tcl_WrongNumArgs(interp, 2, objv, "session event detailsDict");
-            return TCL_ERROR;
-        }
-        event = Tcl_GetString(objv[3]);
-        text = Tcl_GetStringFromObj(objv[4], &length);
-        if (conn->interp != interp || Ns_GetConn() == NULL) {
-            Tcl_SetObjResult(interp, Tcl_NewStringObj("logevent requires the current SMTP callback session", -1));
-            return TCL_ERROR;
-        }
-        if (*event == '\0' || strlen(event) > 64 || strspn(event, "abcdefghijklmnopqrstuvwxyz0123456789-_") != strlen(event)
-            || length > 16384 || strlen(text) != (size_t)length) {
-            Tcl_SetObjResult(interp, Tcl_NewStringObj("invalid event name or oversized event details", -1));
-            return TCL_ERROR;
-        }
-        if (Tcl_DictObjSize(interp, objv[4], &size) != TCL_OK) return TCL_ERROR;
-        Tcl_DictObjFirst(interp, objv[4], &search, &key, &value, &done);
-        for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
-            const char *name = Tcl_GetString(key);
-            if (*name == '\0' || strlen(name) > 64
-                || strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != strlen(name)) {
-                Tcl_DictObjDone(&search);
-                Tcl_SetObjResult(interp, Tcl_NewStringObj("event detail names must contain only letters, digits, underscores or hyphens (1-64 characters)", -1));
-                return TCL_ERROR;
-            }
-        }
-        Tcl_DictObjDone(&search);
-        value = EventGet(objv[4], "code");
-        if (value != NULL) {
-            int code;
-            if (Tcl_GetIntFromObj(interp, value, &code) != TCL_OK) return TCL_ERROR;
-            if (code < 100 || code > 599) {
-                Tcl_SetObjResult(interp, Tcl_NewStringObj("event code must be an SMTP code from 100 to 599", -1));
-                return TCL_ERROR;
-            }
-        }
-        value = EventGet(objv[4], "targets");
-        if (value != NULL && Tcl_ListObjLength(interp, value, &size) != TCL_OK) return TCL_ERROR;
-        if (conn->cmd == SMTP_RCPT && strcmp(event, "policy") == 0) {
-            /* Defer policy logging until the final recipient decision. */
-            Tcl_IncrRefCount(objv[4]);
-            if (conn->policyDetails != NULL) {
-                Tcl_DecrRefCount(conn->policyDetails);
-            }
-            conn->policyDetails = objv[4];
-        } else {
-            SmtpdEvent(conn, event, objv[4]);
-        }
-        break;
-    }
     case cmdFlag:
         if (objc < 3) {
             Tcl_WrongNumArgs(interp, 1, objv, "name");
@@ -5573,6 +5512,257 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             break;
         }
 
+    case cmdCheckDomain:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "domain");
+            return TCL_ERROR;
+        }
+        /* avoid cast from function call to non-matching type */
+        Tcl_SetObjResult(interp, Tcl_NewIntObj(SmtpdCheckDomain(0, Tcl_GetString(objv[2])) ? 1 : 0));
+        break;
+
+    case cmdCheckEmail:{
+            smtpdEmail addr;
+            char *email;
+            if (objc < 3) {
+                Tcl_WrongNumArgs(interp, 1, objv, "email");
+                return TCL_ERROR;
+            }
+            /* parseEmail modifies its input; never mutate a Tcl object's bytes. */
+            email = ns_strdup(Tcl_GetString(objv[2]));
+            if (parseEmail(&addr, email))
+                Tcl_AppendResult(interp, addr.mailbox, "@", addr.domain, (char *)0L);
+            ns_free(email);
+            break;
+        }
+
+    case cmdSpamVersion:
+#ifdef USE_DSPAM
+        Tcl_AppendResult(interp, "DSPAM", (char *)0L);
+#endif
+
+#ifdef USE_SPAMASSASSIN
+        Tcl_AppendResult(interp, "SpamAssassin", (char *)0L);
+#endif
+        break;
+
+    case cmdCheckSpam: {
+            Ns_Sock sock;
+            smtpdConn *sconn;
+
+            if (objc < 3) {
+                Tcl_WrongNumArgs(interp, 2, objv, "message ?email?");
+                return TCL_ERROR;
+            }
+            sock.sock = -1;
+            sconn = SmtpdConnCreate(config, &sock);
+
+            Tcl_DStringAppend(&sconn->body.data, Tcl_GetString(objv[2]), TCL_INDEX_NONE);
+            sconn->rcpt.list = ns_calloc(1, sizeof(smtpdRcpt));
+            sconn->rcpt.list->flags |= SMTPD_SPAMCHECK;
+            sconn->rcpt.list->addr = ns_strdup(objc > 3 ? Tcl_GetString(objv[3]) : "smtpd");
+            SmtpdCheckSpam(sconn);
+
+            {
+                const char *status = ((sconn->rcpt.list->flags & SMTPD_GOTSPAM) != 0u)
+                    ? "Spam" : "Innocent";
+                const char *sig = SmtpdGetHeader(sconn, SMTPD_HDR_SIGNATURE);
+                if (sig == NULL) {
+                    sig = "";
+                }
+
+                /* prints: "<Status> <score with 2 decimals> <signature>" */
+                Ns_TclPrintfResult(interp, "%s %.2f %s",
+                                   status,
+                                   (double)sconn->rcpt.list->spam_score,
+                                   sig);
+            }
+
+            SmtpdConnFree(sconn);
+            break;
+        }
+
+    case cmdTrainSpam:{
+#ifdef USE_DSPAM
+            Tcl_DString ds;
+            DSPAM_CTX *CTX;
+            struct _ds_spam_signature SIG;
+            unsigned int flags = DSF_CHAINED | DSF_NOISE;
+
+            if (objc < 5) {
+                Tcl_WrongNumArgs(interp, 2, objv, "1|0 email message ?signature? ?mode? ?source?");
+                return TCL_ERROR;
+            }
+            if (objc > 5) {
+                if ((SIG.data = decodehex(Tcl_GetString(objv[5]), &SIG.length))) {
+                    flags |= DSF_SIGNATURE;
+                }
+            }
+            if (!(CTX = dspam_init(Tcl_GetString(objv[3]), NULL, DSM_PROCESS, flags)))
+                break;
+            CTX->source = DSS_ERROR;
+            CTX->classification = atoi(Tcl_GetString(objv[2])) ? DSR_ISSPAM : DSR_ISINNOCENT;
+            if (objc > 6) {
+                if (!strcmp(Tcl_GetString(objv[6]), "teft"))
+                    CTX->training_mode = DST_TEFT;
+                else if (!strcmp(Tcl_GetString(objv[6]), "toe"))
+                    CTX->training_mode = DST_TOE;
+                else if (!strcmp(Tcl_GetString(objv[6]), "tum"))
+                    CTX->training_mode = DST_TUM;
+            }
+            if (objc > 7) {
+                if (!strcmp(Tcl_GetString(objv[7]), "error"))
+                    CTX->source = DSS_ERROR;
+                else if (!strcmp(Tcl_GetString(objv[7]), "corpus"))
+                    CTX->source = DSS_CORPUS;
+                else if (!strcmp(Tcl_GetString(objv[7]), "inoculation"))
+                    CTX->source = DSS_INOCULATION;
+                else if (!strcmp(Tcl_GetString(objv[7]), "none"))
+                    CTX->source = DSS_NONE;
+            }
+            if ((flags & DSF_SIGNATURE) != 0u)
+                CTX->signature = &SIG;
+            dspam_process(CTX, Tcl_GetString(objv[4]));
+            if ((flags & DSF_SIGNATURE) != 0u)
+                ns_free(SIG.data);
+            Tcl_DStringInit(&ds);
+            Ns_DStringPrintf(&ds, "Flags: 0x%X, Source: 0x%X, Mode: 0x%X, Probability: %2.4f, Confidence: %2.4f, Result: %s",
+                             flags,
+                             CTX->source,
+                             CTX->training_mode,
+                             CTX->probability,
+                             CTX->confidence,
+                             CTX->result == DSR_ISSPAM ? "Spam" :
+                             CTX->result == DSR_ISINNOCENT ? "Innocent" :
+                             CTX->result == DSR_ISWHITELISTED ? "Whitelisted" : "Error");
+            Tcl_AppendResult(interp, ds.string, (char *)0L);
+            Tcl_DStringFree(&ds);
+            _ds_destroy_message(CTX->message);
+            dspam_destroy(CTX);
+#endif
+            break;
+        }
+
+    case cmdVirusVersion:
+#ifdef USE_SAVI
+        Tcl_AppendResult(interp, "Sophos", (char *)0L);
+#endif
+#ifdef USE_CLAMAV
+        Tcl_AppendResult(interp, "ClamAV", (char *)0L);
+#endif
+        break;
+
+    case cmdCheckVirus:{
+            Ns_Sock sock;
+            smtpdConn *sconn;
+
+            if (objc < 3) {
+                Tcl_WrongNumArgs(interp, 2, objv, "data");
+                return TCL_ERROR;
+            }
+            sock.sock = -1;
+            sconn = SmtpdConnCreate(config, &sock);
+            sconn->interp = interp;
+            if (Tcl_GetString(objv[2])[0] == '/') {
+                SmtpdCheckVirus(sconn, Tcl_GetString(objv[2]), 0, 0);
+            } else {
+                SmtpdCheckVirus(sconn, Tcl_GetString(objv[2]), Tcl_GetCharLength(objv[2]), 0);
+            }
+            if ((sconn->flags & SMTPD_GOTVIRUS) != 0u) {
+                Tcl_AppendResult(interp, SmtpdGetHeader(sconn, SMTPD_HDR_VIRUS_STATUS), (char *)0L);
+            }
+            SmtpdConnFree(sconn);
+            break;
+        }
+    }
+    if (cmd <= cmdSessions) {
+        return TCL_OK;
+    }
+
+    {
+        int i;
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "session ?args ...?");
+            return TCL_ERROR;
+        }
+        if (Tcl_GetIntFromObj(interp, objv[2], &i) != TCL_OK) {
+            return TCL_ERROR;
+        } else {
+            id = (unsigned int)i;
+        }
+        Ns_MutexLock(&config->lock);
+        rec = Tcl_FindHashEntry(&config->sessions, (char *)(long) id);
+        if (rec != NULL) {
+            conn = Tcl_GetHashValue(rec);
+        }
+        Ns_MutexUnlock(&config->lock);
+        /* Every session command below requires an actual connection, not
+         * merely an existing hash entry. */
+        if (conn == NULL) {
+            Tcl_AppendResult(interp, "invalid session id: ",
+                             Tcl_GetString(objv[2]), (char *)0L);
+            return TCL_ERROR;
+        }
+    }
+
+    /* The connection guard above dominates every session handler. */
+    switch (cmd) {
+    case cmdLogEvent: {
+        TCL_SIZE_T size, length;
+        Tcl_DictSearch search;
+        Tcl_Obj *key, *value;
+        int done;
+        const char *event, *text;
+        if (objc != 5) {
+            Tcl_WrongNumArgs(interp, 2, objv, "session event detailsDict");
+            return TCL_ERROR;
+        }
+        event = Tcl_GetString(objv[3]);
+        text = Tcl_GetStringFromObj(objv[4], &length);
+        if (conn->interp != interp || Ns_GetConn() == NULL) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("logevent requires the current SMTP callback session", -1));
+            return TCL_ERROR;
+        }
+        if (*event == '\0' || strlen(event) > 64 || strspn(event, "abcdefghijklmnopqrstuvwxyz0123456789-_") != strlen(event)
+            || length > 16384 || strlen(text) != (size_t)length) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("invalid event name or oversized event details", -1));
+            return TCL_ERROR;
+        }
+        if (Tcl_DictObjSize(interp, objv[4], &size) != TCL_OK) return TCL_ERROR;
+        Tcl_DictObjFirst(interp, objv[4], &search, &key, &value, &done);
+        for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
+            const char *name = Tcl_GetString(key);
+            if (*name == '\0' || strlen(name) > 64
+                || strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != strlen(name)) {
+                Tcl_DictObjDone(&search);
+                Tcl_SetObjResult(interp, Tcl_NewStringObj("event detail names must contain only letters, digits, underscores or hyphens (1-64 characters)", -1));
+                return TCL_ERROR;
+            }
+        }
+        Tcl_DictObjDone(&search);
+        value = EventGet(objv[4], "code");
+        if (value != NULL) {
+            int code;
+            if (Tcl_GetIntFromObj(interp, value, &code) != TCL_OK) return TCL_ERROR;
+            if (code < 100 || code > 599) {
+                Tcl_SetObjResult(interp, Tcl_NewStringObj("event code must be an SMTP code from 100 to 599", -1));
+                return TCL_ERROR;
+            }
+        }
+        value = EventGet(objv[4], "targets");
+        if (value != NULL && Tcl_ListObjLength(interp, value, &size) != TCL_OK) return TCL_ERROR;
+        if (conn->cmd == SMTP_RCPT && strcmp(event, "policy") == 0) {
+            /* Defer policy logging until the final recipient decision. */
+            Tcl_IncrRefCount(objv[4]);
+            if (conn->policyDetails != NULL) {
+                Tcl_DecrRefCount(conn->policyDetails);
+            }
+            conn->policyDetails = objv[4];
+        } else {
+            SmtpdEvent(conn, event, objv[4]);
+        }
+        break;
+    }
     case cmdGetHdr:{
             smtpdHdr *hdr;
             if (objc < 4) {
@@ -5899,168 +6089,6 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         Tcl_DStringAppend(&conn->reply, Tcl_GetString(objv[3]), TCL_INDEX_NONE);
         break;
 
-    case cmdCheckDomain:
-        if (objc < 3) {
-            Tcl_WrongNumArgs(interp, 2, objv, "domain");
-            return TCL_ERROR;
-        }
-        /* avoid cast from function call to non-matching type */
-        Tcl_SetObjResult(interp, Tcl_NewIntObj(SmtpdCheckDomain(0, Tcl_GetString(objv[2])) ? 1 : 0));
-        break;
-
-    case cmdCheckEmail:{
-            smtpdEmail addr;
-            char *email;
-            if (objc < 3) {
-                Tcl_WrongNumArgs(interp, 1, objv, "email");
-                return TCL_ERROR;
-            }
-            /* parseEmail modifies its input; never mutate a Tcl object's bytes. */
-            email = ns_strdup(Tcl_GetString(objv[2]));
-            if (parseEmail(&addr, email))
-                Tcl_AppendResult(interp, addr.mailbox, "@", addr.domain, (char *)0L);
-            ns_free(email);
-            break;
-        }
-
-    case cmdSpamVersion:
-#ifdef USE_DSPAM
-        Tcl_AppendResult(interp, "DSPAM", (char *)0L);
-#endif
-
-#ifdef USE_SPAMASSASSIN
-        Tcl_AppendResult(interp, "SpamAssassin", (char *)0L);
-#endif
-        break;
-
-    case cmdCheckSpam: {
-            Ns_Sock sock;
-            smtpdConn *sconn;
-
-            if (objc < 3) {
-                Tcl_WrongNumArgs(interp, 2, objv, "message ?email?");
-                return TCL_ERROR;
-            }
-            sock.sock = -1;
-            sconn = SmtpdConnCreate(config, &sock);
-
-            Tcl_DStringAppend(&sconn->body.data, Tcl_GetString(objv[2]), TCL_INDEX_NONE);
-            sconn->rcpt.list = ns_calloc(1, sizeof(smtpdRcpt));
-            sconn->rcpt.list->flags |= SMTPD_SPAMCHECK;
-            sconn->rcpt.list->addr = ns_strdup(objc > 3 ? Tcl_GetString(objv[3]) : "smtpd");
-            SmtpdCheckSpam(sconn);
-
-            {
-                const char *status = ((sconn->rcpt.list->flags & SMTPD_GOTSPAM) != 0u)
-                    ? "Spam" : "Innocent";
-                const char *sig = SmtpdGetHeader(sconn, SMTPD_HDR_SIGNATURE);
-                if (sig == NULL) {
-                    sig = "";
-                }
-
-                /* prints: "<Status> <score with 2 decimals> <signature>" */
-                Ns_TclPrintfResult(interp, "%s %.2f %s",
-                                   status,
-                                   (double)sconn->rcpt.list->spam_score,
-                                   sig);
-            }
-
-            SmtpdConnFree(sconn);
-            break;
-        }
-
-    case cmdTrainSpam:{
-#ifdef USE_DSPAM
-            Tcl_DString ds;
-            DSPAM_CTX *CTX;
-            struct _ds_spam_signature SIG;
-            unsigned int flags = DSF_CHAINED | DSF_NOISE;
-
-            if (objc < 5) {
-                Tcl_WrongNumArgs(interp, 2, objv, "1|0 email message ?signature? ?mode? ?source?");
-                return TCL_ERROR;
-            }
-            if (objc > 5) {
-                if ((SIG.data = decodehex(Tcl_GetString(objv[5]), &SIG.length))) {
-                    flags |= DSF_SIGNATURE;
-                }
-            }
-            if (!(CTX = dspam_init(Tcl_GetString(objv[3]), NULL, DSM_PROCESS, flags)))
-                break;
-            CTX->source = DSS_ERROR;
-            CTX->classification = atoi(Tcl_GetString(objv[2])) ? DSR_ISSPAM : DSR_ISINNOCENT;
-            if (objc > 6) {
-                if (!strcmp(Tcl_GetString(objv[6]), "teft"))
-                    CTX->training_mode = DST_TEFT;
-                else if (!strcmp(Tcl_GetString(objv[6]), "toe"))
-                    CTX->training_mode = DST_TOE;
-                else if (!strcmp(Tcl_GetString(objv[6]), "tum"))
-                    CTX->training_mode = DST_TUM;
-            }
-            if (objc > 7) {
-                if (!strcmp(Tcl_GetString(objv[7]), "error"))
-                    CTX->source = DSS_ERROR;
-                else if (!strcmp(Tcl_GetString(objv[7]), "corpus"))
-                    CTX->source = DSS_CORPUS;
-                else if (!strcmp(Tcl_GetString(objv[7]), "inoculation"))
-                    CTX->source = DSS_INOCULATION;
-                else if (!strcmp(Tcl_GetString(objv[7]), "none"))
-                    CTX->source = DSS_NONE;
-            }
-            if ((flags & DSF_SIGNATURE) != 0u)
-                CTX->signature = &SIG;
-            dspam_process(CTX, Tcl_GetString(objv[4]));
-            if ((flags & DSF_SIGNATURE) != 0u)
-                ns_free(SIG.data);
-            Tcl_DStringInit(&ds);
-            Ns_DStringPrintf(&ds, "Flags: 0x%X, Source: 0x%X, Mode: 0x%X, Probability: %2.4f, Confidence: %2.4f, Result: %s",
-                             flags,
-                             CTX->source,
-                             CTX->training_mode,
-                             CTX->probability,
-                             CTX->confidence,
-                             CTX->result == DSR_ISSPAM ? "Spam" :
-                             CTX->result == DSR_ISINNOCENT ? "Innocent" :
-                             CTX->result == DSR_ISWHITELISTED ? "Whitelisted" : "Error");
-            Tcl_AppendResult(interp, ds.string, (char *)0L);
-            Tcl_DStringFree(&ds);
-            _ds_destroy_message(CTX->message);
-            dspam_destroy(CTX);
-#endif
-            break;
-        }
-
-    case cmdVirusVersion:
-#ifdef USE_SAVI
-        Tcl_AppendResult(interp, "Sophos", (char *)0L);
-#endif
-#ifdef USE_CLAMAV
-        Tcl_AppendResult(interp, "ClamAV", (char *)0L);
-#endif
-        break;
-
-    case cmdCheckVirus:{
-            Ns_Sock sock;
-            smtpdConn *sconn;
-
-            if (objc < 3) {
-                Tcl_WrongNumArgs(interp, 2, objv, "data");
-                return TCL_ERROR;
-            }
-            sock.sock = -1;
-            sconn = SmtpdConnCreate(config, &sock);
-            sconn->interp = interp;
-            if (Tcl_GetString(objv[2])[0] == '/') {
-                SmtpdCheckVirus(sconn, Tcl_GetString(objv[2]), 0, 0);
-            } else {
-                SmtpdCheckVirus(sconn, Tcl_GetString(objv[2]), Tcl_GetCharLength(objv[2]), 0);
-            }
-            if ((sconn->flags & SMTPD_GOTVIRUS) != 0u) {
-                Tcl_AppendResult(interp, SmtpdGetHeader(sconn, SMTPD_HDR_VIRUS_STATUS), (char *)0L);
-            }
-            SmtpdConnFree(conn);
-            break;
-        }
     }
 
     return TCL_OK;

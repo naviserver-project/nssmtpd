@@ -129,6 +129,51 @@ test smtp-incoming-eof {idle EOF is a Notice, independent of stale errno} -body 
     list $severity [string match {*read during command/reply*} $message]
 } -result {Notice 1}
 
+test smtp-progress-greeting {banner-only probes and reused sessions start with fresh counters} -body {
+    set result {}
+    for {set i 0} {$i < 2} {incr i} {
+        nsv_set io-test logs {}
+        set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+        fconfigure $channel -translation crlf -buffering line
+        gets $channel greeting
+        close $channel
+        lassign [io_find_log {*peer closed connection (EOF)*}] severity message
+        regexp {last=([^ ]+) rx=([0-9]+) tx=([0-9]+)$} $message -> stage rx tx
+        lappend result [list $severity $stage $rx [expr {$tx == [string length $greeting]+2}]]
+    }
+    set result
+} -result {{Notice GREETING 0 1} {Notice GREETING 0 1}}
+
+test smtp-progress-partial {incomplete command bytes count without exposing input} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    puts -nonewline $channel SECRET
+    flush $channel
+    close $channel
+    lassign [io_find_log {*peer closed connection (EOF)*}] severity message
+    list [regexp {last=GREETING rx=6 tx=[0-9]+$} $message] \
+        [expr {[string first SECRET $message] < 0}]
+} -result {1 1}
+
+test smtp-progress-pipeline {read-ahead counted once and RSET preserves connection counters} -body {
+    nsv_set io-test logs {}
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    gets $channel greeting
+    set expectedTx [expr {[string length $greeting]+2}]
+    set commands "HELO private.example\nNOOP\nRSET"
+    puts $channel $commands
+    foreach command {HELO NOOP RSET} {
+        gets $channel reply
+        incr expectedTx [expr {[string length $reply]+2}]
+    }
+    close $channel
+    lassign [io_find_log {*peer closed connection (EOF)*}] severity message
+    regexp {last=([^ ]+) rx=([0-9]+) tx=([0-9]+)$} $message -> stage rx tx
+    list $stage [expr {$rx == [string length $commands]+4}] \
+        [expr {$tx == $expectedTx}] [expr {[string first private.example $message] < 0}]
+} -result {RSET 1 1 1}
+
 test smtp-incoming-timeout {idle timeout is identified and logged at Notice} -body {
     nsv_set io-test logs {}
     set channel [io_open]

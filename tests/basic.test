@@ -29,7 +29,16 @@ test nssmtpd-session-validation {session commands reject missing and nonexistent
     set failures
 } -result {}
 
+test nssmtpd-checkvirus-cleanup {standalone virus check releases its temporary session} -body {
+    set before [ns_smtpd sessions]
+    ns_smtpd checkvirus {Subject: test
+
+Test message}
+    expr {[ns_smtpd sessions] eq $before}
+} -result 1
+
 proc basic_recipients {} {
+
     set addresses {}
     foreach recipient [nsv_get alias-test recipients] {
         lappend addresses [lindex $recipient 0]
