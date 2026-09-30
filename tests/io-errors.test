@@ -248,6 +248,62 @@ test smtp-starttls-events {TLS failures preserve peer and phase in the positiona
     set phases
 } -result {{127.0.0.1 fail context 1} {127.0.0.1 fail handshake 1} {127.0.0.1 fail handshake 1}}
 
+# The command is available on current cores; older supported cores still
+# exercise connection cleanup through the other SMTP integration tests.
+testConstraint certctl [expr {[llength [info commands ns_certctl]] > 0}]
+proc io_tls_certificate {} {
+    set text [exec openssl s_client -connect 127.0.0.1:$::env(ALIAS_TEST_PORT) \
+                  -starttls smtp -servername localhost -showcerts \
+                  -ignore_unexpected_eof << "QUIT\r\n" 2>@1]
+    if {![regexp -- {-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----} $text pem]} {
+        error "missing server certificate: $text"
+    }
+    return [exec openssl x509 -noout -serial << $pem]
+}
+
+test smtp-tls-context-reuse {repeated handshakes retain only one certificate context} -constraints certctl -body {
+    set before [llength [ns_certctl list]]
+    set serial [io_tls_certificate]
+    for {set i 0} {$i < 4} {incr i} {
+        if {[io_tls_certificate] ne $serial} {error {certificate changed unexpectedly}}
+    }
+    list $before [llength [ns_certctl list]]
+} -result {1 1}
+
+proc io_tls_reply {channel command pattern} {
+    puts $channel $command
+    flush $channel
+    set text ""
+    for {set i 0} {$i < 300} {incr i} {
+        append text [read $channel]
+        if {[string match $pattern $text]} {return}
+        if {[eof $channel]} {break}
+        after 10
+    }
+    error "missing TLS reply $pattern: $text"
+}
+
+test smtp-tls-context-renewal {reload changes the certificate for new connections and preserves an active connection} -constraints certctl -body {
+    set cert [file join $::env(ALIAS_TEST_HOME) cert.pem]
+    set key [file join $::env(ALIAS_TEST_HOME) key.pem]
+    set oldSerial [io_tls_certificate]
+    set channel [open [list | openssl s_client -connect 127.0.0.1:$::env(ALIAS_TEST_PORT) \
+                          -starttls smtp -servername localhost -quiet -ign_eof \
+                          -ignore_unexpected_eof 2>@1] r+]
+    fconfigure $channel -blocking 0 -buffering line -translation crlf
+    try {
+        io_tls_reply $channel {NOOP} {*250 Noop OK*}
+        exec openssl req -new -x509 -key $key -out ${cert}.new -days 1 \
+            -set_serial 424242 -subj /CN=localhost 2>@1
+        file rename -force ${cert}.new $cert
+        ns_certctl reload
+        set newSerial [io_tls_certificate]
+        io_tls_reply $channel {NOOP} {*250 Noop OK*}
+        io_tls_reply $channel {QUIT} {*221 Bye*}
+        list [expr {$oldSerial ne $newSerial}] $newSerial [llength [ns_certctl list]]
+    } finally {close $channel}
+} -result {1 serial=067932 1}
+
 ns_logctl unregister $logFilter
 
 set failures $::tcltest::numTests(Failed)

@@ -21,6 +21,10 @@ ns_section ns/servers {
     ns_param test {Alias tests}
     if {$::env(ALIAS_TEST_MODE) eq "proxy"} {ns_param sink {STARTTLS test sink}}
 }
+ns_section ns/server/test {
+    ns_param minthreads 2
+    ns_param maxthreads 4
+}
 ns_section ns/server/test/tcl {
     ns_param initfile [file join $nsroot bin init.tcl]
     ns_param initcmds [list source [file join $root tests alias-fixture.tcl]]

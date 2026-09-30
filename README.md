@@ -120,6 +120,24 @@ Note: before NaviServer 5.1, the certificate file had to include the
 certificate chain and the private key. Starting with NaviServer 5.1, the
 private key file (PEM format) can be specified optionally as a separate file.
 
+### TLS context lifetime and certificate renewal
+
+On NaviServer 5.2 and newer, incoming STARTTLS reuses one server context per
+driver/server mapping through `Ns_DriverGetServerCtx`. Host aliases for that server
+share the context. It is initialized on the first STARTTLS attempt; a failed
+initialization can be retried. Older NaviServer builds use one context per
+module configuration instead. Both caches retain a bounded number of
+contexts for the process lifetime, registered with NaviServer's certificate
+reload machinery. Connection-level TLS objects and outgoing relay client
+contexts are released when no longer needed.
+
+After renewing the configured certificate/key files, invoke `ns_certctl reload`
+in the running NaviServer, or send SIGHUP to its process. Merely replacing the
+PEM no longer reloads it on each connection. Existing TLS connections remain
+usable; new connections use the reloaded certificate. Check the system log
+for reload errors and verify the served certificate externally. With Docker,
+mount the certificate directory so atomic file replacement remains visible.
+
 ### Enabling Logging
 
 For secure communication via STARTTLS and to enable logging, add these

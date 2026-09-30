@@ -195,6 +195,10 @@ typedef struct _smtpdConfig {
     struct cl_limits ClamAvLimits;
 #endif
 #ifdef HAVE_OPENSSL_EVP_H
+#if NS_VERSION_NUM < 50200
+    Ns_Mutex tlslock;
+    NS_TLS_SSL_CTX *tlsctx; /* Process-lifetime fallback for older cores. */
+#endif
     const char *certificate;
 # if NS_VERSION_NUM >= 50100
     const char *key;
@@ -503,6 +507,7 @@ static void EventPut(Tcl_Obj *dict, const char *key, const char *value);
 static void SmtpdReceived(smtpdConn *conn);
 #ifdef HAVE_OPENSSL_EVP_H
 static void SmtpdTLSFailure(smtpdConn *conn, const char *phase);
+static int SmtpdTLSContextCreate(Tcl_Interp *interp, void *arg, NS_TLS_SSL_CTX **ctxPtr);
 #endif
 static void SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason);
 
@@ -656,6 +661,10 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     Ns_MutexSetName2(&serverPtr->lock, "smtp:lock", module);
     Ns_MutexSetName2(&serverPtr->relaylock, "smtp:relaylock", module);
     Ns_MutexSetName2(&serverPtr->locallock, "smtp:locallock", module);
+#if defined(HAVE_OPENSSL_EVP_H) && NS_VERSION_NUM < 50200
+    Ns_MutexInit(&serverPtr->tlslock);
+    Ns_MutexSetName2(&serverPtr->tlslock, "smtp:tls", module);
+#endif
     Ns_MutexSetName2(&serverPtr->sendlog.lock, "smtp:sendlog", module);
 
     if (!initialized) {
@@ -1297,6 +1306,14 @@ SmtpdCloseProc(Ns_Sock *sock)
 {
     NS_NONNULL_ASSERT(sock != NULL);
 
+#ifdef HAVE_OPENSSL_EVP_H
+    if (sock->arg != NULL) {
+        /* Release TLS state even after the descriptor was already closed.
+         * Clearing arg makes the request and driver close paths idempotent. */
+        SSL_free((SSL *)sock->arg);
+        sock->arg = NULL;
+    }
+#endif
     if (sock->sock != NS_INVALID_SOCKET) {
         ns_sockclose(sock->sock);
         sock->sock = NS_INVALID_SOCKET;
@@ -1582,32 +1599,22 @@ static void SmtpdThread(smtpdConn *conn)
                 goto error;
             }
 
-# if NS_VERSION_NUM >= 50100
-            result = Ns_TLS_CtxServerCreateCfg(
-                                               conn->interp,
-                                               conn->config->certificate,
-                                               conn->config->key,
-                                               conn->config->cafile,
-                                               conn->config->capath,
-                                               0 /*verify*/,
-                                               conn->config->ciphers,
-                                               conn->config->ciphersuites,
-                                               conn->config->protocols,
-                                               "http/1.1" /*alpn*/,
-                                               NULL /*app_data*/,
-                                               0u /*flags*/,
-                                               &ctx);
+#if NS_VERSION_NUM >= 50200
+            result = Ns_DriverGetServerCtx(conn->sock->driver, config->server,
+                                           conn->interp, SmtpdTLSContextCreate,
+                                           config, &ctx);
 #else
-            result = Ns_TLS_CtxServerCreate(
-                                            conn->interp,
-                                            conn->config->certificate,
-                                            conn->config->cafile,
-                                            conn->config->capath,
-                                            0 /*verify*/,
-                                            conn->config->ciphers,
-                                            conn->config->ciphersuites,
-                                            conn->config->protocols,
-                                            &ctx);
+            Ns_MutexLock(&config->tlslock);
+            if (config->tlsctx == NULL) {
+                result = SmtpdTLSContextCreate(conn->interp, config, &ctx);
+                if (result == TCL_OK) {
+                    config->tlsctx = ctx;
+                }
+            } else {
+                ctx = config->tlsctx;
+                result = TCL_OK;
+            }
+            Ns_MutexUnlock(&config->tlslock);
 #endif
             Ns_Log(SmtpdDebug, "STARTTLS-tls-server-create result=%d", result);
 
@@ -2291,8 +2298,7 @@ static void SmtpdConnFree(smtpdConn *conn)
         Tcl_DeleteHashEntry(rec);
     }
     Ns_MutexUnlock(&conn->config->lock);
-    ns_sockclose(conn->sock->sock);
-    conn->sock->sock = -1;
+    SmtpdCloseProc(conn->sock);
     SmtpdConnReset(conn);
     ns_free_const_local(conn->host);
     conn->host = NULL;
@@ -2576,6 +2582,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
              */
 
             if (Ns_SockTimedWait(relay->sock->sock, NS_SOCK_WRITE|NS_SOCK_READ, &timeout) != NS_OK) {
+                Ns_TLS_CtxFree(ctx);
                 goto error421;
             };
             /*
@@ -2591,6 +2598,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 #endif
                                    /*timeoutPtr*/NULL,
                                    &ssl);
+            /* SSL_new retains its own reference, including failed handshakes. */
+            Ns_TLS_CtxFree(ctx);
             result = (rc == NS_OK ? TCL_OK : TCL_ERROR);
             relay->sock->arg = ssl;
         }
@@ -2962,6 +2971,30 @@ SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
 }
 
 #ifdef HAVE_OPENSSL_EVP_H
+static int
+SmtpdTLSContextCreate(Tcl_Interp *interp, void *arg, NS_TLS_SSL_CTX **ctxPtr)
+{
+    smtpdConfig *config = arg;
+
+#if NS_VERSION_NUM >= 50100
+    return Ns_TLS_CtxServerCreateCfg(interp, config->certificate, config->key,
+                                    config->cafile, config->capath, 0 /*verify*/,
+                                    config->ciphers, config->ciphersuites,
+                                    config->protocols,
+#if NS_VERSION_NUM >= 50200
+                                    "", /* SMTP does not negotiate HTTP ALPN. */
+#else
+                                    "http/1.1", /* Required by older cores. */
+#endif
+                                    NULL /*app_data*/, 0u /*flags*/, ctxPtr);
+#else
+    return Ns_TLS_CtxServerCreate(interp, config->certificate,
+                                 config->cafile, config->capath, 0 /*verify*/,
+                                 config->ciphers, config->ciphersuites,
+                                 config->protocols, ctxPtr);
+#endif
+}
+
 /* TLS helpers return their diagnostic in the interpreter, not the I/O state.
  * Copy it before logging; the preceding successful 220 write is unrelated. */
 static void
