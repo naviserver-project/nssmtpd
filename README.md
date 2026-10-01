@@ -731,15 +731,30 @@ initialized container does not rerun package installation. No `WITH_SPF2=1`,
 installer changes, or additional service are required. The image must include
 this version of the Tcl adapter.
 
-The adapter uses GNU coreutils or BusyBox `timeout`, with a default limit of
-10 seconds. Both are available in the respective base distributions. Optional
-callback arguments `-timeout 15` and `-timeoutcommand /path/to/timeout` change
-the deadline in seconds and the timeout executable. It evaluates synchronously,
-occupying one SMTP worker per query, so this backend is intended for low volume
-and narrowly scoped exceptions. It has no persistent DNS cache. Output is
-discarded and libspf2's exit status determines the SPF result. Missing tools,
-timeouts, crashes and unexpected statuses raise Tcl errors; the greylist policy
-logs these and retains normal greylisting. There is no automatic switch from a
+The adapter requires NaviServer's `nsproxy` module. Load it in the server's
+modules section if it is not already present:
+
+```tcl
+ns_section "ns/server/$server/modules" {
+    ns_param nsproxy nsproxy.so
+}
+```
+
+It uses `ns_proxy eval` with a default 10-second evaluation timeout and releases
+its proxy in a `finally` block, including after errors. Callback option
+`-timeout 15` changes the timeout in seconds; the same limit applies separately
+to waiting for a proxy handle. Option `-pool smtpd-spf` selects the proxy pool
+(the default is `smtpd-spf`). Pool concurrency can be bounded with
+`ns_proxy configure smtpd-spf -maxslaves 2` during startup. No external `timeout`
+program is required.
+
+An SMTP worker waits for each evaluation, so this backend is intended for low
+volume and narrowly scoped exceptions. It has no persistent DNS cache. Output
+is discarded and libspf2's exit status determines the SPF result. Missing tools,
+proxy timeouts, crashes and unexpected statuses raise Tcl errors; the greylist
+policy logs these and retains normal greylisting. A proxy timeout bounds the
+caller's wait; nsproxy manages worker cleanup, not a process-group deadline for
+all descendants of an external command. There is no automatic switch from a
 configured native backend: choose this adapter explicitly via `spfproc`.
 
 The optional native backend (`ns_param spfproc smtpd::libspf2`) additionally

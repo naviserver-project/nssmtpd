@@ -30,8 +30,12 @@ ns_section ns/server/test/tcl {
     ns_param initcmds [list source [file join $root tests alias-fixture.tcl]]
 }
 ns_section ns/server/test/modules {
+    if {$::env(ALIAS_TEST_MODE) eq "basic"} {ns_param nsproxy [file join $nsroot bin nsproxy.so]}
     ns_param nssmtpd [file join $root nssmtpd.so]
     ns_param nssock [file join $nsroot bin nssock.so]
+}
+ns_section ns/server/test/module/nsproxy {
+    ns_param exec [file join $nsroot bin nsproxy-helper]
 }
 ns_section ns/server/test/module/nssock {
     ns_param address 127.0.0.1

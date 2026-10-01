@@ -32,21 +32,27 @@ proc smtpd::checkspf {args} {
 }
 
 # External libspf2 utility (not the incompatible Mail::SPF Perl utility).
-# GNU coreutils and BusyBox timeout both support this invocation. Discard
-# diagnostic output: libspf2 defines the result through its exit status.
+# Run in a NaviServer proxy with a bounded wait. Discard diagnostic output:
+# libspf2 defines the result through its exit status.
 proc smtpd::spfquery {args} {
-    ns_parseargs {-command {-timeout 10} {-timeoutcommand timeout} -ip -sender -helo} $args
+    ns_parseargs {-command {-timeout 10} {-pool smtpd-spf} -ip -sender -helo} $args
     foreach name {command ip sender helo} {
         if {![info exists $name]} {::error "missing required option -$name"}
     }
     if {![string is integer -strict $timeout] || $timeout <= 0} {
         ::error "SPF timeout must be a positive number of seconds"
     }
+    if {[namespace which -command ::ns_proxy] eq ""} {
+        return -code error -errorcode {NSSMTPD SPF EXEC} \
+            "smtpd::spfquery requires the nsproxy module"
+    }
+    set proxy ""
     try {
+        set proxy [ns_proxy get $pool -timeout $timeout]
         # Use --option=value so an SMTP identity can never become a Tcl exec
         # pipeline/redirection operator or a separate command-line option.
-        exec -- $timeoutcommand -s KILL $timeout $command \
-            --ip=$ip --sender=$sender --helo=$helo > /dev/null 2> /dev/null
+        ns_proxy eval $proxy [list exec -- $command \
+            --ip=$ip --sender=$sender --helo=$helo > /dev/null 2> /dev/null] $timeout
     } trap CHILDSTATUS {message options} {
         set status [lindex [dict get $options -errorcode] 2]
         if {$status >= 1 && $status <= 7} {
@@ -57,6 +63,8 @@ proc smtpd::spfquery {args} {
     } on error {message options} {
         return -code error -errorcode {NSSMTPD SPF EXEC} \
             "SPF utility could not complete: $message"
+    } finally {
+        if {$proxy ne ""} {ns_proxy put $proxy}
     }
     # Zero is SPF_RESULT_INVALID, not success, for libspf2's spfquery.
     return -code error -errorcode {NSSMTPD SPF EXEC} \
