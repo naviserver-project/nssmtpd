@@ -167,7 +167,19 @@ rather than a later value of `errno`. I/O diagnostics also include `last`
 (the last SMTP command or connection stage, without arguments), and cumulative
 connection byte counts `rx` and `tx`. These count successful SMTP reads and
 writes, including partial transfers and traffic before and after STARTTLS,
-but exclude TLS handshake and record framing bytes. Receive counts include
+but exclude TLS handshake and record framing bytes. Rejected input adds a cumulative `rejected` count and the most recent rejection's
+`kind`: `unsupported-smtp` (a recognized but unimplemented SMTP verb),
+`invalid-syntax`, `wrong-protocol`, `unknown-command`, `empty`, or `binary`
+(including non-ASCII/control bytes). A `command` field contains only a complete
+ASCII alphabetic token of at most 16 characters; arguments and other input
+bytes are never included. Recognizable HTTP request lines or SSH identification
+lines instead carry `protocol=HTTP` or `protocol=SSH`. Unknown extensions remain
+`unknown-command`; the unsupported-command list is intentionally explicit.
+`last` retains the last recognized SMTP command, whether accepted or rejected;
+unrecognized input no longer replaces it with `UNKNOWN`. `rejected` counts
+these input failures, not policy rejections or relay denials. Partial lines
+which end before a newline contribute bytes but are not dispatched/classified.
+Receive counts include
 buffered read-ahead. RSET and new mail transactions do not reset the counters. Input excerpts are limited to 80 bytes
 with control characters escaped; ordinary I/O diagnostics omit message data.
 

@@ -229,10 +229,19 @@ typedef struct _smtpdConfig {
     } eventlog;
 } smtpdConfig;
 
+/* Diagnostic classification only; never retain arguments or arbitrary bytes. */
+typedef struct {
+    const char *kind;
+    const char *protocol;
+    char command[17];
+} smtpdInput;
+
 typedef struct _smtpdConn {
     struct _smtpdConn *next;
     uintptr_t id;
     int cmd;
+    smtpdInput rejectedInput;
+    uint64_t rejectedCommands;
     const char *lastStage; /* Fixed command label; never includes arguments. */
     uint64_t bytesReceived, bytesSent; /* SMTP bytes, excluding TLS framing. */
     unsigned int flags;
@@ -1430,6 +1439,115 @@ static void SmtpdInit(void *arg)
 /*
  *----------------------------------------------------------------------
  *
+ * SmtpdClassifyInput --
+ *
+ *      Classify a complete command line before normalization destroys its
+ *      original length or control bytes. Used only when dispatch rejects it.
+ *      Known protocol signatures require more than just a command verb.
+ *
+ * Results:
+ *      A fixed classification and, where safe, an ASCII command token.
+ *
+ * Side effects:
+ *      None. SMTP parsing and replies are unaffected.
+ *
+ *----------------------------------------------------------------------
+ */
+static smtpdInput
+SmtpdClassifyInput(const Tcl_DString *line)
+{
+    smtpdInput input = {"unknown-command", NULL, ""};
+    const char *p = line->string;
+    size_t length = (size_t)line->length, tokenLength = 0, i;
+    static const char *const implemented[] = {
+        "HELO", "EHLO", "MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT", "VRFY", "HELP",
+#ifdef HAVE_OPENSSL_EVP_H
+        "STARTTLS",
+#endif
+        NULL
+    };
+    static const char *const unsupported[] = {
+        "EXPN", "AUTH", "BDAT", "ETRN", "ATRN", "BURL", "TURN", "SEND", "SOML", "SAML",
+#ifndef HAVE_OPENSSL_EVP_H
+        "STARTTLS",
+#endif
+        NULL
+    };
+
+    if (length > 0 && p[length-1] == '\n') --length;
+    if (length > 0 && p[length-1] == '\r') --length;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)p[i];
+        if ((c < 32 && c != '\t') || c >= 127) {
+            input.kind = "binary";
+            return input;
+        }
+    }
+    while (length > 0 && (*p == ' ' || *p == '\t')) {++p; --length;}
+    while (length > 0 && (p[length-1] == ' ' || p[length-1] == '\t')) --length;
+    if (length == 0) {
+        input.kind = "empty";
+        return input;
+    }
+    if (length >= 8 && memcmp(p, "SSH-", 4) == 0
+        && p[4] >= '0' && p[4] <= '9' && p[5] == '.'
+        && p[6] >= '0' && p[6] <= '9' && p[7] == '-') {
+        input.kind = "wrong-protocol";
+        input.protocol = "SSH";
+        return input;
+    }
+    while (tokenLength < length && p[tokenLength] != ' ' && p[tokenLength] != '\t') ++tokenLength;
+    if (tokenLength == 0 || tokenLength >= sizeof(input.command)) return input;
+    for (i = 0; i < tokenLength; ++i) {
+        unsigned char c = (unsigned char)p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return input;
+    }
+    for (i = 0; i < tokenLength; ++i) {
+        char c = p[i];
+        input.command[i] = c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;
+    }
+    input.command[tokenLength] = '\0';
+    if (length > tokenLength + 9 && p[tokenLength] == ' '
+        && (memcmp(p + length - 9, " HTTP/1.0", 9) == 0
+            || memcmp(p + length - 9, " HTTP/1.1", 9) == 0
+            || memcmp(p + length - 9, " HTTP/2.0", 9) == 0)) {
+        static const char *const methods[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "CONNECT", "TRACE", "PATCH", "PRI", NULL};
+        for (i = 0; methods[i] != NULL; ++i) {
+            if (strcmp(input.command, methods[i]) == 0) {
+                input.kind = "wrong-protocol";
+                input.protocol = "HTTP";
+                input.command[0] = '\0';
+                return input;
+            }
+        }
+    }
+    for (i = 0; implemented[i] != NULL; ++i) {
+        if (strcmp(input.command, implemented[i]) == 0) {
+            input.kind = "invalid-syntax";
+            return input;
+        }
+    }
+    for (i = 0; unsupported[i] != NULL; ++i) {
+        if (strcmp(input.command, unsupported[i]) == 0) {
+            input.kind = "unsupported-smtp";
+            return input;
+        }
+    }
+    return input;
+}
+
+static void
+SmtpdRejectSyntax(smtpdConn *conn, const char *command)
+{
+    ++conn->rejectedCommands;
+    conn->rejectedInput.kind = "invalid-syntax";
+    conn->rejectedInput.protocol = NULL;
+    snprintf(conn->rejectedInput.command, sizeof(conn->rejectedInput.command), "%s", command);
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
  * SmtpdThread --
  *
  *      Process an Smtpd connection. This thread implements the main
@@ -1485,10 +1603,13 @@ static void SmtpdThread(smtpdConn *conn)
     //Ns_Log(SmtpdDebug, "SmtpdThread: %s", conn->line.string);
 
     while (1) {
+        smtpdInput input;
+
         conn->cmd = SMTP_READ;
         if (SmtpdReadLine(conn, &conn->line, &rc) < 0) {
             goto error;
         }
+        input = SmtpdClassifyInput(&conn->line);
         Tcl_DStringSetLength(&conn->reply, 0);
         Ns_StrToLower(conn->line.string);
         Ns_StrTrim(conn->line.string);
@@ -1552,6 +1673,7 @@ static void SmtpdThread(smtpdConn *conn)
                 data++;
             /* Check for bogus domain name RFC 1123 5.2.5 */
             if (strpbrk(data, " []/@#$%^&*()=+~'{}|<>?\\\",") || strchr("_-.", data[0])) {
+                SmtpdRejectSyntax(conn, conn->lastStage);
                 if (SmtpdPuts(conn, "501 Invalid domain\r\n") != NS_OK) {
                     goto error;
                 }
@@ -1709,6 +1831,8 @@ static void SmtpdThread(smtpdConn *conn)
                         sprintf(conn->from.addr, "%s@%s", addr.mailbox, addr.domain);
                         Ns_StrToLower(conn->from.addr);
                     }
+                } else {
+                    SmtpdRejectSyntax(conn, "MAIL");
                 }
             }
             if (!conn->from.addr) {
@@ -1803,6 +1927,7 @@ static void SmtpdThread(smtpdConn *conn)
                 sprintf(data, "%s@%s", addr.mailbox, addr.domain);
                 Ns_StrToLower(data);
             } else {
+                SmtpdRejectSyntax(conn, "RCPT");
                 SmtpdRecipientEvent(conn, data, 553, "invalid-address");
                 if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                     goto error;
@@ -1955,7 +2080,8 @@ static void SmtpdThread(smtpdConn *conn)
             SmtpdConnReset(conn);
             continue;
         }
-        conn->lastStage = "UNKNOWN";
+        ++conn->rejectedCommands;
+        conn->rejectedInput = input;
         if (SmtpdPuts(conn, "500 Command unrecognized\r\n") != NS_OK) {
             goto error;
         }
@@ -2012,6 +2138,8 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     conn->cmd = SMTP_READ;
     conn->transaction = 0;
     conn->lastStage = "CONNECT";
+    conn->rejectedCommands = 0;
+    memset(&conn->rejectedInput, 0, sizeof(conn->rejectedInput));
     conn->bytesReceived = conn->bytesSent = 0;
     conn->eventReason = "recipient-policy";
     conn->sock->arg = NULL;
@@ -3950,17 +4078,25 @@ SmtpdLogInput(smtpdConn *conn, Ns_LogSeverity severity, const char *label,
 static void
 SmtpdLogIO(smtpdConn *conn)
 {
+    char rejected[160] = "";
     bool inData = (conn->cmd == SMTP_DATA);
     Ns_LogSeverity severity = (!inData && (conn->peerFailure || conn->lineTooLong)) ? Notice : Error;
 
+    if (conn->rejectedCommands > 0) {
+        const smtpdInput *input = &conn->rejectedInput;
+        snprintf(rejected, sizeof(rejected), " rejected=%" PRIu64 " kind=%s%s%s%s%s",
+                 conn->rejectedCommands, input->kind,
+                 input->command[0] != 0 ? " command=" : "", input->command,
+                 input->protocol != NULL ? " protocol=" : "", input->protocol != NULL ? input->protocol : "");
+    }
     /* Do not log the reused line buffer: it can contain output or mail data. */
-    Ns_Log(severity, "nssmtpd: %lu: peer %s: %s during %s: %s: %s; last=%s rx=%" PRIu64 " tx=%" PRIu64,
+    Ns_Log(severity, "nssmtpd: %lu: peer %s: %s during %s: %s: %s; last=%s%s rx=%" PRIu64 " tx=%" PRIu64,
            conn->id, Ns_ConnPeerAddr(Ns_GetConn()), conn->writing ? "write" : "read",
            inData ? "DATA" : "command/reply",
            (!conn->writing && conn->peerFailure && conn->ioStatus == NS_OK)
            ? "EOF" : Ns_ReturnCodeString(conn->ioStatus),
            conn->writing ? conn->writeError : conn->readError,
-           conn->lastStage, conn->bytesReceived, conn->bytesSent);
+           conn->lastStage, rejected, conn->bytesReceived, conn->bytesSent);
 }
 
 static NS_INLINE bool Retry(int errorCode)
