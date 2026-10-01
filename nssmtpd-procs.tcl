@@ -35,9 +35,13 @@ proc smtpd::checkspf {args} {
 # Run in a NaviServer proxy with a bounded wait. Discard diagnostic output:
 # libspf2 defines the result through its exit status.
 proc smtpd::spfquery {args} {
-    ns_parseargs {-command {-timeout 10} {-pool smtpd-spf} -ip -sender -helo} $args
-    foreach name {command ip sender helo} {
+    ns_parseargs {{-command {}} {-timeout 10} {-pool smtpd-spf} -ip -sender -helo} $args
+    foreach name {ip sender helo} {
         if {![info exists $name]} {::error "missing required option -$name"}
+    }
+    if {$command eq ""} {
+        # Use the configured helper directory, including split bin/sbin layouts.
+        set command [file join [ns_info bindir] spfquery]
     }
     if {![string is integer -strict $timeout] || $timeout <= 0} {
         ::error "SPF timeout must be a positive number of seconds"

@@ -99,6 +99,24 @@ esac
 } spfquery-stub.sh]
 file attributes $spfStub -permissions 0700
 
+test spf-cli-default {default executable uses bindir, independently of nsd and server home} -constraints spfqueryTools -setup {
+    set spfBin [makeDirectory spf-test-bin]
+    file link -symbolic [file join $spfBin spfquery] $spfStub
+    rename ns_info spf_test_ns_info
+    proc ns_info {option args} {
+        if {$option eq "bindir"} {return $::spfBin}
+        if {$option eq "nsd"} {return /split-install/sbin/nsd}
+        if {$option eq "home"} {return /different-server-home}
+        return [spf_test_ns_info $option {*}$args]
+    }
+} -body {
+    smtpd::spfquery -ip 192.0.2.1 -sender {} -helo status2.example.test
+} -cleanup {
+    rename ns_info {}
+    rename spf_test_ns_info ns_info
+    removeDirectory spf-test-bin
+} -result pass
+
 test spf-cli-status {libspf2 exit statuses, including nonzero pass, determine results} -constraints spfqueryTools -body {
     set results {}
     for {set i 1} {$i <= 7} {incr i} {

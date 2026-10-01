@@ -685,7 +685,7 @@ perform no SPF queries and retain their current policy.
 ```tcl
 ns_section "ns/server/$server/module/nssmtpd" {
     ns_param recipientpolicyproc smtpd::greylist
-    ns_param spfproc {smtpd::spfquery -command /usr/bin/spfquery.libspf2}
+    ns_param spfproc smtpd::spfquery
     ns_param greylistspfexceptions {
         {noreply-dmarc-support@google.com webmaster@openacs.org}
     }
@@ -708,9 +708,17 @@ The SPF Tcl interface requires **NaviServer 5.0 or newer**, which provides
 `ns_ip valid` for peer-address validation. SPF remains disabled by default;
 this optional feature does not raise the minimum version for other module use.
 For low-volume installations, `smtpd::spfquery` runs the external **libspf2**
-utility. No native SPF support or development headers are needed. Configure
-the executable explicitly; the similarly named Perl Mail::SPF utility has a
-different interface and is not supported by this adapter.
+utility. No native SPF support or development headers are needed. By default,
+it uses `spfquery` in NaviServer’s configured helper directory:
+`[file join [ns_info bindir] spfquery]`. This is the stable symlink
+created by install-ns when nssmtpd is selected and the runtime package is
+available. It follows NaviServer’s bindir setting rather than the location of the nsd binary.
+Use `ns_param spfproc smtpd::spfquery`; `-command /absolute/path` remains an
+override. The similarly named Perl Mail::SPF utility is not compatible.
+
+Images rebuilt from the updated install-ns and nssmtpd sources need no extra
+package setting when the installer has created the link. For images without
+that link, install the package and configure an explicit executable:
 
 | Container | Extra package | `spfproc` |
 | --- | --- | --- |
