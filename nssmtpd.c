@@ -18,6 +18,9 @@
  */
 
 #include "ns.h"
+#ifdef USE_SPF2
+# include <spf2/spf.h>
+#endif
 
 #ifndef TCL_INDEX_NONE
 # define TCL_INDEX_NONE -1
@@ -105,7 +108,7 @@
 #define SMTPD_GOTSTARTTLS    0x0200000u
 #define SMTPD_GOTAUTHPLAIN   0x0400000u
 
-#define SMTPD_VERSION              "2.7"
+#define SMTPD_VERSION              "2.8"
 #define SMTPD_HDR_FILE             "X-Smtpd-File"
 #define SMTPD_HDR_VIRUS_STATUS     "X-Smtpd-Virus-Status"
 #define SMTPD_HDR_SIGNATURE        "X-Smtpd-Signature"
@@ -246,6 +249,7 @@ typedef struct _smtpdConn {
     uint64_t bytesReceived, bytesSent; /* SMTP bytes, excluding TLS framing. */
     unsigned int flags;
     const char *host;
+    char *helo; /* SMTP identity, distinct from the peer's reverse DNS name. */
     Ns_Sock *sock;
     char readError[256]; /* Captured locally: outgoing Ns_Sock is not a driver Sock. */
     char writeError[256];
@@ -1679,6 +1683,8 @@ static void SmtpdThread(smtpdConn *conn)
                 }
                 continue;
             }
+            ns_free(conn->helo);
+            conn->helo = ns_strdup(data);
             /* Call Tcl callback */
             if (SmtpdConnEval(conn, config->heloproc) != TCL_OK) {
                 if (SmtpdPuts(conn, "421 Service not available\r\n") != NS_OK) {
@@ -1768,6 +1774,8 @@ static void SmtpdThread(smtpdConn *conn)
             Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
 
             conn->flags &= ~(SMTPD_GOTHELO);
+            ns_free(conn->helo);
+            conn->helo = NULL;
             conn->flags |= (SMTPD_GOTSTARTTLS);
 
             continue;
@@ -2456,6 +2464,8 @@ static void SmtpdConnFree(smtpdConn *conn)
     SmtpdConnReset(conn);
     ns_free_const_local(conn->host);
     conn->host = NULL;
+    ns_free(conn->helo);
+    conn->helo = NULL;
     conn->buf.ptr = NULL;
     conn->buf.pos = 0;
 
@@ -5119,11 +5129,13 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdCheckSpam,
         cmdTrainSpam,
         cmdCheckVirus,
+        cmdSpf,
         cmdSessions,
         cmdLogEvent,
         cmdGetHdr,
         cmdGetHdrs,
         cmdGetBody,
+        cmdGetHelo,
         cmdGetFrom,
         cmdGetFromData,
         cmdSetFrom,
@@ -5157,11 +5169,13 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "checkspam",
         "trainspam",
         "checkvirus",
+        "spf",
         "sessions",
         "logevent",
         "gethdr",
         "gethdrs",
         "getbody",
+        "gethelo",
         "getfrom",
         "getfromdata",
         "setfrom",
@@ -5313,7 +5327,70 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         break;
 
+    case cmdSpf: {
+#ifdef USE_SPF2
+        SPF_server_t *server = NULL;
+        SPF_request_t *request = NULL;
+        SPF_response_t *response = NULL;
+        const char *values[3], *result = "temperror";
+        int i;
+#endif
+
+        /* The public named-option interface is smtpd::checkspf. */
+        if (objc != 5) {
+            Tcl_WrongNumArgs(interp, 2, objv, "ip sender helo");
+            return TCL_ERROR;
+        }
+#ifdef USE_SPF2
+        for (i = 0; i < 3; i++) {
+            TCL_SIZE_T length;
+            const unsigned char *cp;
+
+            values[i] = Tcl_GetStringFromObj(objv[i + 2], &length);
+            if (length > 1024 || (size_t)length != strlen(values[i])) {
+                Tcl_SetObjResult(interp, Tcl_NewStringObj("invalid SPF input", -1));
+                return TCL_ERROR;
+            }
+            for (cp = (const unsigned char *)values[i]; *cp != 0; cp++) {
+                if (*cp < 32 || *cp == 127) {
+                    Tcl_SetObjResult(interp, Tcl_NewStringObj("invalid SPF input", -1));
+                    return TCL_ERROR;
+                }
+            }
+        }
+        server = SPF_server_new(SPF_DNS_CACHE, 0);
+        if (server != NULL) {
+            request = SPF_request_new(server);
+        }
+        if (request != NULL) {
+            SPF_errcode_t status;
+
+            status = strchr(values[0], ':') != NULL
+                ? SPF_request_set_ipv6_str(request, values[0])
+                : SPF_request_set_ipv4_str(request, values[0]);
+            if (status != SPF_E_SUCCESS) {
+                result = "permerror";
+            } else if (SPF_request_set_helo_dom(request, values[2]) == SPF_E_SUCCESS
+                       && SPF_request_set_env_from(request, values[1]) == SPF_E_SUCCESS) {
+                (void)SPF_request_query_mailfrom(request, &response);
+                if (response != NULL && SPF_response_result(response) != SPF_RESULT_INVALID) {
+                    result = SPF_strresult(SPF_response_result(response));
+                }
+            }
+        }
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(result, -1));
+        if (response != NULL) SPF_response_free(response);
+        if (request != NULL) SPF_request_free(request);
+        if (server != NULL) SPF_server_free(server);
+        break;
+#else
+        Tcl_SetErrorCode(interp, "NSSMTPD", "SPF", "UNAVAILABLE", NULL);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("nssmtpd was built without libspf2 support", -1));
+        return TCL_ERROR;
+#endif
+    }
     case cmdSessions:{
+
             Tcl_HashSearch search;
             Tcl_Obj       *list = Tcl_NewListObj(0, 0);
 
@@ -5967,6 +6044,10 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
 
     case cmdGetLine:
         Tcl_SetObjResult(interp, Tcl_NewStringObj(conn->line.string, conn->line.length));
+        break;
+
+    case cmdGetHelo:
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(conn->helo != NULL ? conn->helo : "", -1));
         break;
 
     case cmdGetFrom:

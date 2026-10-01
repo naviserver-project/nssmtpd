@@ -13,7 +13,7 @@ nsv_set alias-test policy {}
 
 test nssmtpd-session-validation {session commands reject missing and nonexistent IDs} -body {
     set failures {}
-    foreach command {logevent gethdr gethdrs getbody getfrom getfromdata setfrom
+    foreach command {logevent gethdr gethdrs getbody gethelo getfrom getfromdata setfrom
         setfromdata getrcpt getrcptdata addrcpt setrcptdata delrcpt setflag
         unsetflag getflag setreply getline dump} {
         foreach args [list {} {-1}] {
@@ -84,6 +84,8 @@ test nssmtpd-received {listener prepends its trace header and retains existing h
     list [regexp {^Received: from \[127\.0\.0\.1\]\r\n\tby [A-Za-z0-9.-]+ \(nssmtpd\) with SMTP\r\n\tid [0-9-]+\.[0-9]+; [^\r\n]+ GMT\r\nReceived: from original\.example} $data] \
          [expr {[string first $message $data] >= 0}]
 } -result {1 1}
+
+source [file join $::env(ALIAS_TEST_ROOT) tests spf.test]
 
 set failures $::tcltest::numTests(Failed)
 cleanupTests

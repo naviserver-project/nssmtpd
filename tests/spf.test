@@ -1,0 +1,152 @@
+# Optional SPF contract and exception policy. Run within the basic test server.
+rename ns_config spf_test_ns_config
+proc ns_config {args} {
+    set name [lindex $args 1]
+    if {[info exists ::spf_test_config($name)]} {return $::spf_test_config($name)}
+    return [spf_test_ns_config {*}$args]
+}
+proc spf_test_eval {tag args} {
+    if {$tag ne {prefix argument}} {error {lost callback prefix}}
+    incr ::spf_test_calls
+    set ::spf_test_args $args
+    if {$::spf_test_result eq "error"} {error {test evaluator unavailable}}
+    return $::spf_test_result
+}
+set ::spf_test_calls 0
+set ::spf_test_result pass
+set ::spf_test_config(spfproc) {spf_test_eval {prefix argument}}
+set ::spf_test_config(greylistspfexceptions) {{report@example.test webmaster@example.test}}
+set spfcontext {peeraddr 192.0.2.1 sender report@example.test recipient webmaster@example.test helo mail.example.test}
+smtpd::greylistinit
+
+test spf-helo {SMTP HELO identity is retained through delivery} -body {
+    expr {[nsv_get alias-test helo] ne ""}
+} -result 1
+
+test spf-pass {only the configured pair with SPF pass bypasses greylisting} -body {
+    list [smtpd::greylist $spfcontext] $::spf_test_args
+} -result {{action accept reason verified-report-sender} {-ip 192.0.2.1 -sender report@example.test -helo mail.example.test}}
+
+test spf-nonpass {all nonpass and invalid/error results retain greylisting} -body {
+    set results {}
+    foreach ::spf_test_result {fail softfail neutral none temperror permerror garbage error} {
+        smtpd::greylistinit
+        lappend results [dict get [smtpd::greylist $spfcontext] action]
+    }
+    set results
+} -result {defer defer defer defer defer defer defer defer}
+
+test spf-match {unmatched sender or recipient never calls the evaluator} -body {
+    set ::spf_test_result pass
+    set before $::spf_test_calls
+    foreach field {sender recipient} {
+        smtpd::greylist [dict replace $spfcontext $field other@example.test]
+    }
+    expr {$before == $::spf_test_calls}
+} -result 1
+
+test spf-null {null sender is passed as empty with the actual HELO identity} -body {
+    smtpd::checkspf -ip 2001:db8::1 -sender <> -helo mail.example.test
+    set ::spf_test_args
+} -result {-ip 2001:db8::1 -sender {} -helo mail.example.test}
+
+test spf-disabled {disabled evaluator causes normal greylisting} -body {
+    set ::spf_test_config(spfproc) {}
+    smtpd::greylistinit
+    dict get [smtpd::greylist $spfcontext] action
+} -cleanup {
+    set ::spf_test_config(spfproc) {spf_test_eval {prefix argument}}
+} -result defer
+
+test spf-input {control characters are rejected before calling the evaluator} -body {
+    smtpd::checkspf -ip 192.0.2.1 -sender "a@example.test\r\nMAIL FROM:x" -helo mail.example.test
+} -returnCodes error -result {invalid SPF input -sender}
+
+test spf-null-exception {null sender cannot exempt arbitrary SPF-passing HELO domains} -body {
+    set ::spf_test_config(greylistspfexceptions) {{{} webmaster@example.test}}
+    smtpd::greylistinit
+} -cleanup {
+    set ::spf_test_config(greylistspfexceptions) {{report@example.test webmaster@example.test}}
+} -returnCodes error -result {greylistspfexceptions requires nonempty sender/recipient pairs}
+
+test spf-native {native backend is either explicitly unavailable or handles IPv4/IPv6} -body {
+    try {
+        set results [list [ns_smtpd spf 127.0.0.1 sender@example.test mail.example.test] \
+                         [ns_smtpd spf ::1 {} mail.example.test] \
+                         [ns_smtpd spf invalid sender@example.test mail.example.test]]
+        expr {$results eq {pass pass permerror}}
+    } trap {NSSMTPD SPF UNAVAILABLE} {} {
+        return 1
+    }
+} -result 1
+
+# Exercise real child exit statuses and the deadline, without network DNS.
+set spfTimeout [auto_execok timeout]
+if {$spfTimeout eq ""} {set spfTimeout [auto_execok gtimeout]}
+testConstraint spfqueryTools [expr {$::tcl_platform(platform) eq "unix" && $spfTimeout ne ""}]
+set spfStub [makeFile {#!/bin/sh
+[ "$#" = 3 ] || exit 255
+case "$1" in --ip=*) ;; *) exit 255 ;; esac
+case "$2" in --sender=*) ;; *) exit 255 ;; esac
+case "$3" in
+  --helo=status[0-9].example.test)
+    status=${3#--helo=status}
+    echo 'Diagnostic text, deliberately not an SPF result'
+    echo 'Diagnostic on stderr' >&2
+    exit "${status%.example.test}" ;;
+  --helo=slow.example.test) exec sleep 30 ;;
+  *) exit 255 ;;
+esac
+} spfquery-stub.sh]
+file attributes $spfStub -permissions 0700
+
+test spf-cli-status {libspf2 exit statuses, including nonzero pass, determine results} -constraints spfqueryTools -body {
+    set results {}
+    for {set i 1} {$i <= 7} {incr i} {
+        lappend results [smtpd::spfquery -command $spfStub -timeoutcommand [lindex $spfTimeout 0] \
+                            -ip 2001:db8::1 -sender {} -helo status$i.example.test]
+    }
+    set results
+} -result {neutral pass fail softfail none temperror permerror}
+
+test spf-cli-invalid {zero exit status is not SPF pass} -constraints spfqueryTools -body {
+    smtpd::spfquery -command $spfStub -timeoutcommand [lindex $spfTimeout 0] \
+        -ip 192.0.2.1 -sender a@example.test -helo status0.example.test
+} -returnCodes error -result {SPF utility returned an invalid result (exit status 0)}
+
+test spf-cli-arguments {SMTP values cannot become exec operators or shell expressions} -constraints spfqueryTools -body {
+    set results {}
+    foreach sender {{|} {> /tmp/spf-unwanted} {$(exit 255)} {--help} {a b@example.test}} {
+        lappend results [smtpd::spfquery -command $spfStub -timeoutcommand [lindex $spfTimeout 0] \
+                            -ip 192.0.2.1 -sender $sender -helo status2.example.test]
+    }
+    set results
+} -result {pass pass pass pass pass}
+
+test spf-cli-failure {missing executable retains normal greylisting} -constraints spfqueryTools -body {
+    set ::spf_test_config(spfproc) [list smtpd::spfquery -command ${spfStub}.missing \
+                                      -timeoutcommand [lindex $spfTimeout 0]]
+    smtpd::greylistinit
+    dict get [smtpd::greylist $spfcontext] action
+} -cleanup {
+    set ::spf_test_config(spfproc) {spf_test_eval {prefix argument}}
+} -result defer
+
+test spf-cli-timeout {a stalled evaluator is terminated and cannot authorize a bypass} -constraints spfqueryTools -body {
+    try {
+        smtpd::spfquery -command $spfStub -timeoutcommand [lindex $spfTimeout 0] -timeout 1 \
+            -ip 192.0.2.1 -sender a@example.test -helo slow.example.test
+    } trap {NSSMTPD SPF EXEC} {} {
+        return deadline-failure
+    }
+} -result deadline-failure
+
+test spf-cli-timeout-value {zero cannot disable the execution deadline} -body {
+    smtpd::spfquery -command unused -timeout 0 -ip 192.0.2.1 -sender {} -helo example.test
+} -returnCodes error -result {SPF timeout must be a positive number of seconds}
+
+removeFile spfquery-stub.sh
+
+rename ns_config {}
+rename spf_test_ns_config ns_config
+unset ::spf_test_config

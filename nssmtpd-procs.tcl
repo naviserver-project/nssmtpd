@@ -3,6 +3,73 @@
 
 namespace eval smtpd {}
 
+# Optional evaluator contract: named SMTP inputs in, one SPF result out.
+proc smtpd::checkspf {args} {
+    ns_parseargs {-ip -sender -helo} $args
+    foreach name {ip sender helo} {
+        if {![info exists $name]} {::error "missing required option -$name"}
+        set value [set $name]
+        if {[string length $value] > 1024 || [regexp {[\x00-\x1f\x7f]} $value]} {
+            ::error "invalid SPF input -$name"
+        }
+    }
+    if {$ip eq "" || $helo eq ""} {::error "SPF requires a peer IP and HELO identity"}
+    if {[namespace which -command ::ns_ip] eq ""} {
+        return -code error -errorcode {NSSMTPD SPF NAVISERVER_VERSION} \
+            "smtpd::checkspf requires NaviServer 5.0 or newer (ns_ip valid)"
+    }
+    if {![ns_ip valid $ip]} {::error "invalid SPF peer IP"}
+    if {$sender eq "<>"} {set sender ""}
+    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd spfproc ""]
+    if {$prefix eq ""} {
+        return -code error -errorcode {NSSMTPD SPF DISABLED} "SPF evaluation is disabled"
+    }
+    set result [uplevel #0 [list {*}$prefix -ip $ip -sender $sender -helo $helo]]
+    if {$result ni {pass fail softfail neutral none temperror permerror}} {
+        ::error "SPF evaluator returned an invalid result"
+    }
+    return $result
+}
+
+# External libspf2 utility (not the incompatible Mail::SPF Perl utility).
+# GNU coreutils and BusyBox timeout both support this invocation. Discard
+# diagnostic output: libspf2 defines the result through its exit status.
+proc smtpd::spfquery {args} {
+    ns_parseargs {-command {-timeout 10} {-timeoutcommand timeout} -ip -sender -helo} $args
+    foreach name {command ip sender helo} {
+        if {![info exists $name]} {::error "missing required option -$name"}
+    }
+    if {![string is integer -strict $timeout] || $timeout <= 0} {
+        ::error "SPF timeout must be a positive number of seconds"
+    }
+    try {
+        # Use --option=value so an SMTP identity can never become a Tcl exec
+        # pipeline/redirection operator or a separate command-line option.
+        exec -- $timeoutcommand -s KILL $timeout $command \
+            --ip=$ip --sender=$sender --helo=$helo > /dev/null 2> /dev/null
+    } trap CHILDSTATUS {message options} {
+        set status [lindex [dict get $options -errorcode] 2]
+        if {$status >= 1 && $status <= 7} {
+            return [lindex {invalid neutral pass fail softfail none temperror permerror} $status]
+        }
+        return -code error -errorcode {NSSMTPD SPF EXEC} \
+            "SPF utility failed or timed out (exit status $status)"
+    } on error {message options} {
+        return -code error -errorcode {NSSMTPD SPF EXEC} \
+            "SPF utility could not complete: $message"
+    }
+    # Zero is SPF_RESULT_INVALID, not success, for libspf2's spfquery.
+    return -code error -errorcode {NSSMTPD SPF EXEC} \
+        "SPF utility returned an invalid result (exit status 0)"
+}
+
+# Optional native backend. Custom evaluators implement the same named options.
+proc smtpd::libspf2 {args} {
+    ns_parseargs {-ip -sender -helo} $args
+    return [ns_smtpd spf $ip $sender $helo]
+}
+
+
 # Shared by SMTP reception, ns_smtpd send, and ns_smtpd resolve.
 # The resolver is a command prefix returning FINAL envelope recipients.
 # Backend access and recursive alias policy belong to the configured proc.
@@ -327,7 +394,7 @@ proc smtpd::checkpolicy {id} {
         set sender [ns_smtpd getfrom $id]
         if {$sender eq "<>"} {set sender ""}
         set context [dict create id $id peeraddr [ns_conn peeraddr] \
-                         sender $sender \
+                         sender $sender helo [ns_smtpd gethelo $id] \
                          recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
         set result [uplevel #0 [list {*}$prefix $context]]
         set action [dict get $result action]
@@ -364,7 +431,16 @@ proc smtpd::checkpolicy {id} {
 # Custom initproc implementations using greylisting must call this too.
 proc smtpd::greylistinit {} {
     set path ns/server/[ns_info server]/module/nssmtpd
+    # Null senders require a separately constrained HELO identity; an empty
+    # sender/recipient pair alone would authorize any SPF-passing HELO domain.
+    foreach exception [ns_config $path greylistspfexceptions {}] {
+        if {[llength $exception] != 2 || [lindex $exception 0] in {{} <>}
+            || [lindex $exception 1] eq ""} {
+            ::error "greylistspfexceptions requires nonempty sender/recipient pairs"
+        }
+    }
     set config {}
+
     foreach {name default} {delay 300 retrywindow 14400 lifetime 604800 maxentries 10000} {
         set value [ns_config $path greylist$name $default]
         if {![string is integer -strict $value] || $value <= 0} {
@@ -386,6 +462,26 @@ proc smtpd::greylistinit {} {
 }
 
 proc smtpd::greylist {context} {
+    set path ns/server/[ns_info server]/module/nssmtpd
+    set pair [list [dict get $context sender] [dict get $context recipient]]
+    # Match exact identities before spending any time on DNS. SPF pass alone
+    # must never exempt arbitrary senders from greylisting.
+    foreach exception [ns_config $path greylistspfexceptions {}] {
+        if {[llength $exception] != 2} {error "greylistspfexceptions requires sender/recipient pairs"}
+        if {[lindex $exception 0] eq [lindex $pair 0]
+            && [lindex $exception 1] eq [lindex $pair 1]} {
+            try {
+                set result [smtpd::checkspf -ip [dict get $context peeraddr] \
+                                -sender [dict get $context sender] -helo [dict get $context helo]]
+                if {$result eq "pass"} {
+                    return [dict create action accept reason verified-report-sender]
+                }
+            } on error {message options} {
+                ns_log Warning "smtpd SPF exception evaluation failed: $message"
+            }
+            break
+        }
+    }
     set key [list [dict get $context peeraddr] \
                  [dict get $context sender] [dict get $context recipient]]
     set decision [smtpd::GreylistCheck $key [clock seconds]]

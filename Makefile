@@ -13,7 +13,16 @@ MOD      = nssmtpd.so
 #
 MODOBJS     = nssmtpd.o
 
+# Optional SPF evaluator; no new dependency in the default build.
+# Override SPF2_CFLAGS/SPF2_LIBS for a nonstandard installation.
+ifeq ($(WITH_SPF2),1)
+SPF2_LIBS ?= -lspf2
+CFLAGS += -DUSE_SPF2 $(SPF2_CFLAGS)
+MODLIBS += $(SPF2_LIBS)
+endif
+
 # Use DSPAM
+
 #CFLAGS   += -I/usr/local/include -DUSE_DSPAM -DSIGNATURE_LIFE=14 -DDSPAM_HOME=/usr/local/aolserver/modules/dspam
 #MODLIBS  += -ldspam
 

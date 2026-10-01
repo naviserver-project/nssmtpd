@@ -1,7 +1,7 @@
 
 # SMTPD Server/Proxy for NaviServer
 
-**Release:** 2.7  
+**Release:** 2.8  
 **Author:** Vlad Seryakov (<vlad@crystalballinc.com>) Gustaf Neumann (<neumann@wu-wien.ac.at>)
 
 ---
@@ -630,7 +630,7 @@ if {![smtpd::checkpolicy $id]} {return}
 ```
 
 The callback is a Tcl command prefix receiving one dictionary with `id`
-(SMTP session ID), `peeraddr` (actual socket peer IP), `sender` (envelope sender,
+(SMTP session ID), `peeraddr` (actual socket peer IP), `helo` (client HELO/EHLO identity), `sender` (envelope sender,
 empty for a null sender), and `recipient` (original envelope recipient).
 It must return a dictionary with `action` equal to `accept`, `defer`, or
 `reject`. `accept` continues normal processing; it does not override later
@@ -675,7 +675,112 @@ that change IP addresses between retries may be delayed repeatedly. Spammers
 that retry can pass. This is a small SMTP policy, not content filtering. The
 existing streaming relay still forwards before its message-data/spamd checks.
 
-For deployment, first run `make test`. After enabling the setting, verify from
+### Optional SPF-verified greylist exceptions
+
+Large mail providers can retry from different IP addresses, repeatedly creating
+new greylist tuples. A narrowly scoped exception can avoid this for wanted
+report senders. Both settings below default to empty; existing installations
+perform no SPF queries and retain their current policy.
+
+```tcl
+ns_section "ns/server/$server/module/nssmtpd" {
+    ns_param recipientpolicyproc smtpd::greylist
+    ns_param spfproc {smtpd::spfquery -command /usr/bin/spfquery.libspf2}
+    ns_param greylistspfexceptions {
+        {noreply-dmarc-support@google.com webmaster@openacs.org}
+    }
+}
+```
+
+The exception matches the exact, case-sensitive **envelope sender and original
+recipient**, before alias expansion. Null envelope senders are not eligible for this exception, since the pair alone cannot constrain their HELO identity. Only an SPF `pass` for that pair bypasses
+greylisting. Other SPF results, disabled evaluation and callback errors follow
+ordinary greylisting. Unmatched pairs make no SPF query. Relay authorization,
+unknown-recipient rejection and later checks still apply. The recipient event
+records an accepted exception with reason `verified-report-sender`.
+
+SPF authorizes the connecting IP to send for the envelope identity. It does not
+verify a DMARC report's contents, the visible From header, or DKIM signatures,
+and does not establish that a message is free of spam. Do not exempt every
+SPF-passing sender.
+
+The SPF Tcl interface requires **NaviServer 5.0 or newer**, which provides
+`ns_ip valid` for peer-address validation. SPF remains disabled by default;
+this optional feature does not raise the minimum version for other module use.
+For low-volume installations, `smtpd::spfquery` runs the external **libspf2**
+utility. No native SPF support or development headers are needed. Configure
+the executable explicitly; the similarly named Perl Mail::SPF utility has a
+different interface and is not supported by this adapter.
+
+| Container | Extra package | `spfproc` |
+| --- | --- | --- |
+| Debian Trixie | `spfquery` | `{smtpd::spfquery -command /usr/bin/spfquery.libspf2}` |
+| Alpine | `libspf2-tools` | `{smtpd::spfquery -command /usr/bin/spfquery}` |
+
+The docker-ns OpenACS container installs extra packages from the lowercase
+`system_pkgs` environment variable on its **first startup**. Add the package to
+any existing extra-package list in Compose, for example:
+
+```yaml
+environment:
+  system_pkgs: "spfquery"  # Trixie; use "libspf2-tools" on Alpine
+```
+
+Recreate the container after changing this setting; a restart of an already
+initialized container does not rerun package installation. No `WITH_SPF2=1`,
+installer changes, or additional service are required. The image must include
+this version of the Tcl adapter.
+
+The adapter uses GNU coreutils or BusyBox `timeout`, with a default limit of
+10 seconds. Both are available in the respective base distributions. Optional
+callback arguments `-timeout 15` and `-timeoutcommand /path/to/timeout` change
+the deadline in seconds and the timeout executable. It evaluates synchronously,
+occupying one SMTP worker per query, so this backend is intended for low volume
+and narrowly scoped exceptions. It has no persistent DNS cache. Output is
+discarded and libspf2's exit status determines the SPF result. Missing tools,
+timeouts, crashes and unexpected statuses raise Tcl errors; the greylist policy
+logs these and retains normal greylisting. There is no automatic switch from a
+configured native backend: choose this adapter explicitly via `spfproc`.
+
+The optional native backend (`ns_param spfproc smtpd::libspf2`) additionally
+requires a maintained libspf2 installation:
+
+```sh
+make clean
+make WITH_SPF2=1
+```
+
+For nonstandard library locations, provide `SPF2_CFLAGS=-I/path/include` and
+`SPF2_LIBS='-L/path/lib -lspf2'`. The default build has no libspf2 dependency.
+The library and its runtime dependencies must also be present in the container.
+Its resolver performs synchronous DNS lookups using system resolver timeouts;
+SPF evaluation occupies the calling SMTP worker while they run. Each evaluation
+owns and releases its library context, with no persistent module-wide DNS cache.
+
+The public Tcl interface is:
+
+```tcl
+smtpd::checkspf -ip 209.85.167.202 \
+    -sender noreply-dmarc-support@google.com -helo mail-example.google.com
+```
+
+It invokes `spfproc` as a command prefix with the named arguments `-ip`,
+`-sender`, and `-helo`. The evaluator must return exactly one of `pass`, `fail`,
+`softfail`, `neutral`, `none`, `temperror`, or `permerror`. A null sender is passed
+as an empty string and must be evaluated using the HELO identity. The supplied
+`smtpd::libspf2` adapter calls `ns_smtpd spf ip sender helo`; without library support
+that command raises `NSSMTPD SPF UNAVAILABLE`. `smtpd::checkspf` raises
+`NSSMTPD SPF DISABLED` if no evaluator is configured. Custom Tcl callbacks can
+use another SPF implementation and provide their own caching/time limits.
+
+`ns_smtpd gethelo id` exposes the actual client HELO/EHLO identity, rather than
+the reverse DNS hostname. It is retained across MAIL/RSET and cleared after
+STARTTLS and at session release. The policy context includes it as `helo`.
+SPF evaluation is independent of the accept/defer decision and can be reused by
+other policies. Outbound MX routing for future direct delivery remains separate.
+
+For deployment, first run `make test`.
+ After enabling the setting, verify from
 an **untrusted external client** that a known alias receives `451` initially,
 then `250` when the identical tuple retries after five minutes; send the message
 with DATA to confirm delivery. An unknown local recipient should still receive

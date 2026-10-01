@@ -69,8 +69,8 @@ test grey-context {policy receives actual socket peer and original envelope} -co
     grey_session webmaster@example.test
 } -body {
     set context [nsv_get grey-test context]
-    list [dict get $context peeraddr] [dict get $context sender] [dict get $context recipient] [string is integer -strict [dict get $context id]]
-} -result {127.0.0.1 sender@example.test webmaster@example.test 1}
+    list [dict get $context peeraddr] [dict get $context sender] [dict get $context recipient] [string is integer -strict [dict get $context id]] [dict get $context helo]
+} -result {127.0.0.1 sender@example.test webmaster@example.test 1 test.example}
 
 test grey-reply {normal greylisting uses the policy reply, not the backend failure reply} -constraints active -setup {
     grey_reset

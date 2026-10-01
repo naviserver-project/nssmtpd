@@ -94,6 +94,7 @@ proc alias_test_data {id} {
         lappend recipients [lindex $recipient 0]
     }
     nsv_set alias-test body [lindex [ns_smtpd getbody $id] 0]
+    nsv_set alias-test helo [ns_smtpd gethelo $id]
     nsv_set alias-test from [ns_smtpd getfrom $id]
     nsv_set alias-test recipients [ns_smtpd getrcpt $id]
     ns_smtpd setreply $id "250 [list $recipients]\r\n"
