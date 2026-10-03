@@ -1,0 +1,78 @@
+set spfAutoBin [makeDirectory spf-auto-bin]
+set f [open [file join $spfAutoBin spfquery] w]; puts $f {#!/bin/sh}; close $f
+file attributes [file join $spfAutoBin spfquery] -permissions 0755
+set spfAutoSaved {}
+foreach command {ns_info ns_config ns_dns ns_proxy smtpd::spf smtpd::spfquery} {
+    if {[namespace which -command ::$command] ne ""} {
+        rename ::$command ::${command}_auto_saved
+        lappend spfAutoSaved $command
+    }
+}
+proc ns_info {what} {
+    if {$what eq "bindir"} {return $::spfAutoBin}
+    ::ns_info_auto_saved $what
+}
+proc ns_config {args} {return smtpd::spfauto}
+proc ns_dns {args} {
+    if {$args ne {lookup}} {error {unexpected DNS query}}
+    incr ::spfAutoProbes
+    error $::spfAutoUsage
+}
+proc ns_proxy {args} {error {discovery must not allocate a proxy}}
+proc smtpd::spf {args} {lappend ::spfAutoCalls tcl; return softfail}
+proc smtpd::spfquery {args} {lappend ::spfAutoCalls external; return pass}
+proc spfAutoReset {} {
+    unset -nocomplain ::smtpd::spfBackend
+    set ::spfAutoProbes 0; set ::spfAutoCalls {}
+    set ::spfAutoUsage {ns_dns lookup ?-details? ?-jointxt? ?-timeout time? name ?type?}
+}
+proc spfAutoCheck {} {
+    smtpd::checkspf -ip 192.0.2.1 -sender {} -helo example.test
+}
+test spf-auto-cached {prefer Tcl and probe only once across repeated evaluations} -body {
+    spfAutoReset
+    list [spfAutoCheck] [spfAutoCheck] $::spfAutoProbes $::spfAutoCalls
+} -result {softfail softfail 1 {tcl tcl}}
+test spf-auto-external {old nsdns uses external backend} -body {
+    spfAutoReset; set ::spfAutoUsage {ns_dns lookup name type}
+    list [spfAutoCheck] [spfAutoCheck] $::spfAutoProbes $::spfAutoCalls
+} -result {pass pass 1 {external external}}
+test spf-auto-unavailable {unavailable result is cached even if helper later appears} -body {
+    spfAutoReset; set ::spfAutoUsage {ns_dns lookup name type}
+    file rename [file join $spfAutoBin spfquery] [file join $spfAutoBin saved]
+    try {
+        set first [smtpd::spfauto -ip 192.0.2.1 -sender {} -helo example.test]
+    } finally {file rename [file join $spfAutoBin saved] [file join $spfAutoBin spfquery]}
+    list $first [smtpd::spfauto -ip 192.0.2.1 -sender {} -helo example.test] $::spfAutoProbes
+} -result {{} {} 1}
+test spf-auto-check-unavailable {checkspf distinguishes missing evaluator from SPF none} -body {
+    set ::smtpd::spfBackend {}
+    spfAutoCheck
+} -returnCodes error -errorCode {NSSMTPD SPF DEPENDENCY} -result {no SPF evaluator is available}
+test spf-auto-error {no fallback after an evaluator error} -setup {
+    rename smtpd::spf smtpd::spf_auto_working
+    proc smtpd::spf {args} {return -code error -errorcode {TEST SPF ERROR} failed}
+} -body {
+    spfAutoReset
+    try {spfAutoCheck} trap {TEST SPF ERROR} {} {set ::spfAutoCalls}
+} -cleanup {
+    rename smtpd::spf {}; rename smtpd::spf_auto_working smtpd::spf
+} -result {}
+test spf-auto-no-commands {missing module commands are unavailable} -setup {
+    rename ns_dns ns_dns_auto_working
+    rename ns_proxy ns_proxy_auto_working
+} -body {
+    spfAutoReset
+    smtpd::spfauto -ip 192.0.2.1 -sender {} -helo example.test
+} -cleanup {
+    rename ns_dns_auto_working ns_dns
+    rename ns_proxy_auto_working ns_proxy
+} -result {}
+foreach command {ns_info ns_config ns_dns ns_proxy smtpd::spf smtpd::spfquery} {
+    rename ::$command {}
+    if {$command in $spfAutoSaved} {rename ::${command}_auto_saved ::$command}
+}
+foreach command {spfAutoReset spfAutoCheck} {rename $command {}}
+unset -nocomplain ::smtpd::spfBackend
+removeDirectory spf-auto-bin
+unset spfAutoBin spfAutoSaved spfAutoCalls spfAutoUsage spfAutoProbes

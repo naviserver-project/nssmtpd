@@ -9,7 +9,7 @@ proc smtpd::checkspf {args} {
     foreach name {ip sender helo} {
         if {![info exists $name]} {::error "missing required option -$name"}
         set value [set $name]
-        if {[string length $value] > 1024 || [regexp {[\x00-\x1f\x7f]} $value]} {
+        if {[string length $value] > 1024 || ![string is print $value]} {
             ::error "invalid SPF input -$name"
         }
     }
@@ -25,10 +25,58 @@ proc smtpd::checkspf {args} {
         return -code error -errorcode {NSSMTPD SPF DISABLED} "SPF evaluation is disabled"
     }
     set result [uplevel #0 [list {*}$prefix -ip $ip -sender $sender -helo $helo]]
+    if {$result eq ""} {
+        return -code error -errorcode {NSSMTPD SPF DEPENDENCY} "no SPF evaluator is available"
+    }
     if {$result ni {pass fail softfail neutral none temperror permerror}} {
         ::error "SPF evaluator returned an invalid result"
     }
     return $result
+}
+
+# Select once per interpreter, including the unavailable result. Selection is
+# lazy so all module commands have been registered before the first check.
+proc smtpd::SpfBackend {} {
+    variable spfBackend
+    if {![info exists spfBackend]} {
+        set spfBackend ""
+        if {[namespace which -command ::ns_ip] ne ""} {
+            if {[namespace which -command ::ns_dns] ne ""
+                && [namespace which -command ::smtpd::spf] ne ""} {
+                # Missing arguments return usage without performing DNS I/O.
+                set usage ""
+                try {ns_dns lookup} on error {message} {set usage $message}
+                if {[string first -details $usage] >= 0
+                    && [string first -jointxt $usage] >= 0
+                    && [string first -timeout $usage] >= 0} {
+                    set spfBackend smtpd::spf
+                }
+            }
+            if {$spfBackend eq "" && [namespace which -command ::ns_proxy] ne ""} {
+                set executable [file join [ns_info bindir] spfquery]
+                if {[file isfile $executable] && [file executable $executable]} {
+                    set spfBackend smtpd::spfquery
+                }
+            }
+        }
+        if {$spfBackend eq ""} {
+            ns_log Notice "smtpd SPF auto: no backend available; decision cached for this interpreter"
+        } else {
+            ns_log Notice "smtpd SPF auto: selected $spfBackend; decision cached for this interpreter"
+        }
+    }
+    return $spfBackend
+}
+
+# Empty means unavailable, not the SPF result "none" (no published policy).
+proc smtpd::spfauto {args} {
+    ns_parseargs {-ip -sender -helo} $args
+    foreach name {ip sender helo} {
+        if {![info exists $name]} {::error "missing required option -$name"}
+    }
+    set callback [SpfBackend]
+    if {$callback eq ""} {return ""}
+    return [uplevel #0 [list {*}$callback -ip $ip -sender $sender -helo $helo]]
 }
 
 # External libspf2 utility (not the incompatible Mail::SPF Perl utility).

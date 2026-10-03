@@ -42,7 +42,7 @@ endif
 #CFLAGS   += -DUSE_CLAMAV
 #MODLIBS  += -lclamav
 
-TCL       = nssmtpd-procs.tcl
+TCL       = nssmtpd-procs.tcl nssmtpd-spf.tcl
 
 include  $(NAVISERVER)/include/Makefile.module
 

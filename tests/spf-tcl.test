@@ -1,0 +1,296 @@
+# Deterministic DNS fixtures; exercise the real ns_ip and ns_memoize commands.
+source [file join $::env(ALIAS_TEST_ROOT) nssmtpd-spf.tcl]
+set spfHadDns [expr {[namespace which -command ::ns_dns] ne ""}]
+if {$spfHadDns} {rename ::ns_dns ::spf_saved_dns}
+proc ::ns_dns {args} {
+    lassign [lrange $args end-1 end] name type
+    lappend ::spfQueries [list $name $type]
+    if {[dict exists $::spfDns $name $type]} {
+        set value [dict get $::spfDns $name $type]
+        if {[lindex $value 0] eq "error"} {return -code error -errorcode [lindex $value 1] fixture}
+        return $value
+    }
+    return [dict create rcode 0 truncated 0 answer {} authority {} additional {}]
+}
+proc spfReset {{policy {v=spf1 -all}}} {
+    ns_memoize_flush {::smtpd::SpfDnsFetch *}
+    set ::spfDns {}; set ::spfQueries {}
+    spfRR example.test TXT $policy
+}
+proc spfRR {name type args} {
+    set records {}
+    foreach value $args {lappend records [list $name $type $value 60]}
+    spfAnswer $name $type $records
+}
+proc spfAnswer {name type records {rcode 0} {authority {}}} {
+    dict set ::spfDns $name $type [dict create rcode $rcode truncated 0 answer $records authority $authority additional {}]
+}
+proc spfEval {args} {
+    smtpd::spf -ip 192.0.2.3 -sender strong-bad@example.test -helo mail.example.test {*}$args
+}
+foreach {name policy expected} {
+    all {v=spf1 +all} pass
+    fail {v=spf1 -all} fail
+    softfail {v=spf1 ~all} softfail
+    neutral {v=spf1 ?all} neutral
+    empty {v=spf1} neutral
+    case {V=SPF1 IP4:192.0.2.3 -ALL} pass
+    ip4 {v=spf1 ip4:192.0.2.0/24 -all} pass
+    nonmatch {v=spf1 ip4:198.51.100.0/24 -all} fail
+    zero {v=spf1 ip4:0.0.0.0/0 -all} pass
+    malformed {v=spf1 +all invalid} permerror
+    duplicate {v=spf1 +all redirect=a.test redirect=b.test} permerror
+    duplicate-exp {v=spf1 +all exp=a.test exp=b.test} permerror
+    unknown-modifier {v=spf1 foo=bar foo=baz -all} fail
+    macro-zero {v=spf1 +all exists:%{d0}} permerror
+    macro-invalid {v=spf1 +all exists:%(d)} permerror
+    macro-exp-only {v=spf1 +all exists:%{c}} permerror
+    ip4-invalid {v=spf1 ip4:192.0.2 -all} permerror
+    ip4-prefix {v=spf1 ip4:192.0.2.3/33 -all} permerror
+    leading-prefix {v=spf1 ip4:192.0.2.3/024 -all} permerror
+    ip6-prefix {v=spf1 ip6:2001:db8::/129 -all} permerror
+    domain-spec {v=spf1 include:foo -all} permerror
+    redirect-all {v=spf1 redirect=missing.test -all} fail
+    explanation {v=spf1 -all exp=explain.example.test} fail
+} {
+    test spf-tcl-$name $policy -body {spfReset $policy; spfEval} -result $expected
+}
+test spf-tcl-none {no SPF policy} -body {spfReset unrelated; spfEval} -result none
+test spf-tcl-multiple {two policies are an error} -body {
+    spfReset; spfRR example.test TXT {v=spf1 -all} {v=spf1 +all}; spfEval
+} -result permerror
+test spf-tcl-include {include uses pass only} -body {
+    spfReset {v=spf1 include:other.test ip4:192.0.2.3 -all}
+    spfRR other.test TXT {v=spf1 -all}; spfEval
+} -result pass
+test spf-tcl-include-negative {qualifier applies to a matching include} -body {
+    spfReset {v=spf1 -include:other.test +all}; spfRR other.test TXT {v=spf1 +all}; spfEval
+} -result fail
+test spf-tcl-include-none {missing included policy is an error} -body {
+    spfReset {v=spf1 include:other.test -all}; spfEval
+} -result permerror
+test spf-tcl-redirect {redirect supplies final result} -body {
+    spfReset {v=spf1 redirect=other.test}; spfRR other.test TXT {v=spf1 ~all}; spfEval
+} -result softfail
+test spf-tcl-recursion {recursive include terminates} -body {
+    spfReset {v=spf1 include:other.test}; spfRR other.test TXT {v=spf1 redirect=example.test}; spfEval
+} -result permerror
+test spf-tcl-a {address record} -body {
+    spfReset {v=spf1 a/24 -all}; spfRR example.test A 192.0.2.99; spfEval
+} -result pass
+test spf-tcl-ip6 {IPv6 CIDR and compressed address} -body {
+    spfReset {v=spf1 ip6:2001:db8::/32 -all}; spfEval -ip 2001:db8::cb01
+} -result pass
+test spf-tcl-a6 {dual CIDR} -body {
+    spfReset {v=spf1 a/24//64 -all}; spfRR example.test AAAA 2001:db8::1; spfEval -ip 2001:db8::cb01
+} -result pass
+test spf-tcl-mapped {IPv4-mapped IPv6 uses IPv4 rules} -body {
+    spfReset {v=spf1 ip4:192.0.2.0/24 -all}
+    list [spfEval -ip ::ffff:192.0.2.3] [spfEval -ip ::ffff:c000:203]
+} -result {pass pass}
+test spf-tcl-mx {nsdns MX exchanger precedes preference} -body {
+    spfReset {v=spf1 mx -all}; spfAnswer example.test MX {{example.test MX mx.example.test 10 60}}
+    spfRR mx.example.test A 192.0.2.3; spfEval
+} -result pass
+test spf-tcl-no-implicit-mx {missing MX does not fall back to A} -body {
+    spfReset {v=spf1 mx -all}; spfRR example.test A 192.0.2.3; spfEval
+} -result fail
+test spf-tcl-exists6 {exists always uses A} -body {
+    spfReset {v=spf1 exists:found.test -all}; spfRR found.test A 127.0.0.2
+    spfEval -ip 2001:db8::1
+} -result pass
+test spf-tcl-macros {RFC reversal and truncation} -body {
+    spfReset {v=spf1 exists:%{l1r-}.%{ir}.%{d2} -all}
+    spfRR strong.3.2.0.192.example.test A 127.0.0.2; spfEval
+} -result pass
+test spf-tcl-original-sender {include preserves original sender} -body {
+    spfReset {v=spf1 include:other.test -all}
+    spfRR other.test TXT {v=spf1 exists:%{o}.%{d} -all}
+    spfRR example.test.other.test A 127.0.0.2; spfEval
+} -result pass
+test spf-tcl-null-sender {null sender uses HELO and postmaster} -body {
+    spfReset; spfRR mail.example.test TXT {v=spf1 exists:%{l}.example.test -all}
+    spfRR postmaster.example.test A 127.0.0.2; spfEval -sender {}
+} -result pass
+test spf-tcl-ptr {reverse names must forward-confirm} -body {
+    spfReset {v=spf1 ptr:example.test -all}
+    spfRR 3.2.0.192.in-addr.arpa PTR mail.example.test
+    spfRR mail.example.test A 192.0.2.3; spfEval
+} -result pass
+test spf-tcl-ptr-forged {unconfirmed PTR does not authorize} -body {
+    spfReset {v=spf1 ptr:example.test -all}
+    spfRR 3.2.0.192.in-addr.arpa PTR mail.example.test
+    spfRR mail.example.test A 192.0.2.4; spfEval
+} -result fail
+test spf-tcl-p-macro {validated-domain macro} -body {
+    spfReset {v=spf1 exists:%{p}.allow.test -all}
+    spfRR 3.2.0.192.in-addr.arpa PTR mail.example.test
+    spfRR mail.example.test A 192.0.2.3
+    spfRR mail.example.test.allow.test A 127.0.0.2; spfEval
+} -result pass
+foreach errorCode {{NS_TIMEOUT} {NSDNS NETWORK} {NSDNS PROTOCOL MALFORMED}} {
+    test spf-tcl-dns-error-$errorCode {DNS errors become temperror} -body {
+        spfReset; dict set ::spfDns example.test TXT [list error $errorCode]; spfEval
+    } -result temperror
+}
+test spf-tcl-config-error {configuration errors remain visible Tcl errors} -body {
+    spfReset; dict set ::spfDns example.test TXT {error {NSDNS CONFIG NO_NAMESERVER}}; spfEval
+} -returnCodes error -errorCode {NSDNS CONFIG NO_NAMESERVER} -result fixture
+test spf-tcl-servfail {DNS failure code} -body {
+    spfReset; spfAnswer example.test TXT {} 2; spfEval
+} -result temperror
+test spf-tcl-cname {CNAME and target data in one answer} -body {
+    spfReset; spfAnswer example.test TXT {{example.test CNAME other.test 60} {other.test TXT {v=spf1 +all} 60}}
+    spfEval
+} -result pass
+test spf-tcl-cname-query {CNAME requires another query} -body {
+    spfReset; spfAnswer example.test TXT {{example.test CNAME other.test 60}}
+    spfRR other.test TXT {v=spf1 +all}; spfEval
+} -result pass
+test spf-tcl-cname-loop {CNAME loop is DNS failure} -body {
+    spfReset; spfAnswer example.test TXT {{example.test CNAME other.test 60} {other.test CNAME example.test 60}}
+    spfEval
+} -result temperror
+test spf-tcl-unrelated {unrelated answer cannot authorize} -body {
+    spfReset; spfAnswer example.test TXT {{other.test TXT {v=spf1 +all} 60}}; spfEval
+} -result none
+test spf-tcl-term-budget {cached repeated includes still count} -body {
+    spfReset "v=spf1 [string repeat {include:other.test } 11]-all"
+    spfRR other.test TXT {v=spf1 -all}
+    list [spfEval] [llength $::spfQueries]
+} -result {permerror 2}
+test spf-tcl-void-budget {three empty answers exceed void budget} -body {
+    spfReset {v=spf1 a:a.test a:b.test a:c.test +all}; spfEval
+} -result permerror
+test spf-tcl-mx-limit {eleven MX hosts are excessive} -body {
+    spfReset {v=spf1 mx -all}; set records {}
+    for {set i 0} {$i < 11} {incr i} {lappend records [list example.test MX mx$i.test $i 60]}
+    spfAnswer example.test MX $records; spfEval
+} -result permerror
+test spf-tcl-cache {different sender and IP share DNS, not SPF results} -body {
+    spfReset {v=spf1 ip4:192.0.2.3 -all}
+    list [spfEval] [spfEval -ip 192.0.2.4 -sender other@example.test] [llength $::spfQueries]
+} -result {pass fail 1}
+test spf-tcl-ttl {expired DNS response is never used} -body {
+    spfReset; spfAnswer example.test TXT {{example.test TXT {v=spf1 +all} 1}}
+    set first [spfEval]; after 1100
+    spfRR example.test TXT {v=spf1 -all}
+    list $first [spfEval] [llength $::spfQueries]
+} -result {pass fail 2}
+test spf-tcl-negative-cache {SOA controls negative caching} -body {
+    spfReset; spfAnswer example.test TXT {} 3 {{example.test SOA ns.example.test hostmaster.example.test 1 2 3 4 60 60}}
+    list [spfEval] [spfEval] [llength $::spfQueries]
+} -result {none none 1}
+test spf-tcl-errors-not-cached {transient DNS errors are retried} -body {
+    spfReset; spfAnswer example.test TXT {} 2
+    set first [spfEval]; spfRR example.test TXT {v=spf1 +all}
+    list $first [spfEval] [llength $::spfQueries]
+} -result {temperror pass 2}
+test spf-tcl-zero-ttl {TTL zero causes one fresh query per evaluation} -body {
+    spfReset; spfAnswer example.test TXT {{example.test TXT {v=spf1 +all} 0}}
+    list [spfEval] [spfEval] [llength $::spfQueries]
+} -result {pass pass 2}
+test spf-tcl-uncached-negative {no SOA means no negative caching} -body {
+    spfReset; spfAnswer example.test TXT {} 3
+    list [spfEval] [spfEval] [llength $::spfQueries]
+} -result {none none 2}
+test spf-tcl-macro-glob {cache eviction treats macro characters literally} -body {
+    spfReset {v=spf1 exists:%{l}.example.test -all}
+    spfAnswer {a*[x]?.example.test} A {{{a*[x]?.example.test} A 192.0.2.1 0}}
+    list [spfEval -sender {a*[x]?@example.test}] [spfEval -sender {a*[x]?@example.test}] [llength $::spfQueries]
+} -result {pass pass 3}
+test spf-tcl-deadline {overall deadline is checked even after DNS returns} -setup {
+    rename ::ns_dns ::spf_fixture_dns
+    proc ::ns_dns {args} {after 20; ::spf_fixture_dns {*}$args}
+} -body {
+    spfReset {v=spf1 +all}; spfEval -timeout 0.001
+} -cleanup {
+    rename ::ns_dns {}; rename ::spf_fixture_dns ::ns_dns
+} -result temperror
+test spf-tcl-void-cache {cached negative responses still consume void budget} -body {
+    spfReset {v=spf1 exists:missing.test exists:missing.test exists:missing.test +all}
+    spfAnswer missing.test A {} 3 {{missing.test SOA ns.example.test hostmaster.example.test 1 2 3 4 60 60}}
+    list [spfEval] [llength $::spfQueries]
+} -result {permerror 2}
+test spf-tcl-ptr-error {PTR DNS error is a nonmatch} -body {
+    spfReset {v=spf1 ptr -all}; spfAnswer 3.2.0.192.in-addr.arpa PTR {} 2; spfEval
+} -result fail
+test spf-tcl-v6-macro {IPv6 nibble macro} -body {
+    spfReset {v=spf1 exists:%{i4r}.example.test -all}
+    spfRR 1.0.0.2.example.test A 127.0.0.1; spfEval -ip 2001:db8::cb01
+} -result pass
+test spf-tcl-url-macro {uppercase macro URL-escapes the transformed value} -body {
+    spfReset {v=spf1 exists:%{L}.example.test -all}
+    spfRR a%2bb.example.test A 127.0.0.1; spfEval -sender a+b@example.test
+} -result pass
+test spf-tcl-ptr-boundary {a suffix without a label boundary is not a match} -body {
+    spfReset {v=spf1 ptr:example.test -all}
+    spfRR 3.2.0.192.in-addr.arpa PTR badexample.test
+    spfRR badexample.test A 192.0.2.3; spfEval
+} -result fail
+foreach {label policy sender expected} {
+    pass {v=spf1 +all} strong-bad@example.test pass
+    fail {v=spf1 -all} strong-bad@example.test fail
+    null {v=spf1 +all} {} pass
+    missing unrelated strong-bad@example.test none
+} {
+    test spf-tcl-log-$label {log original inputs and final result exactly once} -setup {
+        rename ::ns_log ::spf_saved_log
+        proc ::ns_log {severity message} {lappend ::spfLog [list $severity $message]}
+        set ::spfLog {}
+    } -body {
+        spfReset $policy
+        spfRR mail.example.test TXT $policy
+        set result [spfEval -sender $sender]
+        lassign [lindex $::spfLog 0] severity message
+        set fields [string range $message [string length {smtpd SPF Tcl: }] end]
+        list [llength $::spfLog] $severity \
+            [expr {[dict get $fields sender] eq $sender}] \
+            [dict get $fields peeraddr] [dict get $fields helo] \
+            [expr {[dict get $fields result] eq $result && $result eq $expected}] \
+            [string is integer -strict [dict get $fields elapsed_ms]]
+    } -cleanup {
+        rename ::ns_log {}; rename ::spf_saved_log ::ns_log
+        unset ::spfLog
+    } -result {1 Notice 1 192.0.2.3 mail.example.test 1 1}
+}
+test spf-tcl-log-error {log configuration errors without changing the error code} -setup {
+    rename ::ns_log ::spf_saved_log
+    proc ::ns_log {severity message} {lappend ::spfLog [list $severity $message]}
+    set ::spfLog {}
+} -body {
+    spfReset; dict set ::spfDns example.test TXT {error {NSDNS CONFIG NO_NAMESERVER}}
+    try {spfEval} trap {NSDNS CONFIG NO_NAMESERVER} {} {
+        lassign [lindex $::spfLog 0] severity message
+        set fields [string range $message [string length {smtpd SPF Tcl: }] end]
+        list [llength $::spfLog] $severity [dict get $fields result] [dict get $fields errorcode]
+    }
+} -cleanup {
+    rename ::ns_log {}; rename ::spf_saved_log ::ns_log
+    unset ::spfLog
+} -result {1 Error error {NSDNS CONFIG NO_NAMESERVER}}
+foreach {label value} [list newline "a\nb@example.test" tab "a\tb@example.test" \
+                          nul "a\x00b@example.test" del "a\x7fb@example.test" \
+                          unicode-control "a\u0085b@example.test"] {
+    test spf-tcl-print-$label {nonprinting sender rejected before evaluation} -body {
+        spfEval -sender $value
+    } -returnCodes error -result {invalid SPF input -sender}
+    test spf-check-print-$label {configured evaluator uses the same validation} -body {
+        smtpd::checkspf -ip 192.0.2.3 -sender $value -helo mail.example.test
+    } -returnCodes error -result {invalid SPF input -sender}
+}
+test spf-tcl-print-unicode {printable Unicode is not rejected as a control} -body {
+    spfReset {v=spf1 +all}; spfEval -sender "caf\u00e9@example.test"
+} -result pass
+test spf-tcl-ip-family-mismatch {IP mechanisms require the declared family} -body {
+    set results {}
+    foreach policy {{v=spf1 ip4:2001:db8::1 -all} {v=spf1 ip6:192.0.2.3 -all}} {
+        spfReset $policy; lappend results [spfEval]
+    }
+    set results
+} -result {permerror permerror}
+rename ::ns_dns {}
+if {$spfHadDns} {rename ::spf_saved_dns ::ns_dns}
+ns_memoize_flush {::smtpd::SpfDnsFetch *}
+foreach proc {spfReset spfRR spfAnswer spfEval} {rename $proc {}}
+unset ::spfDns ::spfQueries spfHadDns

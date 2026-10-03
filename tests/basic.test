@@ -86,6 +86,8 @@ test nssmtpd-received {listener prepends its trace header and retains existing h
 } -result {1 1}
 
 source [file join $::env(ALIAS_TEST_ROOT) tests spf.test]
+source [file join $::env(ALIAS_TEST_ROOT) tests spf-tcl.test]
+source [file join $::env(ALIAS_TEST_ROOT) tests spf-auto.test]
 
 set failures $::tcltest::numTests(Failed)
 cleanupTests

@@ -764,6 +764,78 @@ SPF-passing sender.
 The SPF Tcl interface requires **NaviServer 5.0 or newer**, which provides
 `ns_ip valid` for peer-address validation. SPF remains disabled by default;
 this optional feature does not raise the minimum version for other module use.
+With **nsdns supporting `lookup -details -jointxt -timeout`**, the optional
+`smtpd::spf` backend evaluates SPF in Tcl, without an external executable:
+
+```tcl
+ns_section "ns/server/$server/module/nssmtpd" {
+    ns_param spfproc smtpd::spf
+}
+# Test independently of the configured policy:
+smtpd::spf -ip 209.85.160.73 \
+    -sender noreply-dmarc-support@google.com -helo mail-oa1-f73.google.com
+```
+
+It implements the RFC 7208 mechanisms (`all`, `ip4`, `ip6`, `a`, `mx`,
+`include`, `exists`, and `ptr`), `redirect`, and domain macros. It returns
+only the SPF result; `exp` syntax is checked but explanation text is not
+fetched. IPv4-mapped IPv6 peers use IPv4 policy. Invalid expanded names
+produce `permerror`. Configuration/API errors remain Tcl errors; DNS
+timeouts, network errors and unsuccessful DNS responses produce `temperror`.
+Each completed call writes a system-log Notice prefixed `smtpd SPF Tcl:`,
+including `peeraddr`, the original envelope `sender`, `helo`, `result`, and
+`elapsed_ms`. This also applies to direct diagnostic calls and cache hits.
+Unexpected evaluator errors are logged at Error severity with their error
+code and are rethrown. Input control characters are rejected before logging.
+Input validation uses Tcl's `string is print` (empty envelope senders remain
+valid). Address-family and mapped-address checks use `ns_ip properties` and
+`ns_ip match`, available in NaviServer 5.0. Tcl conversion is retained only
+for extracting mapped IPv4 addresses and expanding IPv6 nibbles for macros;
+no newer `ns_ip` operation is required.
+
+The default evaluation deadline is 20 seconds; an explicit command prefix
+such as `{smtpd::spf -timeout 30}` can change it (maximum 120 seconds).
+All recursion shares the ten DNS-term and two void-lookup limits, with
+additional MX/PTR and CNAME-chain bounds. Cache hits do not bypass limits.
+Only DNS responses are shared via `ns_memoize`, keyed by normalized name
+and record type. Their lifetime is bounded by DNS TTLs and capped at five
+minutes. Negative caching requires an SOA and uses the smaller of its TTL
+and MINIMUM. Transient errors are not cached. Complete SPF results are
+never cached. To flush just this backend's DNS cache:
+
+```tcl
+ns_memoize_flush {::smtpd::SpfDnsFetch *}
+```
+
+Load nsdns on the same server as nssmtpd and configure its upstream resolver.
+The required nsdns options are available in the October 2026 interface
+update; older nsdns builds cannot be used with this backend. Selection is
+explicit: installing nsdns does not change an existing `spfproc` setting.
+The greylisting exception rules above remain unchanged.
+
+For automatic runtime selection, configure:
+
+```tcl
+ns_param spfproc smtpd::spfauto
+```
+
+The callback checks availability on its first call and caches the selected
+backend per interpreter, preferring the Tcl evaluator over external `spfquery`.
+An unavailable result is cached as well. The initial decision is logged at
+Notice severity once per interpreter, including when no backend is available.
+Detection performs no DNS query or external execution. It checks the nsdns
+option list or the installed executable
+and nsproxy command; the executable is expected to be libspf2-compatible.
+It does not retry another backend after an SPF result or an evaluation error.
+Restart after changing installed backend availability.
+
+If neither backend is available, `smtpd::spfauto` returns an empty value.
+`smtpd::checkspf` reports this as `NSSMTPD SPF DEPENDENCY`, and greylisting
+continues without an SPF exception. This differs from SPF `none`, which means
+that the identity has no published SPF policy. Explicit `smtpd::spf` and
+`smtpd::spfquery` callbacks remain supported; no configuration-time sourcing
+or detection is needed. An empty `spfproc` still disables SPF evaluation.
+
 For low-volume installations, `smtpd::spfquery` runs the external **libspf2**
 utility. No native SPF support or development headers are needed. By default,
 it uses `spfquery` in NaviServer’s configured helper directory:
