@@ -22,7 +22,7 @@ proc event_open {} {
     event_command $channel {MAIL FROM:<sender@example.test>}
     return $channel
 }
-proc event_records {{minimum 1}} {
+proc event_records {{minimum 1} {includeTransactions 0}} {
     global logfile
     for {set attempt 0} {$attempt < 200} {incr attempt} {
         set f [open $logfile]
@@ -30,7 +30,10 @@ proc event_records {{minimum 1}} {
         set result {}
         foreach line [split [string trimright $text \n] \n] {
             if {$line eq ""} {continue}
-            lappend result [event_parse_line $line]
+            set record [event_parse_line $line]
+            if {$includeTransactions || [dict get $record event] ne "transaction"} {
+                lappend result $record
+            }
         }
         if {[llength $result] >= $minimum} {return $result}
         after 10
@@ -76,6 +79,11 @@ test events-records {one recipient event per RCPT, applied aliases only, stable 
     list [llength $rows] [llength [event_select $rows policy]] [llength [event_select $rows greylist]] [llength $recipients] [llength $aliases] $reasons $transactions [llength $sessions] \
         [dict get [lindex $aliases 0] details recipient] [dict get [lindex $aliases 0] details targets]
 } -result {10 0 0 5 2 {greylist-new greylist-retry unknown-recipient relay-denied greylist-known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
+
+test events-transaction-end {reset and QUIT produce one end event each with correct transaction IDs} -constraints enabled -body {
+    set ends [event_select [event_records 12 1] transaction]
+    lmap row $ends {list [dict get $row transaction] [dict get $row details reason]}
+} -result {{1 reset} {2 quit-before-data}}
 
 test events-escaping {control bytes and backslashes remain escaped in positional fields} -constraints enabled -body {
     set row [lindex [event_select [event_records 10] custom] 0]
@@ -138,6 +146,39 @@ test events-policy-metadata {custom reason retained; final code wins; changed ac
     }
     set result
 } -result {{recipient defer rate-limit 451} {recipient reject recipient-policy 550} {recipient accept recipient-policy 250}}
+
+proc event_wait_ends {minimum} {
+    for {set i 0} {$i < 200} {incr i} {
+        set ends [event_select [event_records 1 1] transaction]
+        if {[llength $ends] >= $minimum} {return $ends}
+        after 10
+    }
+    error "expected $minimum transaction outcomes"
+}
+
+test events-disconnect {a disconnect before DATA is recorded once} -constraints enabled -body {
+    set count [llength [event_select [event_records 1 1] transaction]]
+    close [event_open]
+    set row [lindex [event_wait_ends [expr {$count + 1}]] end]
+    dict get $row details reason
+} -result disconnect
+
+test events-data-abort {abandoned DATA records transfer failure} -constraints enabled -body {
+    set count [llength [event_select [event_records 1 1] transaction]]
+    set channel [event_open]
+    try {
+        nsv_set alias-test event-policy [list {action accept} {250 OK}]
+        event_command $channel {RCPT TO:<webmaster@example.test>}
+        set reply [event_command $channel DATA]
+        puts $channel {Subject: unfinished}
+        flush $channel
+    } finally {
+        close $channel
+        nsv_unset alias-test event-policy
+    }
+    set row [lindex [event_wait_ends [expr {$count + 1}]] end]
+    list $reply [dict get $row details reason]
+} -result {354 transfer-failed}
 
 set failures $::tcltest::numTests(Failed)
 cleanupTests

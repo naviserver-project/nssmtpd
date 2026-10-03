@@ -256,6 +256,9 @@ typedef struct _smtpdConn {
     Ns_ReturnCode ioStatus;
     bool writing, peerFailure, lineTooLong, tlsUnexpectedEof;
     unsigned int transaction;
+    bool transactionActive, dataStarted, relayAccepted;
+    uint64_t messageBytes;
+    char relayReply[512];
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
     Tcl_DString line;
@@ -456,6 +459,7 @@ static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const ch
                                const char *host, unsigned short port);
 static smtpdConn *SmtpdConnCreate(smtpdConfig *server, Ns_Sock *sock);
 static void SmtpdConnReset(smtpdConn *conn);
+static void SmtpdTransactionEnd(smtpdConn *conn, const char *outcome);
 static void SmtpdConnFree(smtpdConn *conn);
 static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
@@ -1632,6 +1636,7 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "QUIT", 4)) {
             conn->cmd = SMTP_QUIT;
             conn->lastStage = "QUIT";
+            SmtpdTransactionEnd(conn, "quit-before-data");
             SmtpdPuts(conn, "221 Bye\r\n");
             break;
         }
@@ -1795,6 +1800,7 @@ static void SmtpdThread(smtpdConn *conn)
         if (!strncasecmp(conn->line.string, "RSET", 4)) {
             conn->cmd = SMTP_RSET;
             conn->lastStage = "RSET";
+            SmtpdTransactionEnd(conn, "reset");
             SmtpdConnReset(conn);
             if (SmtpdPuts(conn, "250 Reset OK\r\n") != NS_OK) {
                 goto error;
@@ -1824,6 +1830,7 @@ static void SmtpdThread(smtpdConn *conn)
             SmtpdConnReset(conn);
             /* Check for optional SIZE parameter */
             conn->transaction++;
+            conn->transactionActive = NS_TRUE;
             if ((data = SmtpdStrPos(&conn->line.string[10], " SIZE="))) {
                 if (atoi(data + 6) > config->maxdata) {
                     if (SmtpdPuts(conn, "552 Too much mail data\r\n") != NS_OK) {
@@ -2018,6 +2025,7 @@ static void SmtpdThread(smtpdConn *conn)
                 continue;
             }
             SmtpdReceived(conn);
+            conn->dataStarted = NS_TRUE;
             /* RelayHost verified recipients to remote SMTPD server and queue others */
             Ns_Log(SmtpdDebug, "DATA relayhost <%s>", config->relayhost);
             if (config->relayhost != NULL) {
@@ -2050,6 +2058,7 @@ static void SmtpdThread(smtpdConn *conn)
                         Tcl_DStringSetLength(&conn->line, conn->line.length - 3);
                         break;
                     }
+                    conn->messageBytes += (uint64_t)conn->line.length;
                     size += conn->line.length;
                     if (size < config->maxdata) {
                         Tcl_DStringAppend(&conn->body.data, conn->line.string, conn->line.length);
@@ -2058,6 +2067,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             /* Maximum data limit reached */
             if (size > config->maxdata) {
+                SmtpdTransactionEnd(conn, "message-too-large");
                 if (SmtpdPuts(conn, "552 Too much mail data\r\n") != NS_OK) {
                     goto error;
                 }
@@ -2095,6 +2105,8 @@ static void SmtpdThread(smtpdConn *conn)
                 break;
             }
             SmtpdConnPrint(conn);
+            SmtpdTransactionEnd(conn, conn->relayAccepted ? "relay-accepted"
+                                : (conn->reply.string[0] == '2' ? "accepted" : "rejected"));
             SmtpdConnReset(conn);
             continue;
         }
@@ -2105,10 +2117,12 @@ static void SmtpdThread(smtpdConn *conn)
         }
     }
   done:
+    SmtpdTransactionEnd(conn, conn->dataStarted ? "transfer-failed" : "aborted");
     SmtpdConnFree(conn);
     return;
   error:
     SmtpdLogIO(conn);
+    SmtpdTransactionEnd(conn, conn->dataStarted ? "transfer-failed" : "disconnect");
     if (conn->lineTooLong) {
         if (conn->cmd != SMTP_DATA) {
             SmtpdLogInput(conn, Notice, "oversized command", &conn->line);
@@ -2155,6 +2169,9 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     conn->sock = sock;
     conn->cmd = SMTP_READ;
     conn->transaction = 0;
+    conn->transactionActive = conn->dataStarted = conn->relayAccepted = NS_FALSE;
+    conn->messageBytes = 0;
+    conn->relayReply[0] = '\0';
     conn->lastStage = "CONNECT";
     conn->rejectedCommands = 0;
     memset(&conn->rejectedInput, 0, sizeof(conn->rejectedInput));
@@ -2183,6 +2200,10 @@ static void
 SmtpdConnReset(smtpdConn *conn)
 {
     //Ns_Log(SmtpdDebug,"SmtpdConnReset");
+    SmtpdTransactionEnd(conn, "reset");
+    conn->dataStarted = conn->relayAccepted = NS_FALSE;
+    conn->messageBytes = 0;
+    conn->relayReply[0] = '\0';
 
     if (conn->policyDetails != NULL) {
         Tcl_DecrRefCount(conn->policyDetails);
@@ -2867,6 +2888,9 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (SmtpdReadLine(conn, &relay->line, &rc) < 0) {
             goto error;
         }
+        if (strcmp(relay->line.string, ".\r\n") != 0) {
+            conn->messageBytes += (uint64_t)relay->line.length;
+        }
         if (SmtpdWriteDString(relay, &relay->line) != NS_OK) {
             goto error421;
         }
@@ -2888,6 +2912,9 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (relay->line.string[0] != '2') {
         goto errorrelay;
     }
+    snprintf(conn->relayReply, sizeof(conn->relayReply), "%s", relay->line.string);
+    Ns_StrTrimRight(conn->relayReply);
+    conn->relayAccepted = NS_TRUE;
     if (SmtpdWriteDString(conn, &relay->line) != NS_OK) {
         goto error;
     }
@@ -2925,6 +2952,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     return -1;
 
   errorrelay:
+    snprintf(conn->relayReply, sizeof(conn->relayReply), "%s", relay->line.string);
+    Ns_StrTrimRight(conn->relayReply);
     /*
      * We received a proper response in the relay buffer, but it is indicating
      * not a success.  Pass the result to the error proc, and when this fails, fall
@@ -3142,6 +3171,29 @@ SmtpdEvent(smtpdConn *conn, const char *event, Tcl_Obj *details)
         Tcl_DStringFree(&line);
     }
     Tcl_DecrRefCount(details);
+}
+
+/* Record once, before envelope state is discarded. Auxiliary outbound
+ * connections never set transactionActive and do not emit these events. */
+static void
+SmtpdTransactionEnd(smtpdConn *conn, const char *outcome)
+{
+    if (conn->transactionActive) {
+        conn->transactionActive = NS_FALSE;
+        if (conn->config->eventlog.enabled) {
+            Tcl_Obj *details = Tcl_NewDictObj();
+            EventPut(details, "action", "end");
+            EventPut(details, "reason", outcome);
+            EventPut(details, "last-command", conn->lastStage);
+            Tcl_DictObjPut(NULL, details, Tcl_NewStringObj("message-bytes", -1),
+                           Tcl_NewWideIntObj((Tcl_WideInt)conn->messageBytes));
+            EventPut(details, "relay-accepted", conn->relayAccepted ? "true" : "false");
+            if (conn->relayReply[0] != '\0') {
+                EventPut(details, "relay-reply", conn->relayReply);
+            }
+            SmtpdEvent(conn, "transaction", details);
+        }
+    }
 }
 
 #ifdef HAVE_OPENSSL_EVP_H

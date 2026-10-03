@@ -70,6 +70,28 @@ test alias-proxy-event-servers {recycled connections retain per-server event log
     set result
 } -result {1 test 1 sink}
 
+test alias-proxy-outcomes {relay acceptance retains reply and DATA bytes, without extra QUIT outcomes} -constraints fullsuite -body {
+    set path [file join $::env(ALIAS_TEST_HOME) events.log]
+    set ends {}
+    for {set i 0} {$i < 200} {incr i} {
+        set channel [open $path]
+        try {set text [read $channel]} finally {close $channel}
+        set ends {}
+        foreach line [split [string trimright $text \n] \n] {
+            if {[dict get [event_parse_line $line] event] eq "transaction"} {lappend ends $line}
+        }
+        if {[llength $ends] >= 2} {break}
+        after 10
+    }
+    set result [list [llength $ends]]
+    foreach line $ends {
+        lappend result [dict get [event_parse_line $line] details reason] \
+            [regexp {message-bytes=[1-9][0-9]*} $line] \
+            [regexp {relay-accepted=true relay-reply=250} $line]
+    }
+    set result
+} -result {2 relay-accepted 1 1 relay-accepted 1 1}
+
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"

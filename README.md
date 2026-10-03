@@ -219,6 +219,21 @@ the shared value. With neither setting configured, defaults are daily rotation
 at midnight, numbered backups, 100 backups, and no rotation on SIGHUP.
 Log enable switches and filenames remain independent.
 
+Each SMTP transaction also emits a `transaction end` event before its envelope
+is discarded. The reason distinguishes `quit-before-data`, `reset`, `disconnect`,
+`aborted`, `transfer-failed`, `message-too-large`, `accepted`, `rejected`, and
+`relay-accepted`. Details include the last command, received DATA bytes and,
+when available, the relay's final reply (up to 511 bytes). DATA byte counts
+include complete wire lines, including dot-stuffing, but exclude the terminator
+and the generated Received header. An incomplete final line is not counted.
+`relay-accepted=true` means the upstream accepted DATA, not final mailbox
+delivery; it is retained even if replying to the original client then fails.
+
+nsstats folds these records into matching session/transaction Details without
+adding rows or changing recipient totals. Joining uses the selected log file;
+older logs, active transactions and transactions spanning rotation may show
+"Not recorded in this log". Logging remains disabled unless `eventlogging` is enabled.
+
 Each physical line follows the access-log convention used by the SMTP send
 log: a bracketed timestamp from `Ns_LogTime()`, the thread name, and fixed
 positional fields separated by single spaces. The layout is:
