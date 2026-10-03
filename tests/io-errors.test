@@ -400,6 +400,60 @@ test smtp-tls-context-renewal {reload changes the certificate for new connection
     } finally {close $channel}
 } -result {1 serial=067932 1}
 
+
+# An unclean TLS close before MAIL is noise; MAIL and DATA remain errors.
+proc io_tls_abort {stage} {
+    nsv_set io-test logs {}
+    set channel [open [list | openssl s_client -connect 127.0.0.1:$::env(ALIAS_TEST_PORT) \
+                          -starttls smtp -servername localhost -quiet -ign_eof 2>@1] r+]
+    fconfigure $channel -blocking 0 -buffering line -translation crlf
+    try {
+        io_tls_reply $channel {EHLO abort.example} {*250 HELP*}
+        if {$stage in {MAIL DATA}} {
+            io_tls_reply $channel {MAIL FROM:<sender@example.test>} {*Sender OK*}
+        }
+        if {$stage eq "DATA"} {
+            io_tls_reply $channel {RCPT TO:<target@example.test>} {*Recipient OK*}
+            io_tls_reply $channel DATA {*354*}
+            puts $channel {Subject: unfinished}
+            flush $channel
+        }
+    } finally {
+        exec kill -KILL {*}[pid $channel]
+        try {close $channel} on error {} {# The client was deliberately killed.}
+    }
+    return [io_find_log {*read during *unexpected eof while reading*}]
+}
+
+test smtp-tls-idle-abort {unclean TLS close before MAIL is Notice with its original diagnostic} -body {
+    lassign [io_tls_abort EHLO] severity message
+    list $severity [string match {*last=EHLO*} $message]
+} -result {Notice 1}
+
+test smtp-tls-mail-abort {unclean TLS close after MAIL remains Error} -body {
+    lassign [io_tls_abort MAIL] severity message
+    list $severity [string match {*last=MAIL*} $message]
+} -result {Error 1}
+
+test smtp-tls-data-abort {unclean TLS close during DATA remains Error} -body {
+    lassign [io_tls_abort DATA] severity message
+    list $severity [string match {*read during DATA*last=DATA*} $message]
+} -result {Error 1}
+
+test smtp-starttls-close-alert {An unsolicited TLS alert retains the OpenSSL handshake diagnostic} -body {
+    nsv_set io-test logs {}
+    set channel [io_open]
+    try {
+        io_command $channel STARTTLS
+        fconfigure $channel -translation binary
+        puts -nonewline $channel [binary format H* 15030300020100]
+        flush $channel
+        lassign [io_find_log {*STARTTLS handshake failed:*}] severity message
+        list $severity [string match {*unexpected message*} $message] \
+            [expr {[string first {error:00000000} $message] < 0}]
+    } finally {close $channel}
+} -result {Error 1 1}
+
 ns_logctl unregister $logFilter
 
 set failures $::tcltest::numTests(Failed)

@@ -254,7 +254,7 @@ typedef struct _smtpdConn {
     char readError[256]; /* Captured locally: outgoing Ns_Sock is not a driver Sock. */
     char writeError[256];
     Ns_ReturnCode ioStatus;
-    bool writing, peerFailure, lineTooLong;
+    bool writing, peerFailure, lineTooLong, tlsUnexpectedEof;
     unsigned int transaction;
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
@@ -1099,7 +1099,11 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     Ns_TclRegisterTrace(server, SmtpdInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
     ns_free(section);
 
+#ifdef NS_MODULE_TAG
+    Ns_Log(Notice, "nssmtpd: version %s tag %s loaded", SMTPD_VERSION, NS_MODULE_TAG);
+#else
     Ns_Log(Notice, "nssmtpd: version %s loaded", SMTPD_VERSION);
+#endif
 
     return NS_OK;
 }
@@ -2154,7 +2158,7 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
     conn->readError[0] = '\0';
     conn->writeError[0] = '\0';
     conn->ioStatus = NS_OK;
-    conn->writing = conn->peerFailure = conn->lineTooLong = NS_FALSE;
+    conn->writing = conn->peerFailure = conn->lineTooLong = conn->tlsUnexpectedEof = NS_FALSE;
     conn->flags = config->flags;
 
     Ns_MutexLock(&config->lock);
@@ -3546,6 +3550,7 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
     NS_NONNULL_ASSERT(buffer != NULL);
 
     conn->readError[0] = '\0';
+    conn->tlsUnexpectedEof = NS_FALSE;
     *rcPtr = NS_OK;
     Ns_GetTime(&deadline);
     Ns_IncrTime(&deadline, timeoutPtr->sec, timeoutPtr->usec);
@@ -3589,6 +3594,11 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
                 } else {
                     unsigned long sslCode = ERR_get_error();
 
+#ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
+                    conn->tlsUnexpectedEof = (sslError == SSL_ERROR_SSL
+                                             && ERR_GET_LIB(sslCode) == ERR_LIB_SSL
+                                             && ERR_GET_REASON(sslCode) == SSL_R_UNEXPECTED_EOF_WHILE_READING);
+#endif
                     conn->peerFailure = (sslError == SSL_ERROR_SYSCALL
                                          && (received == 0 || socketError == NS_ECONNRESET));
                     if (sslCode != 0) {
@@ -4090,7 +4100,12 @@ SmtpdLogIO(smtpdConn *conn)
 {
     char rejected[160] = "";
     bool inData = (conn->cmd == SMTP_DATA);
-    Ns_LogSeverity severity = (!inData && (conn->peerFailure || conn->lineTooLong)) ? Notice : Error;
+    /* An unclean TLS close before MAIL is connection noise, not lost mail.
+     * Preserve the TLS error and keep active transactions/DATA at Error. */
+    Ns_LogSeverity severity = (!inData
+                               && (conn->peerFailure || conn->lineTooLong
+                                   || (!conn->writing && conn->tlsUnexpectedEof
+                                       && conn->from.addr == NULL))) ? Notice : Error;
 
     if (conn->rejectedCommands > 0) {
         const smtpdInput *input = &conn->rejectedInput;
