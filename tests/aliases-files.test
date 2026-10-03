@@ -278,6 +278,113 @@ test file-rejectunknown-override {passthrough override wins over a strict callba
     smtpd::test_resolvealiases $prefix unknown@example.test 10 true
 } -result unknown@example.test
 
+proc bounce_test_callback {recipient} {
+    switch -- $recipient {
+        valid@example.test {return true}
+        broken@example.test {error "token store unavailable"}
+        nonboolean@example.test {return nonsense}
+        default {return false}
+    }
+}
+proc bounce_resolve {recipient args} {
+    smtpd::resolvefilealiases -format $::format -file $::aliasfile \
+        -domains example.test -bouncevalidproc bounce_test_callback -bouncetarget webmaster@example.test \
+        -rejectunknown true -recipient $recipient {*}$args
+}
+test file-bounce-expand {validated bounce expands and deduplicates ordinary aliases} -body {
+    normal_map
+    bounce_resolve valid@example.test
+} -result {one@remote.test two@remote.test}
+test file-bounce-passthrough {fallback also runs for outgoing and resolve operations} -body {
+    normal_map
+    bounce_resolve valid@example.test -rejectunknown false
+} -result {one@remote.test two@remote.test}
+test file-bounce-empty {false result retains unknown-recipient behaviour} -body {
+    normal_map
+    try {bounce_resolve invalid@example.test} trap {NSSMTPD ALIAS UNKNOWN} {} {
+        bounce_resolve invalid@example.test -rejectunknown false
+    }
+} -result invalid@example.test
+test file-bounce-precedence {ordinary aliases take precedence over a failing callback} -body {
+    normal_map
+    bounce_resolve webmaster@example.test -bouncevalidproc {error unexpected-callback}
+} -result {one@remote.test two@remote.test}
+test file-bounce-scope {out-of-scope addresses do not invoke fallback} -body {
+    normal_map
+    bounce_resolve other@remote.test -bouncevalidproc {error unexpected-callback}
+} -result other@remote.test
+test file-bounce-error {lookup errors propagate without passthrough} -body {
+    normal_map
+    bounce_resolve broken@example.test -rejectunknown false
+} -returnCodes error -result {token store unavailable}
+test file-bounce-cycle {cycles through fallback and ordinary aliases fail} -body {
+    write_map [entries {webmaster valid@example.test}]
+    bounce_resolve valid@example.test
+} -returnCodes error -result {alias cycle at valid@example.test}
+test file-bounce-invalid {invalid and self-referencing destinations fail} -body {
+    normal_map
+    set results {}
+    foreach target [list valid@example.test "a@remote.test\r\nQUIT" {a@remote.test b@remote.test} {}] {
+        try {
+            bounce_resolve valid@example.test -bouncetarget $target
+            lappend results accepted
+        } on error {} {lappend results rejected}
+    }
+    set results
+} -result {rejected rejected rejected rejected}
+test file-bounce-maxrcpt {fallback respects the shared final-recipient limit} -body {
+    normal_map
+    set prefix [list smtpd::resolvefilealiases -format $format -file $aliasfile \
+                    -domains example.test -bouncevalidproc bounce_test_callback -bouncetarget webmaster@example.test]
+    try {smtpd::test_resolvealiases $prefix valid@example.test 1 true} on error {message options} {
+        dict get $options -errorcode
+    }
+} -result {NSSMTPD ALIAS LIMIT}
+
+test file-bounce-config {configured callback is used; empty option disables it} -body {
+    normal_map
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set index [ns_set size $section]
+    ns_set put $section bouncetarget webmaster@example.test
+    ns_set put $section bouncevalidproc bounce_test_callback
+    try {
+        list [ns_smtpd resolve valid@example.test] \
+            [bounce_resolve valid@example.test -rejectunknown false -bouncevalidproc {}]
+    } finally {ns_set delete $section $index; ns_set delete $section $index}
+} -result {{one@remote.test two@remote.test} valid@example.test}
+
+test file-bounce-smtp-error {callback failure returns SMTP 451} -body {
+    normal_map
+    ns_eval {proc ::bounce_smtp_error args {error "token store unavailable"}}
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set index [ns_set size $section]
+    ns_set put $section bouncetarget webmaster@example.test
+    ns_set put $section bouncevalidproc ::bounce_smtp_error
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation crlf -buffering line
+    try {
+        gets $channel
+        foreach command {{HELO example.test} {MAIL FROM:<>} {RCPT TO:<broken@example.test>}} {
+            puts $channel $command
+            gets $channel reply
+        }
+        string range $reply 0 2
+    } finally {
+        close $channel
+        ns_set delete $section $index; ns_set delete $section $index
+    }
+} -result 451
+
+test file-bounce-nonboolean {invalid validator return is a lookup error} -body {
+    normal_map
+    bounce_resolve nonboolean@example.test
+} -returnCodes error -result {bounce validator must return a boolean}
+
+test file-bounce-missing-target {configured validator requires a target even for known aliases} -body {
+    normal_map
+    bounce_resolve webmaster@example.test -bouncetarget {}
+} -returnCodes error -result {bouncevalidproc requires a bare envelope address in bouncetarget}
+
 set failures $::tcltest::numTests(Failed)
 file delete -force $aliasfile
 cleanupTests

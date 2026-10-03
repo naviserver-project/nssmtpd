@@ -483,6 +483,44 @@ limit of direct sending. Configuration belongs to the server/module; each
 callback implementation owns its lookup backend. A future queue can use
 the same approach with optional application-defined persistence procedures.
 
+### Validated bounce-address fallback
+
+The file resolver supports an optional `bouncevalidproc` command prefix. It is
+called with the recipient as a positional argument only for an original recipient within
+`aliasdomains` that matches no file alias (including virtual catch-alls).
+It returns a boolean. True forwards to `bouncetarget`, which can itself be an
+alias. False retains the usual `rejectunknownrecipients` behaviour. Errors or
+non-boolean results cause a temporary SMTP failure (451).
+
+For OpenACS with the public bounce validator installed:
+
+```tcl
+ns_section ns/server/${server}/module/nssmtpd {
+    ns_param aliasproc smtpd::resolvefilealiases
+    ns_param aliasfile /var/www/openacs/etc/mail/virtual
+    ns_param aliasdomains {openacs.org}
+    ns_param rejectunknownrecipients true
+    ns_param bouncevalidproc acs_mail_lite::bounce_address_valid_p
+    ns_param bouncetarget webmaster@openacs.org
+}
+```
+
+The validator checks the configured bounce prefix and domain, signature and
+expiry. Valid bounces expand through the configured webmaster alias. The target
+is configurable; nssmtpd has no OpenACS or database dependency. Forwarding does
+not process delivery-status reports or update OpenACS bounce counters.
+
+Both settings default to empty. An unset or empty `bouncevalidproc` preserves
+existing behaviour. Configuring a validator requires a bare envelope address
+in `bouncetarget`; a missing or malformed target causes a configuration error
+when the resolver is called. The resolver also accepts `-bouncevalidproc` and
+`-bouncetarget` to override these settings. Fallback runs even with
+`-rejectunknown false`, allowing tests with `ns_smtpd resolve` and consistent
+local submission handling. Normal alias cycle checks, expansion limits and
+final-recipient limits apply. Callbacks must not send mail or modify SMTP
+sessions. Relay authorization and recipient policy checks still apply; this
+does not exempt bounces from greylisting.
+
 ### Text alias files
 
 `smtpd::resolvefilealiases` accepts named options

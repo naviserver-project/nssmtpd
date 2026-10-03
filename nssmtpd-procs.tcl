@@ -122,14 +122,37 @@ proc smtpd::resolvealiases {resolver recipients maxrcpt passthrough} {
 # Optional address-only aliases(5)/virtual(5) text-file backend. Read one
 # snapshot per lookup; administrators can replace the file atomically.
 proc smtpd::resolvefilealiases {args} {
-    lassign [smtpd::ParseFileAliasArgs $args] format filename domains recipient rejectunknown
+    lassign [smtpd::ParseFileAliasArgs $args] format filename domains recipient rejectunknown bouncevalidproc bouncetarget
     set domains [lmap domain $domains {string tolower $domain}]
     set domain [string tolower [lindex [split $recipient @] end]]
     if {$domain ni $domains} {return [list $recipient]}
     set map [smtpd::ReadAliasFile $format $filename]
-    if {$rejectunknown && [smtpd::FileAliasKey $format $map $recipient] eq ""} {
-        return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} \
-            "unknown recipient: $recipient"
+    if {[smtpd::FileAliasKey $format $map $recipient] eq ""} {
+        set targets {}
+        if {$bouncevalidproc ne ""} {
+            set valid [uplevel #0 [list {*}$bouncevalidproc $recipient]]
+            if {![string is boolean -strict $valid]} {
+                ::error "bounce validator must return a boolean"
+            }
+            if {$valid} {set targets [list $bouncetarget]}
+        }
+        if {[llength $targets] > 0} {
+            foreach target $targets {
+                if {$target eq "" || [regexp {[\x00-\x1f\x7f]} $target]
+                    || [ns_smtpd checkemail $target] ne $target
+                    || [string equal -nocase $target $recipient]} {
+                    ::error "bounce resolver returned an invalid or self-referencing destination"
+                }
+            }
+            # Add a temporary alias to this snapshot so ordinary expansion,
+            # cycle detection and work limits also cover the fallback.
+            set key [string tolower $recipient]
+            if {$format eq "aliases"} {set key [lindex [split $key @] 0]}
+            dict set map $key $targets
+        } elseif {$rejectunknown} {
+            return -code error -errorcode {NSSMTPD ALIAS UNKNOWN} \
+                "unknown recipient: $recipient"
+        }
     }
     set budget 10000
     return [smtpd::ExpandFileAlias $format $map $domains $recipient {} budget]
@@ -138,9 +161,17 @@ proc smtpd::resolvefilealiases {args} {
 # Named options for alias expansion and optional recipient validation.
 # The module appends -recipient and, for passthrough, -rejectunknown false.
 proc smtpd::ParseFileAliasArgs {arguments} {
-    ns_parseargs {-format -file -domains -recipient -rejectunknown} $arguments
+    ns_parseargs {-format -file -domains -recipient -rejectunknown -bouncevalidproc -bouncetarget} $arguments
     if {![info exists recipient]} {::error "missing required option -recipient"}
     set path ns/server/[ns_info server]/module/nssmtpd
+    foreach option {bouncevalidproc bouncetarget} {
+        if {![info exists $option]} {set $option [ns_config $path $option ""]}
+    }
+    if {$bouncevalidproc ne "" && ($bouncetarget eq ""
+        || [regexp {[\x00-\x1f\x7f]} $bouncetarget]
+        || [ns_smtpd checkemail $bouncetarget] ne $bouncetarget)} {
+        ::error "bouncevalidproc requires a bare envelope address in bouncetarget"
+    }
     if {![info exists rejectunknown]} {
         set rejectunknown [ns_config $path rejectunknownrecipients false]
     }
@@ -162,7 +193,7 @@ proc smtpd::ParseFileAliasArgs {arguments} {
     if {$format ni {aliases virtual}} {
         ::error "alias file format must be aliases or virtual"
     }
-    return [list $format $file $domains $recipient $rejectunknown]
+    return [list $format $file $domains $recipient $rejectunknown $bouncevalidproc $bouncetarget]
 }
 
 proc smtpd::ReadAliasFile {format filename} {
