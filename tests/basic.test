@@ -94,3 +94,9 @@ cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
 vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

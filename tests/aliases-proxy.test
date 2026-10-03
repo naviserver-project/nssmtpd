@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Exercise the actual send -> SMTP listener -> STARTTLS relay path.
 if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ne "proxy"} {return}
 package require tcltest 2.2
@@ -97,3 +98,9 @@ cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
 vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

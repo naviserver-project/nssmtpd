@@ -1,10 +1,11 @@
+# -*- Tcl -*-
 package require tcltest 2.2
 namespace import ::tcltest::*
 configure {*}$argv
 source [file join [file dirname [info script]] event-log-support.tcl]
 set enabled [expr {$::env(ALIAS_TEST_MODE) eq "events"}]
-testConstraint enabled $enabled
-testConstraint disabled [expr {!$enabled}]
+testConstraint config_eventlog_enabled $enabled
+testConstraint config_eventlog_disabled [expr {!$enabled}]
 set logfile [ns_config ns/server/test/module/nssmtpd eventlogfile]
 nsv_set alias-test calls 0
 nsv_set alias-test policy {}
@@ -69,7 +70,7 @@ test events-decisions {greylist retry, unknown recipient and relay denial keep s
     } finally {close $channel}
 } -result {451 250 550 550 250}
 
-test events-records {one recipient event per RCPT, applied aliases only, stable IDs and transactions} -constraints enabled -body {
+test events-records {one recipient event per RCPT, applied aliases only, stable IDs and transactions} -constraints config_eventlog_enabled -body {
     set rows [event_records 10]
     set recipients [event_select $rows recipient]
     set aliases [event_select $rows alias]
@@ -80,21 +81,21 @@ test events-records {one recipient event per RCPT, applied aliases only, stable 
         [dict get [lindex $aliases 0] details recipient] [dict get [lindex $aliases 0] details targets]
 } -result {10 0 0 5 2 {greylist-new greylist-retry unknown-recipient relay-denied greylist-known} {1 1 1 1 2} 1 webmaster@example.test {one@remote.test two@remote.test}}
 
-test events-transaction-end {reset and QUIT produce one end event each with correct transaction IDs} -constraints enabled -body {
+test events-transaction-end {reset and QUIT produce one end event each with correct transaction IDs} -constraints config_eventlog_enabled -body {
     set ends [event_select [event_records 12 1] transaction]
     lmap row $ends {list [dict get $row transaction] [dict get $row details reason]}
 } -result {{1 reset} {2 quit-before-data}}
 
-test events-escaping {control bytes and backslashes remain escaped in positional fields} -constraints enabled -body {
+test events-escaping {control bytes and backslashes remain escaped in positional fields} -constraints config_eventlog_enabled -body {
     set row [lindex [event_select [event_records 10] custom] 0]
     list [dict get $row details reason] [dict get $row details recipient] [dict get $row event]
 } -result [list {line1\x0aline2\x0d\x09\x5c"{}[x]$x} {<tag>@example.test} custom]
 
-test events-disabled {default logging off creates no event file, mail behavior unchanged} -constraints disabled -body {
+test events-disabled {default logging off creates no event file, mail behavior unchanged} -constraints config_eventlog_disabled -body {
     file exists $logfile
 } -result 0
 
-test events-access-format {writer uses send-log timestamp, fixed fields and escaped extension values} -constraints enabled -body {
+test events-access-format {writer uses send-log timestamp, fixed fields and escaped extension values} -constraints config_eventlog_enabled -body {
     event_records 10
     set f [open $logfile]
     try {set text [read $f]} finally {close $f}
@@ -106,7 +107,7 @@ test events-access-format {writer uses send-log timestamp, fixed fields and esca
         [expr {[string first {line1\x0aline2\x0d\x09} $text] >= 0}]
 } -result {1 1 1}
 
-test events-rotation {SIGHUP uses shared logrollfmt without send logging and events remain writable} -constraints enabled -body {
+test events-rotation {SIGHUP uses shared logrollfmt without send logging and events remain writable} -constraints config_eventlog_enabled -body {
     set before [llength [event_records 10]]
     exec kill -HUP [pid]
     set rotated {}
@@ -124,7 +125,7 @@ test events-rotation {SIGHUP uses shared logrollfmt without send logging and eve
     list [expr {[llength $rotated] > 0}] [llength $rows] [dict get [lindex $rows 0] details reason]
 } -result {1 1 unknown-recipient}
 
-test events-policy-metadata {custom reason retained; final code wins; changed action discards stale reason} -constraints enabled -body {
+test events-policy-metadata {custom reason retained; final code wins; changed action discards stale reason} -constraints config_eventlog_enabled -body {
     set before [llength [event_records]]
     set channel [event_open]
     try {
@@ -156,14 +157,14 @@ proc event_wait_ends {minimum} {
     error "expected $minimum transaction outcomes"
 }
 
-test events-disconnect {a disconnect before DATA is recorded once} -constraints enabled -body {
+test events-disconnect {a disconnect before DATA is recorded once} -constraints config_eventlog_enabled -body {
     set count [llength [event_select [event_records 1 1] transaction]]
     close [event_open]
     set row [lindex [event_wait_ends [expr {$count + 1}]] end]
     dict get $row details reason
 } -result disconnect
 
-test events-data-abort {abandoned DATA records transfer failure} -constraints enabled -body {
+test events-data-abort {abandoned DATA records transfer failure} -constraints config_eventlog_enabled -body {
     set count [llength [event_select [event_records 1 1] transaction]]
     set channel [event_open]
     try {
@@ -185,3 +186,9 @@ cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
 vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

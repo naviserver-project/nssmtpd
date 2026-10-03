@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Test-only callbacks. Loaded into every interpreter of the isolated server.
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
@@ -110,3 +111,9 @@ proc grey_test_policy {tag context} {
     }
     return [smtpd::greylist $context]
 }
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

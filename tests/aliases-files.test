@@ -1,10 +1,11 @@
+# -*- Tcl -*-
 # Both text formats run through the configured module hook in separate servers.
 if {![info exists ::env(ALIAS_TEST_MODE)] || $::env(ALIAS_TEST_MODE) ni {files filevirtual}} {return}
 package require tcltest 2.2
 namespace import ::tcltest::*
 configure {*}$argv
 set format [expr {$::env(ALIAS_TEST_MODE) eq "files" ? "aliases" : "virtual"}]
-testConstraint virtual [expr {$format eq "virtual"}]
+testConstraint config_aliasformat_virtual [expr {$format eq "virtual"}]
 set aliasfile [file join $::env(ALIAS_TEST_HOME) aliases]
 proc write_map {text} {
     set channel [open $::aliasfile.new w]
@@ -115,7 +116,7 @@ test file-alias-12 {long chains fail within bounded depth} -body {
     string match {*resolver limit*} $message
 } -result 1
 
-test file-alias-13 {virtual exact entry precedes catch-all; identity exempts destination} -constraints virtual -body {
+test file-alias-13 {virtual exact entry precedes catch-all; identity exempts destination} -constraints config_aliasformat_virtual -body {
     write_map "webmaster@example.test one@remote.test\n@example.test fallback@remote.test\nidentity@example.test identity@example.test"
     ns_smtpd resolve {webmaster@example.test unknown@example.test identity@example.test}
 } -result {one@remote.test fallback@remote.test identity@example.test}
@@ -131,13 +132,13 @@ test file-alias-work {wide recursive maps have a total work bound} -body {
     set message
 } -result {alias expansion exceeds file resolver limit}
 
-test file-virtual-spaces {space-separated group does not block unrelated lookup} -constraints virtual -body {
+test file-virtual-spaces {space-separated group does not block unrelated lookup} -constraints config_aliasformat_virtual -body {
     write_map "gustafn@example.test neumann@remote.test\nconference2026@example.test bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test"
     list [ns_smtpd resolve gustafn@example.test] \
         [smtpd::resolvefilealiases -format virtual -file $aliasfile -domains {example.test} -recipient conference2026@example.test]
 } -result {neumann@remote.test {bernd.simon@km.test harald.oehlmann@elmicron.test neumann@remote.test stefan.sobernig@wu.test}}
 
-test file-virtual-mixed {spaces, tabs, commas, continuations and duplicates} -constraints virtual -body {
+test file-virtual-mixed {spaces, tabs, commas, continuations and duplicates} -constraints config_aliasformat_virtual -body {
     write_map "webmaster@example.test one@remote.test\ttwo@remote.test,\n    three@remote.test one@remote.test"
     ns_smtpd resolve webmaster@example.test
 } -result {one@remote.test two@remote.test three@remote.test}
@@ -203,7 +204,7 @@ test file-options-path {file names and domain lists remain single literal argume
     } finally {file delete $filename}
 } -result {one@remote.test two@remote.test}
 
-test file-options-default {omitting format selects virtual} -constraints virtual -body {
+test file-options-default {omitting format selects virtual} -constraints config_aliasformat_virtual -body {
     normal_map
     smtpd::resolvefilealiases -file $aliasfile -domains example.test -recipient webmaster@example.test
 } -result {one@remote.test two@remote.test}
@@ -222,7 +223,7 @@ test file-options-invalid {invalid options, booleans and missing recipient fail}
     set errors
 } -result {1 1 1 1 1}
 
-test file-options-missing {missing option and module setting raises an error} -constraints virtual -body {
+test file-options-missing {missing option and module setting raises an error} -constraints config_aliasformat_virtual -body {
     set errors {}
     foreach arguments [list \
         [list -domains example.test -recipient webmaster@example.test] \
@@ -391,3 +392,9 @@ cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
 vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 set spfAutoBin [makeDirectory spf-auto-bin]
 set f [open [file join $spfAutoBin spfquery] w]; puts $f {#!/bin/sh}; close $f
 file attributes [file join $spfAutoBin spfquery] -permissions 0755
@@ -76,3 +77,9 @@ foreach command {spfAutoReset spfAutoCheck} {rename $command {}}
 unset -nocomplain ::smtpd::spfBackend
 removeDirectory spf-auto-bin
 unset spfAutoBin spfAutoSaved spfAutoCalls spfAutoUsage spfAutoProbes
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

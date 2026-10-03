@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Test-only SMTP sink. Connchan callbacks run in other interpreters, so all
 # connection state is shared through nsv.
 proc alias_sink_accept {channel {stall false}} {
@@ -99,3 +100,9 @@ proc io_sink_close {channel reason} {
     if {$reason eq "r"} {ns_connchan read $channel}
     return 0
 }
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

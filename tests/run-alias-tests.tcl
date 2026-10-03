@@ -1,7 +1,13 @@
 #!/usr/bin/env tclsh
+# -*- Tcl -*-
 # SMTP sinks run inside NaviServer: ns_connchan or native nssmtpd STARTTLS.
 package require Tcl 8.6
 namespace eval alias_runner {variable output ""; variable done ""}
+namespace eval alias_runner {
+    variable totals {Total 0 Passed 0 Skipped 0 Failed 0}
+    variable summaries 0
+    variable skippedBecause {}
+}
 
 proc alias_runner::readOutput {pipe} {
     variable output
@@ -21,6 +27,9 @@ proc alias_runner::run {nsroot root mode} {
     variable output
     variable done
     variable testArgs
+    variable totals
+    variable summaries
+    variable skippedBecause
     set output ""
     set done ""
     set placeholder [file tempfile temporary]
@@ -65,8 +74,30 @@ proc alias_runner::run {nsroot root mode} {
         set status [catch {close $pipe} detail]
         set pipe ""
         puts "$mode:"
+        set skipSummary false
         foreach line [split $output \n] {
+            # Preserve tcltest's constraint summary and accumulate its counts.
+            if {$line eq "Number of tests skipped for each constraint:"} {
+                set skipSummary true
+                puts $line
+                continue
+            }
+            if {$skipSummary} {
+                if {[regexp {^\t([0-9]+)\t(.+)$} $line -> count constraint]} {
+                    dict incr skippedBecause $constraint $count
+                    puts $line
+                    continue
+                }
+                set skipSummary false
+            }
             if {[string match *Total* $line] || [string match ALIAS_TEST_FAILURES=* $line]} {puts $line}
+            if {[regexp {^(\S+):\s+Total\s+(\d+)\s+Passed\s+(\d+)\s+Skipped\s+(\d+)\s+Failed\s+(\d+)\s*$} $line -> file total passed skipped failed]
+                && $file eq $testfile} {
+                foreach key {Total Passed Skipped Failed} value [list $total $passed $skipped $failed] {
+                    dict incr totals $key $value
+                }
+                incr summaries
+            }
         }
         if {$status != 0 || [string first ALIAS_TEST_FAILURES=0 $output] < 0} {
             error "NaviServer tests failed: $detail\n$output"
@@ -91,7 +122,26 @@ if {[llength $argv] >= 2 && [lindex $argv 0] eq "--naviserver"} {
 }
 set alias_runner::testArgs $argv
 set root [file dirname [file dirname [file normalize [info script]]]]
-foreach mode {events eventsoff basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty} {
-    alias_runner::run [file normalize $nsroot] $root $mode
+set modes {events eventsoff basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty}
+try {
+    foreach mode $modes {
+        alias_runner::run [file normalize $nsroot] $root $mode
+    }
+} finally {
+    puts "Aggregate ($alias_runner::summaries/[llength $modes] configuration summaries):"
+    puts [format "Total\t%d\tPassed\t%d\tSkipped\t%d\tFailed\t%d" \
+              {*}[dict values $alias_runner::totals]]
+    if {[dict size $alias_runner::skippedBecause] > 0} {
+        puts "Number of tests skipped for each constraint:"
+        foreach constraint [lsort [dict keys $alias_runner::skippedBecause]] {
+            puts "\t[dict get $alias_runner::skippedBecause $constraint]\t$constraint"
+        }
+    }
 }
 puts "All basic mail, alias and outgoing SMTP envelope tests passed."
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

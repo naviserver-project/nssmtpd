@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 #
 # nsssl configuration test.
 #
@@ -90,3 +91,9 @@ ns_section "ns/server/test/modules"
 #ns_param   nsssl           $bindir/nsssl.so
 ns_param   nssock           $bindir/nssock.so
 ns_param   nssmtpd          [pwd]/nssmtpd.so
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Deterministic DNS fixtures; exercise the real ns_ip and ns_memoize commands.
 source [file join $::env(ALIAS_TEST_ROOT) nssmtpd-spf.tcl]
 set spfHadDns [expr {[namespace which -command ::ns_dns] ne ""}]
@@ -294,3 +295,9 @@ if {$spfHadDns} {rename ::spf_saved_dns ::ns_dns}
 ns_memoize_flush {::smtpd::SpfDnsFetch *}
 foreach proc {spfReset spfRR spfAnswer spfEval} {rename $proc {}}
 unset ::spfDns ::spfQueries spfHadDns
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

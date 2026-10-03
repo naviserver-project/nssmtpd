@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Isolated configuration: no external relay, database, or fixed ports.
 set root $::env(ALIAS_TEST_ROOT)
 set nsroot $::env(ALIAS_TEST_NSROOT)
@@ -131,3 +132,9 @@ if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
         ns_param dataproc alias_sink_data
     }
 }
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

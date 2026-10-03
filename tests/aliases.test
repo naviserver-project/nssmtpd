@@ -1,14 +1,15 @@
+# -*- Tcl -*-
 # Run with run-alias-tests.tcl; does not use the legacy relay test setup.
 if {![info exists ::env(ALIAS_TEST_MODE)]} {return}
 package require tcltest 2.2
 namespace import ::tcltest::*
 configure {*}$argv
-testConstraint fullsuite [expr {[configure -match] eq "*" && [configure -skip] eq ""}]
+testConstraint unfiltered_test_run [expr {[configure -match] eq "*" && [configure -skip] eq ""}]
 set enabled [expr {$::env(ALIAS_TEST_MODE) in {enabled untrusted}}]
-testConstraint aliases $enabled
-testConstraint noaliases [expr {!$enabled}]
-testConstraint untrusted [expr {$::env(ALIAS_TEST_MODE) eq "untrusted"}]
-testConstraint trusted [expr {$::env(ALIAS_TEST_MODE) ne "untrusted"}]
+testConstraint config_aliasproc_set $enabled
+testConstraint config_aliasproc_unset_or_empty [expr {!$enabled}]
+testConstraint config_untrusted_peer [expr {$::env(ALIAS_TEST_MODE) eq "untrusted"}]
+testConstraint config_local_peer [expr {$::env(ALIAS_TEST_MODE) ne "untrusted"}]
 nsv_set alias-test calls 0
 nsv_set alias-test policy {}
 nsv_set alias-sink messages {}
@@ -41,20 +42,20 @@ proc smtp_close {socket} {
     close $socket
 }
 
-test alias-off-1 {unset/empty hook leaves resolver and duplicates untouched} -constraints noaliases -body {
+test alias-off-1 {unset/empty hook leaves resolver and duplicates untouched} -constraints config_aliasproc_unset_or_empty -body {
     list [ns_smtpd resolve {webmaster@example.test webmaster@example.test}] [nsv_get alias-test calls]
 } -result {{webmaster@example.test webmaster@example.test} 0}
 
-test alias-on-1 {one-to-many expansion and deduplication} -constraints aliases -body {
+test alias-on-1 {one-to-many expansion and deduplication} -constraints config_aliasproc_set -body {
     ns_smtpd resolve {webmaster@example.test one@remote.test}
 } -result {one@remote.test two@remote.test}
 
-test alias-on-2 {empty result is an explicit unknown recipient} -constraints aliases -body {
+test alias-on-2 {empty result is an explicit unknown recipient} -constraints config_aliasproc_set -body {
     catch {ns_smtpd resolve missing@example.test} result options
     dict get $options -errorcode
 } -result {NSSMTPD ALIAS UNKNOWN}
 
-test alias-on-3 {invalid destinations are rejected} -constraints aliases -body {
+test alias-on-3 {invalid destinations are rejected} -constraints config_aliasproc_set -body {
     set errors {}
     foreach recipient {invalid empty} {
         catch {ns_smtpd resolve $recipient@example.test} result options
@@ -63,12 +64,12 @@ test alias-on-3 {invalid destinations are rejected} -constraints aliases -body {
     set errors
 } -result {{NSSMTPD ALIAS INVALID} {NSSMTPD ALIAS INVALID}}
 
-test alias-on-4 {expansion limit is enforced} -constraints aliases -body {
+test alias-on-4 {expansion limit is enforced} -constraints config_aliasproc_set -body {
     catch {ns_smtpd resolve many@example.test} result options
     dict get $options -errorcode
 } -result {NSSMTPD ALIAS LIMIT}
 
-test alias-on-5 {backend failure and malformed lists are not passthrough} -constraints aliases -body {
+test alias-on-5 {backend failure and malformed lists are not passthrough} -constraints config_aliasproc_set -body {
     list [catch {ns_smtpd resolve broken@example.test}] [catch {ns_smtpd resolve malformed@example.test}]
 } -result {1 1}
 
@@ -85,13 +86,13 @@ test alias-common-2 {outgoing send preserves local data-variable scope} -body {
     }}
 } -result {}
 
-test alias-on-6 {failed outgoing resolution occurs before any network transaction} -constraints aliases -body {
+test alias-on-6 {failed outgoing resolution occurs before any network transaction} -constraints config_aliasproc_set -body {
     set message Body
     list [catch {ns_smtpd send sender@remote.test missing@example.test message 127.0.0.1 $::env(ALIAS_TEST_RELAY)}] \
         [catch {ns_smtpd send sender@remote.test {one@remote.test broken@example.test} message 127.0.0.1 $::env(ALIAS_TEST_RELAY)}]
 } -result {1 1}
 
-test alias-on-10 {multi-recipient expansion cannot use only the first domain route} -constraints aliases -body {
+test alias-on-10 {multi-recipient expansion cannot use only the first domain route} -constraints config_aliasproc_set -body {
     ns_smtpd relay set example.test remote.test:127.0.0.1:$::env(ALIAS_TEST_RELAY)
     set message Body
     set code [catch {ns_smtpd send sender@remote.test webmaster@example.test message} result]
@@ -99,7 +100,7 @@ test alias-on-10 {multi-recipient expansion cannot use only the first domain rou
     list $code $result
 } -result {1 {nssmtpd: send: alias delivery requires a default relay or explicit server}}
 
-test alias-on-11 {empty explicit server can fall back without owning its Tcl string} -constraints aliases -body {
+test alias-on-11 {empty explicit server can fall back without owning its Tcl string} -constraints config_aliasproc_set -body {
     set message Body
     catch {ns_smtpd send sender@remote.test plain@remote.test message ""} result
     set result
@@ -143,7 +144,7 @@ test alias-common-6 {callback insertion then non-head deletion preserves the lis
     lindex [string range $delivery 4 end] 0
 } -result added@remote.test
 
-test alias-policy-limit {recipient limit is rechecked after policy inserts recipients} -constraints aliases -body {
+test alias-policy-limit {recipient limit is rechecked after policy inserts recipients} -constraints config_aliasproc_set -body {
     set socket [smtp_open]
     set reply [smtp_command $socket {RCPT TO:<grow@example.test>}]
     set delivery [smtp_deliver $socket]
@@ -151,7 +152,7 @@ test alias-policy-limit {recipient limit is rechecked after policy inserts recip
     list [string range $reply 0 2] [lsort [lindex [string range $delivery 4 end] 0]]
 } -result {452 {added1@remote.test added2@remote.test}}
 
-test alias-on-7 {incoming error codes and recipient rollback} -constraints aliases -body {
+test alias-on-7 {incoming error codes and recipient rollback} -constraints config_aliasproc_set -body {
     set replies {}
     foreach {recipient expected} {missing 550 broken 451 invalid 451 empty 451 malformed 451 many 452} {
         set socket [smtp_open]
@@ -163,7 +164,7 @@ test alias-on-7 {incoming error codes and recipient rollback} -constraints alias
     set replies
 } -result {1 1 1 1 1 1 1 1 1 1 1 1}
 
-test alias-helper-contract {invalid helper results reject only the current RCPT} -constraints aliases -body {
+test alias-helper-contract {invalid helper results reject only the current RCPT} -constraints config_aliasproc_set -body {
     set results {}
     foreach recipient {helper-empty helper-malformed} {
         set socket [smtp_open]
@@ -176,7 +177,7 @@ test alias-helper-contract {invalid helper results reject only the current RCPT}
     set results
 } -result {451 first@example.test 451 first@example.test}
 
-test alias-on-8 {limit accounts for earlier recipients and preserves them on failure} -constraints aliases -body {
+test alias-on-8 {limit accounts for earlier recipients and preserves them on failure} -constraints config_aliasproc_set -body {
     set socket [smtp_open]
     smtp_command $socket {RCPT TO:<first@example.test>}
     smtp_command $socket {RCPT TO:<second@example.test>}
@@ -186,7 +187,7 @@ test alias-on-8 {limit accounts for earlier recipients and preserves them on fai
     list [string range $reply 0 2] [lsort [lindex [string range $delivery 4 end] 0]]
 } -result {452 {first@example.test second@example.test}}
 
-test alias-on-9 {reset permits another aliased transaction} -constraints aliases -body {
+test alias-on-9 {reset permits another aliased transaction} -constraints config_aliasproc_set -body {
     set socket [smtp_open]
     smtp_command $socket {RCPT TO:<webmaster@example.test>}
     smtp_command $socket RSET
@@ -197,7 +198,7 @@ test alias-on-9 {reset permits another aliased transaction} -constraints aliases
     list [string range $reply 0 2] [lindex [string range $delivery 4 end] 0]
 } -result {250 {one@remote.test two@remote.test}}
 
-test alias-external-1 {untrusted external relaying is rejected before alias lookup} -constraints untrusted -body {
+test alias-external-1 {untrusted external relaying is rejected before alias lookup} -constraints config_untrusted_peer -body {
     set calls [nsv_get alias-test calls]
     set socket [smtp_open]
     set reply [smtp_command $socket {RCPT TO:<unrelated@remote.test>}]
@@ -205,7 +206,7 @@ test alias-external-1 {untrusted external relaying is rejected before alias look
     list [string range $reply 0 2] [expr {$calls == [nsv_get alias-test calls]}]
 } -result {550 1}
 
-test alias-sink-1 {connchan sink sees the intended envelope and unchanged headers} -constraints fullsuite -body {
+test alias-sink-1 {connchan sink sees the intended envelope and unchanged headers} -constraints unfiltered_test_run -body {
     set messages [nsv_get alias-sink messages]
     set expected [expr {$enabled ? "one@remote.test two@remote.test" : "webmaster@example.test"}]
     list [nsv_get alias-sink error] [llength $messages] \
@@ -219,3 +220,9 @@ cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
 vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

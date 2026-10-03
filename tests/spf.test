@@ -1,3 +1,4 @@
+# -*- Tcl -*-
 # Optional SPF contract and exception policy. Run within the basic test server.
 rename ns_config spf_test_ns_config
 proc ns_config {args} {
@@ -167,3 +168,9 @@ removeFile spfquery-stub.sh
 rename ns_config {}
 rename spf_test_ns_config ns_config
 unset ::spf_test_config
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:
