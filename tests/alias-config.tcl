@@ -45,8 +45,9 @@ ns_section ns/server/test/module/nssmtpd {
     if {$::env(ALIAS_TEST_MODE) in {events eventsoff}} {
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
         if {$::env(ALIAS_TEST_MODE) eq "events"} {ns_param eventlogging true}
-        ns_param eventlogroll false
-        ns_param eventlogrollonsignal true
+        ns_param logroll false
+        ns_param logrollonsignal true
+        ns_param logrollfmt shared-%Y-%m-%d
         ns_param greylistdelay 1
         ns_param greylistretrywindow 60
         ns_param greylistlifetime 120

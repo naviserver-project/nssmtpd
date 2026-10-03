@@ -149,7 +149,7 @@ ns_section ns/server/${server}/module/nssmtpd {
   # For logging "ns_smtpd send ..." operations
   ns_param logging    on           ;# default: off
   # ns_param logfile ${logroot}/smtpsend.log
-  ns_param logrollfmt %Y-%m-%d     ;# format appended to log filename
+  ns_param logrollfmt %Y-%m-%d     ;# rotation suffix for both send and event logs
   # ns_param logmaxbackup 100       ;# max number of backup log files
   # ns_param logroll true           ;# enable automatic log rolling
   # ns_param logrollonsignal true   ;# roll logs on SIGHUP
@@ -203,7 +203,7 @@ ns_section ns/server/${server}/module/nssmtpd {
   ns_param eventlogfile ${logroot}/smtpevents.log
   # ns_param eventlogroll true
   # ns_param eventlogrollhour 0
-  # ns_param eventlogrollfmt %Y-%m-%d
+  # ns_param eventlogrollfmt %Y-%m-%d ;# optional override of logrollfmt
   # ns_param eventlogmaxbackup 100
   # ns_param eventlogrollonsignal false
 }
@@ -212,8 +212,12 @@ ns_section ns/server/${server}/module/nssmtpd {
 Without `eventlogfile`, the filename is `smtpevents-${server}.log`. Relative
 paths use the server log directory on NaviServer 5, or the home `logs`
 directory on older versions. The resolved filename is published in the
-configuration database for nsstats. Rotation is independent of send-log
-rotation, using NaviServer's asynchronous writer and log-rotation support.
+configuration database for nsstats. Event-log rotation inherits `logroll`,
+`logrollhour`, `logrollfmt`, `logmaxbackup`, and `logrollonsignal`, even when
+send logging is disabled. Each corresponding `eventlog*` setting can override
+the shared value. With neither setting configured, defaults are daily rotation
+at midnight, numbered backups, 100 backups, and no rotation on SIGHUP.
+Log enable switches and filenames remain independent.
 
 Each physical line follows the access-log convention used by the SMTP send
 log: a bracketed timestamp from `Ns_LogTime()`, the thread name, and fixed

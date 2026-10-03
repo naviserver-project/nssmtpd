@@ -786,16 +786,22 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
         Ns_SetIUpdateSz(Ns_ConfigCreateSection(section), "eventlogfile", 12,
                         serverPtr->eventlog.filename, TCL_INDEX_NONE);
         Tcl_DStringFree(&path);
-        serverPtr->eventlog.rollfmt = ns_strcopy(Ns_ConfigGetValue(section, "eventlogrollfmt"));
-        serverPtr->eventlog.maxbackup = Ns_ConfigIntRange(section, "eventlogmaxbackup", 100, 1, INT_MAX);
+        serverPtr->eventlog.rollfmt = ns_strcopy(Ns_ConfigString(section, "eventlogrollfmt",
+                                                               Ns_ConfigGetValue(section, "logrollfmt")));
+        serverPtr->eventlog.maxbackup = Ns_ConfigIntRange(section, "eventlogmaxbackup",
+                                                          Ns_ConfigIntRange(section, "logmaxbackup", 100, 1, INT_MAX),
+                                                          1, INT_MAX);
         if (EventLogOpen(serverPtr) != NS_OK) {
             return NS_ERROR;
         }
-        if (Ns_ConfigBool(section, "eventlogroll", NS_TRUE)) {
+        if (Ns_ConfigBool(section, "eventlogroll", Ns_ConfigBool(section, "logroll", NS_TRUE))) {
             Ns_ScheduleDaily(EventLogRoll, serverPtr, 0,
-                             Ns_ConfigIntRange(section, "eventlogrollhour", 0, 0, 23), 0, NULL);
+                             Ns_ConfigIntRange(section, "eventlogrollhour",
+                                               Ns_ConfigIntRange(section, "logrollhour", 0, 0, 23),
+                                               0, 23), 0, NULL);
         }
-        if (Ns_ConfigBool(section, "eventlogrollonsignal", NS_FALSE)) {
+        if (Ns_ConfigBool(section, "eventlogrollonsignal",
+                          Ns_ConfigBool(section, "logrollonsignal", NS_FALSE))) {
             Ns_RegisterAtSignal((Ns_Callback *)(ns_funcptr_t)EventLogRoll, serverPtr);
         }
     }

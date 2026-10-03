@@ -98,12 +98,12 @@ test events-access-format {writer uses send-log timestamp, fixed fields and esca
         [expr {[string first {line1\x0aline2\x0d\x09} $text] >= 0}]
 } -result {1 1 1}
 
-test events-rotation {SIGHUP rotates and subsequent events remain writable} -constraints enabled -body {
+test events-rotation {SIGHUP uses shared logrollfmt without send logging and events remain writable} -constraints enabled -body {
     set before [llength [event_records 10]]
     exec kill -HUP [pid]
     set rotated {}
     for {set i 0} {$i < 200} {incr i} {
-        set rotated [glob -nocomplain ${logfile}.*]
+        set rotated [glob -nocomplain ${logfile}.shared-*]
         if {[llength $rotated]} {break}
         after 10
     }
