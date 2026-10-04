@@ -1,0 +1,148 @@
+# -*- Tcl -*-
+# DNS fixtures keep authentication diagnostics deterministic and offline.
+source [file join $::env(ALIAS_TEST_ROOT) nssmtpd-auth.tcl]
+rename ::smtpd::AuthDns ::smtpd::AuthDnsReal
+set authHadDns [expr {[namespace which -command ::ns_dns] ne ""}]
+if {!$authHadDns} {proc ::ns_dns {args} {error "unexpected DNS call"}}
+proc ::smtpd::AuthDns {name timeout} {
+    lappend ::authQueries $name
+    if {$::authResponse eq "timeout"} {return -code error -errorcode NS_TIMEOUT timeout}
+    return $::authResponse
+}
+set authSignature {v=1; a=rsa-sha256; d=example.test; s=default; b=AAAA; bh=AAAA}
+
+test auth-no-key {missing TXT distinguishes unverifiable signature from bad cryptography} -body {
+    set authQueries {}
+    set authResponse {rcode 0 truncated 0 answer {}}
+    set result [smtpd::AuthDkimDetails [list $authSignature]]
+    list [dict get $result dkim-1-key] [dict get $result dkim-1-verification] $authQueries
+} -result {no-key not-performed default._domainkey.example.test}
+
+test auth-dns-errors {NXDOMAIN, SERVFAIL, truncation and timeout remain distinct} -body {
+    set results {}
+    foreach authResponse {
+        {rcode 3 truncated 0 answer {}}
+        {rcode 2 truncated 0 answer {}}
+        {rcode 0 truncated 1 answer {}}
+        timeout
+    } {
+        lappend results [dict get [smtpd::AuthDkimDetails [list $authSignature]] dkim-1-key]
+    }
+    set results
+} -result {no-key dns-rcode-2 truncated-response lookup-timeout}
+
+test auth-key-present {a DNS key alone never counts as a verified signature} -body {
+    set authResponse {rcode 0 truncated 0 answer {{default._domainkey.example.test TXT {v=DKIM1; p=AAAA} 300}}}
+    dict get [smtpd::AuthDkimDetails [list $authSignature]] dkim-1-key
+} -result key-present-not-verified
+
+test auth-key-revoked {empty p explicitly revokes a key} -body {
+    set authResponse {rcode 0 truncated 0 answer {{default._domainkey.example.test TXT {v=DKIM1; p=} 300}}}
+    dict get [smtpd::AuthDkimDetails [list $authSignature]] dkim-1-key
+} -result revoked-key
+
+test auth-cname {an unprocessed CNAME must not be reported as an absent key} -body {
+    set authResponse {rcode 0 truncated 0 answer {{default._domainkey.example.test CNAME other.example.test 300}}}
+    dict get [smtpd::AuthDkimDetails [list $authSignature]] dkim-1-key
+} -result unresolved-cname
+
+test auth-invalid-tags {duplicate and invalid DNS tags cause no lookup} -body {
+    set authQueries {}
+    set result [smtpd::AuthDkimDetails {{d=example.test; d=other.test; s=x} {d=example.test; s=bad name}}]
+    list [dict get $result dkim-1-key] [dict get $result dkim-2-key] $authQueries
+} -result {invalid-signature-tags invalid-signature-tags {}}
+
+test auth-bounds {signature count and repeated key lookups are bounded} -body {
+    set authQueries {}
+    set authResponse {rcode 0 truncated 0 answer {}}
+    set result [smtpd::AuthDkimDetails [lrepeat 20 $authSignature]]
+    list [llength $authQueries] [dict get $result dkim-limit] [dict exists $result dkim-9-key]
+} -result {1 exceeded 0}
+
+test auth-unsigned {absence of a signature requires no DNS lookup} -body {
+    set authQueries {}
+    list [dict get [smtpd::AuthDkimDetails {}] dkim-status] $authQueries
+} -result {unsigned {}}
+
+proc auth_test_interp {} {
+    interp create authTest
+    authTest eval [list source [file join $::env(ALIAS_TEST_ROOT) nssmtpd-auth.tcl]]
+    authTest eval {
+        set enabled 1
+        set local 0
+        set spf none
+        set queries 0
+        set events {}
+        proc ns_config {args} {return $::enabled}
+        proc ns_info {args} {return test}
+        proc ns_conn {args} {return 192.0.2.1}
+        proc ns_smtpd {command args} {
+            switch $command {
+                getflag {return $::local}
+                flag {return 1}
+                gethelo {return mail.example.test}
+                getfrom {return sender@example.test}
+                gethdrs {return {{v=1; d=example.test; s=default; b=AAAA; bh=AAAA}}}
+                default {error "unexpected operation $command"}
+            }
+        }
+        proc ns_dns {args} {
+            incr ::queries
+            return {rcode 0 truncated 0 answer {}}
+        }
+        proc smtpd::checkspf {args} {
+            if {$::spf eq "error"} {return -code error -errorcode {NSSMTPD SPF DEPENDENCY} unavailable}
+            return $::spf
+        }
+        proc smtpd::logevent {args} {lappend ::events $args}
+    }
+}
+
+test auth-collector {SPF none and missing DKIM key reach one transaction event} -setup {
+    auth_test_interp
+} -body {
+    authTest eval {
+        smtpd::authdetails 42
+        lassign [lindex $events 0] id event details
+        list $id $event [dict get $details spf-result] [dict get $details dkim-1-key] $queries
+    }
+} -cleanup {interp delete authTest} -result {42 authentication none no-key 1}
+
+test auth-disabled-local {disabled logging and local bypass perform no DNS queries} -setup {
+    auth_test_interp
+} -body {
+    authTest eval {
+        set events {}
+        set queries 0
+        set enabled 0
+        smtpd::authdetails 42
+        set disabledCount [llength $events]
+        set enabled 1
+        set local 1
+        smtpd::authdetails 42
+        list $disabledCount $queries [dict get [lindex $events 0 2] spf-result]
+    }
+} -cleanup {interp delete authTest} -result {0 0 not-checked-local}
+
+test auth-spf-unavailable {unavailable SPF is not confused with absence of a policy} -setup {
+    auth_test_interp
+} -body {
+    authTest eval {
+        set events {}
+        set local 0
+        set spf error
+        smtpd::authdetails 42
+        dict get [lindex $events 0 2] spf-result
+    }
+} -cleanup {interp delete authTest} -result unavailable
+
+rename ::smtpd::AuthDns {}
+rename ::smtpd::AuthDnsReal ::smtpd::AuthDns
+if {!$authHadDns} {rename ::ns_dns {}}
+unset authSignature authResponse authQueries authHadDns
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:
