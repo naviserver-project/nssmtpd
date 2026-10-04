@@ -3,6 +3,11 @@
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
 
+proc event_test_auth {id} {
+    if {[nsv_exists alias-test auth-error]} {error "diagnostics unavailable"}
+    ns_smtpd logevent $id authentication {action observed reason authentication-diagnostics spf-result none dkim-1-key no-key dkim-1-verification not-performed}
+}
+
 proc io_log_filter {severity timestamp message} {
     if {[string match {nssmtpd:*} $message]} {
         nsv_lappend io-test logs [list $severity $message]

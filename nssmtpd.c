@@ -184,6 +184,7 @@ typedef struct _smtpdConfig {
     const char *mailproc;
     const char *rcptproc;
     const char *aliasproc;
+    const char *authdetailsproc;
     const char *dataproc;
     const char *errorproc;
     Ns_Mutex relaylock;
@@ -852,6 +853,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(section, "mailproc"));
     serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(section, "rcptproc", "smtpd::rcpt"));
     serverPtr->aliasproc = ns_strcopy(Ns_ConfigGetValue(section, "aliasproc"));
+    serverPtr->authdetailsproc = ns_strcopy(Ns_ConfigGetValue(section, "authdetailsproc"));
     serverPtr->dataproc = ns_strcopy(Ns_ConfigString(section, "dataproc", "smtpd::data"));
     serverPtr->errorproc = ns_strcopy(Ns_ConfigString(section, "errorproc", "smtpd::error"));
 
@@ -2076,6 +2078,11 @@ static void SmtpdThread(smtpdConn *conn)
             }
             /* Quick headers scan */
             SmtpdConnParseData(conn);
+            /* Optional diagnostics only: relay acceptance may already have
+             * happened. A diagnostic callback error must not reject mail. */
+            if (config->authdetailsproc != NULL && *config->authdetailsproc != '\0') {
+                (void)SmtpdConnEval(conn, config->authdetailsproc);
+            }
             /* SPAM checks */
             SmtpdCheckSpam(conn);
             /* Call Tcl callback */

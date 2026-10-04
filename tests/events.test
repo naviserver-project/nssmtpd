@@ -181,6 +181,46 @@ test events-data-abort {abandoned DATA records transfer failure} -constraints co
     list $reply [dict get $row details reason]
 } -result {354 transfer-failed}
 
+test events-auth-details {DATA diagnostics are recorded without changing acceptance} -constraints config_eventlog_enabled -body {
+    set channel [event_open]
+    try {
+        nsv_set alias-test event-policy [list {action accept} {250 OK}]
+        event_command $channel {RCPT TO:<webmaster@example.test>}
+        event_command $channel DATA
+        set reply [event_command $channel "Subject: diagnostic\r\n\r\nBody\r\n."]
+        event_command $channel QUIT
+    } finally {
+        close $channel
+        nsv_unset alias-test event-policy
+    }
+    set rows [event_records 1 1]
+    for {set attempt 0} {$attempt < 200 && [event_select $rows authentication] eq ""} {incr attempt} {
+        after 10
+        set rows [event_records 1 1]
+    }
+    set f [open $logfile]
+    try {set text [read $f]} finally {close $f}
+    list $reply [llength [event_select $rows authentication]] \
+        [expr {[string first {spf-result=none dkim-1-key=no-key dkim-1-verification=not-performed} $text] >= 0}]
+} -result {250 1 1}
+
+test events-auth-error {a diagnostic callback failure does not reject DATA} -body {
+    set channel [event_open]
+    try {
+        nsv_set alias-test auth-error 1
+        nsv_set alias-test event-policy [list {action accept} {250 OK}]
+        event_command $channel {RCPT TO:<webmaster@example.test>}
+        event_command $channel DATA
+        set reply [event_command $channel "Subject: diagnostic error\r\n\r\nBody\r\n."]
+        event_command $channel QUIT
+        set reply
+    } finally {
+        close $channel
+        nsv_unset alias-test auth-error
+        nsv_unset alias-test event-policy
+    }
+} -result 250
+
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"

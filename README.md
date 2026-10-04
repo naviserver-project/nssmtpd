@@ -193,6 +193,42 @@ Write readiness retries, including TLS retries, honor `writetimeout`.
 
 ### SMTP event logging
 
+Optional authentication diagnostics can be added to the event Details:
+
+```tcl
+ns_section ns/server/$server/module/nssmtpd {
+    ns_param eventlogging    true
+    ns_param spfproc         smtpd::spfauto
+    ns_param authdetailsproc smtpd::authdetails
+}
+```
+
+`authdetailsproc` defaults to empty. It receives the SMTP session ID after
+DATA headers have been parsed and before `dataproc`, independently of a custom
+`dataproc`. It is informational: relay acceptance may already have happened.
+Callback errors are logged without rejecting mail. Custom callbacks must not
+change recipients, connection flags or SMTP replies.
+
+`smtpd::authdetails` records the configured SPF evaluator's result, including
+`none` (no SPF policy), `disabled`, `unavailable`, or `evaluation-error`.
+It uses the actual connection peer, not a sender-supplied Received header;
+replayed mail therefore describes the replaying relay. Local peers are marked
+`not-checked-local`. Unlike greylisting exceptions, diagnostics run for every
+completed external DATA transaction when this callback and event logging are enabled.
+
+DKIM diagnostics require nsdns with `lookup -details -jointxt -timeout`.
+They record each signature's domain, selector and key lookup status: `no-key`,
+`revoked-key`, `key-present-not-verified`, or a distinct lookup/record error.
+An unresolved CNAME is reported as such, not as an absent key. At most eight
+signatures are inspected, with five seconds shared across DNS queries; repeated
+key names are queried once per message. SPF has its evaluator's separate timeout.
+**These checks do not verify DKIM signatures or evaluate DMARC policy.**
+
+The `authentication` event is joined to the existing rows by server, session
+and transaction in nsstats, where its metadata appears only under Details.
+Old records cannot acquire diagnostics retroactively. No diagnostics run when
+event logging is disabled. Delivery decisions remain unchanged.
+
 The optional event log records incoming recipient decisions, applied alias
 expansions, greylisting outcomes, and custom policy events. It is separate from
 the existing SMTP send log and disabled by default:
