@@ -2,6 +2,17 @@
 # Test-only callbacks. Loaded into every interpreter of the isolated server.
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
+source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
+
+proc header_test_auth {id} {
+    source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
+    if {[nsv_exists alias-test header-error]} {error "diagnostics unavailable"}
+    if {[nsv_exists alias-test header-invalid]} {
+        return [dict create Nssmtpd-Link-Findings "bad\r\nInjected: yes"]
+    }
+    set result [smtpd::authdetails $id]
+    return $result
+}
 
 proc event_test_auth {id} {
     if {[nsv_exists alias-test auth-error]} {error "diagnostics unavailable"}

@@ -191,7 +191,9 @@ proc smtpd::AuthLinkDetails {message} {
     set token ""
     set details {link-status no-html}
     try {
-        set token [mime::initialize -string $message]
+        # Tcllib's string input expects LF header separators. Normalize only
+        # this inspection copy, never the original message sent to the relay.
+        set token [mime::initialize -string [string map {\r\n \n} $message]]
         set pending [list $token]
         set count 0
         while {[llength $pending]} {
@@ -215,10 +217,45 @@ proc smtpd::AuthLinkDetails {message} {
     return $details
 }
 
+# Generate only new, unsigned fields. Never remove or replace received fields.
+# Conservatively omit every proposed field mentioned in any signature's h=,
+# including oversigned (not yet present) fields. Malformed signatures suppress
+# all additions rather than guessing what they protect.
+proc smtpd::AuthLinkHeaders {details signatures existing} {
+    set protected [lmap name $existing {string tolower $name}]
+    foreach signature $signatures {
+        try {
+            set tags [AuthTags $signature]
+            foreach name [split [dict get $tags h] :] {
+                lappend protected [string tolower [string trim $name]]
+            }
+        } on error {} {return {}}
+    }
+    set headers {}
+    set findings {}
+    foreach {key name reason} {
+        link-host-mismatch Nssmtpd-Link-Host-Mismatch host-mismatch
+        link-embedded-redirect Nssmtpd-Link-Embedded-Redirect embedded-redirect
+    } {
+        if {[dict exists $details $key]} {
+            lappend findings $reason
+            if {[string tolower $name] ni $protected} {
+                dict set headers $name [join [dict get $details $key] { -> }]
+            }
+        }
+    }
+    if {$findings ne "" && "nssmtpd-link-findings" ni $protected} {
+        dict set headers Nssmtpd-Link-Findings [join $findings {, }]
+    }
+    return $headers
+}
+
 # authdetailsproc callback: inspect the actual socket peer, never Received
 # headers supplied by a sender. Replayed mail therefore describes the relay.
 proc smtpd::authdetails {id} {
-    if {![ns_config -bool ns/server/[ns_info server]/module/nssmtpd eventlogging false]} {return}
+    set section ns/server/[ns_info server]/module/nssmtpd
+    set addheaders [ns_config -bool $section authdetailheaders false]
+    if {!$addheaders && ![ns_config -bool $section eventlogging false]} {return {}}
     set details [dict create action observed reason authentication-diagnostics \
                      spf-peer [ns_conn peeraddr] spf-helo [ns_smtpd gethelo $id]]
     if {[ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL]} {
@@ -240,6 +277,15 @@ proc smtpd::authdetails {id} {
     }
     set details [dict merge $details [AuthLinkDetails [lindex [ns_smtpd getbody $id] 0]]]
     smtpd::logevent $id authentication $details
+    if {$addheaders} {
+        set existing {}
+        foreach name {Nssmtpd-Link-Findings Nssmtpd-Link-Host-Mismatch Nssmtpd-Link-Embedded-Redirect} {
+            if {[llength [ns_smtpd gethdrs $id $name]]} {lappend existing $name}
+        }
+        return [AuthLinkHeaders $details \
+            [concat [ns_smtpd gethdrs $id DKIM-Signature] [ns_smtpd gethdrs $id ARC-Message-Signature]] $existing]
+    }
+    return {}
 }
 
 # Local variables:

@@ -1,0 +1,82 @@
+# -*- Tcl -*-
+# Buffered forwarding preserves signed bytes and SMTP transparency.
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+proc header_messages {} {
+    set path [file join $::env(ALIAS_TEST_HOME) sink-messages.list]
+    if {![file exists $path]} {return {}}
+    set f [open $path]
+    fconfigure $f -translation binary
+    try {set text [read $f]} finally {close $f}
+    return $text
+}
+
+proc header_submit {message} {
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation binary -buffering none
+    try {
+        gets $channel
+        foreach command {{EHLO test.example} {MAIL FROM:<sender@example.test>} {RCPT TO:<one@example.test>} DATA} {
+            puts -nonewline $channel "$command\r\n"
+            while {[gets $channel reply] >= 0 && [string index $reply 3] eq "-"} {}
+        }
+        puts -nonewline $channel "$message.\r\n"
+        gets $channel reply
+        puts -nonewline $channel "QUIT\r\n"
+        gets $channel
+        return [string range $reply 0 2]
+    } finally {close $channel}
+}
+
+set original "From: sender@example.test\r\nTo: one@example.test\r\nSubject:  unchanged\r\nDKIM-Signature: v=1; d=example.test; s=test; h=From:To:Subject;\r\n\tb=AAAA; bh=AAAA\r\nContent-Type: text/html\r\n\r\n<a href=\"https://evil.example/\">example.org</a>\r\n..dot-stuffed\r\n"
+
+test headers-forward {findings added, original signed headers/body and dot stuffing unchanged} -body {
+    set code [header_submit $original]
+    set wire [lindex [header_messages] end 1]
+    list $code [string match {*Nssmtpd-Link-Findings: host-mismatch*} $wire] \
+        [expr {[string range $wire [string first "From:" $wire] end] eq $original}]
+} -result {250 1 1}
+
+test headers-oversigned {any h= mention suppresses that field, including absent fields} -body {
+    set signed [string map {{h=From:To:Subject;} {h=From:To:Subject:Nssmtpd-Link-Findings:Nssmtpd-Link-Host-Mismatch;}} $original]
+    set code [header_submit $signed]
+    set wire [lindex [header_messages] end 1]
+    list $code [regexp -line {^Nssmtpd-Link-} $wire] \
+        [expr {[string range $wire [string first "From:" $wire] end] eq $signed}]
+} -result {250 0 1}
+
+test headers-error {diagnostic callback errors do not reject or alter original mail} -body {
+    nsv_set alias-test header-error 1
+    try {
+        set code [header_submit $original]
+    } finally {nsv_unset alias-test header-error}
+    set wire [lindex [header_messages] end 1]
+    list $code [regexp -line {^Nssmtpd-Link-} $wire] \
+        [expr {[string range $wire [string first "From:" $wire] end] eq $original}]
+} -result {250 0 1}
+
+test headers-injection {callback cannot inject arbitrary headers through values} -body {
+    nsv_set alias-test header-invalid 1
+    try {set code [header_submit $original]} finally {nsv_unset alias-test header-invalid}
+    set wire [lindex [header_messages] end 1]
+    list $code [regexp -line {^(Nssmtpd-Link-|Injected:)} $wire]
+} -result {250 0}
+
+test headers-size {oversized DATA is rejected without queuing partial mail} -body {
+    set before [llength [header_messages]]
+    set code [header_submit "Subject: oversized\r\n\r\n[string repeat "0123456789\r\n" 1500]"]
+    list $code [expr {[llength [header_messages]] == $before}]
+} -result {552 1}
+
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

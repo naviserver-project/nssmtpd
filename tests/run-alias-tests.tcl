@@ -50,7 +50,7 @@ proc alias_runner::run {nsroot root mode} {
             set ::env(ALIAS_TEST_$name) [lindex [fconfigure $probe -sockname] 2]
         }
         foreach probe $probes {close $probe}
-        if {$mode in {proxy io}} {
+        if {$mode in {proxy io headers}} {
             exec openssl req -x509 -newkey rsa:2048 -nodes \
                 -keyout [file join $home key.pem] -out [file join $home cert.pem] \
                 -days 1 -subj /CN=localhost >[file join $home openssl.log] 2>@1
@@ -58,7 +58,7 @@ proc alias_runner::run {nsroot root mode} {
         foreach {key value} [list ROOT $root NSROOT $nsroot HOME $home MODE $mode] {
             set ::env(ALIAS_TEST_$key) $value
         }
-        set testfile [dict get {events events.test eventsoff events.test greyexternal greylisting.test greytrusted greylisting.test greyoff greylisting.test greyempty greylisting.test policyexternal recipient-policy.test policytrusted recipient-policy.test policyoff recipient-policy.test policyempty recipient-policy.test io io-errors.test basic basic.test files aliases-files.test filevirtual aliases-files.test proxy aliases-proxy.test disabled aliases.test empty aliases.test enabled aliases.test untrusted aliases.test} $mode]
+        set testfile [dict get {headers headers.test events events.test eventsoff events.test greyexternal greylisting.test greytrusted greylisting.test greyoff greylisting.test greyempty greylisting.test policyexternal recipient-policy.test policytrusted recipient-policy.test policyoff recipient-policy.test policyempty recipient-policy.test io io-errors.test basic basic.test files aliases-files.test filevirtual aliases-files.test proxy aliases-proxy.test disabled aliases.test empty aliases.test enabled aliases.test untrusted aliases.test} $mode]
         set command [list [file join $nsroot bin nsd] -c -d -t \
                          [file join $root tests alias-config.tcl] [file join $root tests $testfile] {*}$testArgs]
         cd $home
@@ -122,7 +122,7 @@ if {[llength $argv] >= 2 && [lindex $argv 0] eq "--naviserver"} {
 }
 set alias_runner::testArgs $argv
 set root [file dirname [file dirname [file normalize [info script]]]]
-set modes {events eventsoff basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty}
+set modes {headers events eventsoff basic disabled empty enabled untrusted proxy files filevirtual io policyexternal policytrusted policyoff policyempty greyexternal greytrusted greyoff greyempty}
 try {
     foreach mode $modes {
         alias_runner::run [file normalize $nsroot] $root $mode

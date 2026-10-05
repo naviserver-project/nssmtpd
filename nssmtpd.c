@@ -185,6 +185,7 @@ typedef struct _smtpdConfig {
     const char *rcptproc;
     const char *aliasproc;
     const char *authdetailsproc;
+    bool        authdetailheaders; /* Buffer relay DATA for diagnostic headers. */
     const char *dataproc;
     const char *errorproc;
     Ns_Mutex relaylock;
@@ -262,6 +263,7 @@ typedef struct _smtpdConn {
     char relayReply[512];
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
+    bool authDetailsDone;
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -465,6 +467,7 @@ static void SmtpdConnFree(smtpdConn *conn);
 static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
+static void SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers);
 static int SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
                                Tcl_Obj *recipients, int limit, bool passthrough, Tcl_Obj **resolved);
 static Tcl_Obj *SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient);
@@ -854,6 +857,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(section, "rcptproc", "smtpd::rcpt"));
     serverPtr->aliasproc = ns_strcopy(Ns_ConfigGetValue(section, "aliasproc"));
     serverPtr->authdetailsproc = ns_strcopy(Ns_ConfigGetValue(section, "authdetailsproc"));
+    serverPtr->authdetailheaders = Ns_ConfigBool(section, "authdetailheaders", NS_FALSE);
     serverPtr->dataproc = ns_strcopy(Ns_ConfigString(section, "dataproc", "smtpd::data"));
     serverPtr->errorproc = ns_strcopy(Ns_ConfigString(section, "errorproc", "smtpd::error"));
 
@@ -2077,12 +2081,12 @@ static void SmtpdThread(smtpdConn *conn)
                 continue;
             }
             /* Quick headers scan */
-            SmtpdConnParseData(conn);
+            if (!conn->authDetailsDone) {
+                SmtpdConnParseData(conn);
+            }
             /* Optional diagnostics only: relay acceptance may already have
              * happened. A diagnostic callback error must not reject mail. */
-            if (config->authdetailsproc != NULL && *config->authdetailsproc != '\0') {
-                (void)SmtpdConnEval(conn, config->authdetailsproc);
-            }
+            SmtpdAuthDetails(conn, NULL);
             /* SPAM checks */
             SmtpdCheckSpam(conn);
             /* Call Tcl callback */
@@ -2209,6 +2213,7 @@ SmtpdConnReset(smtpdConn *conn)
     //Ns_Log(SmtpdDebug,"SmtpdConnReset");
     SmtpdTransactionEnd(conn, "reset");
     conn->dataStarted = conn->relayAccepted = NS_FALSE;
+    conn->authDetailsDone = NS_FALSE;
     conn->messageBytes = 0;
     conn->relayReply[0] = '\0';
 
@@ -2642,6 +2647,69 @@ SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, const char *user, const
     }
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdAuthDetails --
+ *
+ *      Run informational diagnostics once. In buffered relay mode, accept
+ *      a bounded dictionary of diagnostic headers from the callback.
+ *
+ * Results:
+ *      None. Callback errors leave delivery unaffected.
+ *
+ * Side effects:
+ *      Evaluates Tcl; optionally appends validated header fields.
+ *
+ *----------------------------------------------------------------------
+ */
+static void
+SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers)
+{
+    if (!conn->authDetailsDone) {
+        conn->authDetailsDone = NS_TRUE;
+        if (conn->config->authdetailsproc != NULL && *conn->config->authdetailsproc != '\0'
+            && SmtpdConnEval(conn, conn->config->authdetailsproc) == TCL_OK
+            && headers != NULL) {
+            Tcl_Obj *result = Tcl_GetObjResult(conn->interp), *key, *value;
+            Tcl_DictSearch search;
+            TCL_SIZE_T count;
+            int done;
+
+            if (Tcl_DictObjSize(NULL, result, &count) != TCL_OK || count > 3) {
+                Ns_Log(Warning, "nssmtpd: invalid diagnostic header dictionary; omitted");
+                return;
+            }
+            Tcl_DictObjFirst(NULL, result, &search, &key, &value, &done);
+            for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
+                const char *name = Tcl_GetString(key), *text;
+                TCL_SIZE_T length, i;
+                bool valid = NS_TRUE;
+
+                text = Tcl_GetStringFromObj(value, &length);
+                if ((strcmp(name, "Nssmtpd-Link-Findings") != 0
+                     && strcmp(name, "Nssmtpd-Link-Host-Mismatch") != 0
+                     && strcmp(name, "Nssmtpd-Link-Embedded-Redirect") != 0)
+                    || length > 700) {
+                    valid = NS_FALSE;
+                }
+                for (i = 0; valid && i < length; i++) {
+                    if ((unsigned char)text[i] < 32 || (unsigned char)text[i] > 126) {
+                        valid = NS_FALSE;
+                    }
+                }
+                if (!valid) {
+                    Tcl_DStringSetLength(headers, 0);
+                    Ns_Log(Warning, "nssmtpd: invalid diagnostic header field; omitted");
+                    break;
+                }
+                Ns_DStringPrintf(headers, "%s: %s\r\n", name, text);
+            }
+            Tcl_DictObjDone(&search);
+        }
+    }
+}
+
 static TCL_SIZE_T
 SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
 {
@@ -2887,32 +2955,68 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (SmtpdPuts(conn, "354 Start mail input; end with <CRLF>.<CRLF>\r\n") != NS_OK) {
         goto error;
     }
-    /* Forward our trace header before the client's original DATA. */
-    if (SmtpdWriteDString(relay, &conn->body.data) != NS_OK) {
-        goto error421;
-    }
-    do {
-        if (SmtpdReadLine(conn, &relay->line, &rc) < 0) {
-            goto error;
-        }
-        if (strcmp(relay->line.string, ".\r\n") != 0) {
+    if (conn->config->authdetailheaders) {
+        Tcl_DString wire, headers;
+
+        /* Preserve SMTP transparency and signed bytes: buffer the original
+         * wire representation, including dot stuffing, without rewriting. */
+        do {
+            if (SmtpdReadLine(conn, &relay->line, &rc) <= 0) {
+                goto error;
+            }
+            if (strcmp(relay->line.string, ".\r\n") == 0) {
+                break;
+            }
             conn->messageBytes += (uint64_t)relay->line.length;
+            size += relay->line.length;
+            if (size <= conn->config->maxdata) {
+                Tcl_DStringAppend(&conn->body.data, relay->line.string, relay->line.length);
+            }
+        } while (relay->line.length > 0);
+        if (size > conn->config->maxdata) {
+            /* Close the unfinished upstream DATA; the caller returns 552. */
+            SmtpdConnFree(relay);
+            return size;
         }
-        if (SmtpdWriteDString(relay, &relay->line) != NS_OK) {
+        Tcl_DStringInit(&wire);
+        Tcl_DStringInit(&headers);
+        Tcl_DStringAppend(&wire, conn->body.data.string, conn->body.data.length);
+        SmtpdConnParseData(conn);
+        SmtpdAuthDetails(conn, &headers);
+        rc = SmtpdWriteDString(relay, &headers);
+        if (rc == NS_OK) rc = SmtpdWriteDString(relay, &wire);
+        if (rc == NS_OK) rc = SmtpdPuts(relay, ".\r\n");
+        Tcl_DStringFree(&headers);
+        Tcl_DStringFree(&wire);
+        if (rc != NS_OK) goto error421;
+    } else {
+        /* Forward our trace header before the client's original DATA. */
+        if (SmtpdWriteDString(relay, &conn->body.data) != NS_OK) {
             goto error421;
         }
-        /* Remove trailing dot from the data buffer */
-        if (!strcmp(relay->line.string, ".\r\n")) {
-            Tcl_DStringSetLength(&relay->line, relay->line.length - 3);
-            break;
-        }
-        size += relay->line.length;
-        if (size < conn->config->maxdata &&
-            !(conn->rcpt.count == vcount && (conn->flags & SMTPD_FASTPROXY) != 0u)
-            ) {
-            Tcl_DStringAppend(&conn->body.data, relay->line.string, relay->line.length);
-        }
-    } while (relay->line.length > 0);
+        do {
+            if (SmtpdReadLine(conn, &relay->line, &rc) < 0) {
+                goto error;
+            }
+            if (strcmp(relay->line.string, ".\r\n") != 0) {
+                conn->messageBytes += (uint64_t)relay->line.length;
+            }
+            if (SmtpdWriteDString(relay, &relay->line) != NS_OK) {
+                goto error421;
+            }
+            /* Remove trailing dot from the data buffer */
+            if (!strcmp(relay->line.string, ".\r\n")) {
+                Tcl_DStringSetLength(&relay->line, relay->line.length - 3);
+                break;
+            }
+            size += relay->line.length;
+            if (size < conn->config->maxdata &&
+                !(conn->rcpt.count == vcount && (conn->flags & SMTPD_FASTPROXY) != 0u)
+                ) {
+                Tcl_DStringAppend(&conn->body.data, relay->line.string, relay->line.length);
+            }
+        } while (relay->line.length > 0);
+    }
     if (SmtpdReadLine(relay, &relay->line, &rc) <= 0) {
         goto error421;
     }

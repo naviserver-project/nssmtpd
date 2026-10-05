@@ -20,7 +20,7 @@ foreach section {ns/parameters ns/sendmail} {
 }
 ns_section ns/servers {
     ns_param test {Alias tests}
-    if {$::env(ALIAS_TEST_MODE) eq "proxy"} {ns_param sink {STARTTLS test sink}}
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {ns_param sink {STARTTLS test sink}}
 }
 ns_section ns/server/test {
     ns_param minthreads 2
@@ -43,6 +43,12 @@ ns_section ns/server/test/module/nssock {
     ns_param port 0
 }
 ns_section ns/server/test/module/nssmtpd {
+    if {$::env(ALIAS_TEST_MODE) eq "headers"} {
+        ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
+        ns_param authdetailsproc header_test_auth
+        ns_param authdetailheaders true
+        ns_param maxdata 16384
+    }
     if {$::env(ALIAS_TEST_MODE) in {events eventsoff}} {
         ns_param authdetailsproc event_test_auth
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
@@ -101,7 +107,7 @@ ns_section ns/server/test/module/nssmtpd {
             ns_param recipientpolicyproc ""
         }
     }
-    if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
         ns_param eventlogging true
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
@@ -112,7 +118,7 @@ ns_section alias-test {
     ns_param source $root
 }
 
-if {$::env(ALIAS_TEST_MODE) eq "proxy"} {
+if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {
     ns_section ns/server/sink/tcl {
         ns_param initfile [file join $nsroot bin init.tcl]
         ns_param initcmds [list source [file join $root tests alias-fixture.tcl]]

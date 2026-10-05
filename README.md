@@ -226,8 +226,39 @@ key names are queried once per message. SPF has its evaluator's separate timeout
 
 The `authentication` event is joined to the existing rows by server, session
 and transaction in nsstats, where its metadata appears only under Details.
-Old records cannot acquire diagnostics retroactively. No diagnostics run when
-event logging is disabled. Delivery decisions remain unchanged.
+Old records cannot acquire diagnostics retroactively. Diagnostics run when
+event logging or diagnostic headers are enabled. Delivery decisions remain unchanged.
+
+To include link findings in mail forwarded through the configured relay:
+
+```tcl
+ns_param authdetailsproc   smtpd::authdetails
+ns_param authdetailheaders true
+```
+
+`authdetailheaders` defaults to false. Enabling it buffers incoming relay DATA
+up to `maxdata` before forwarding, overriding the fast-proxy buffer omission.
+This adds memory use and diagnostic latency before the upstream transfer.
+The original wire DATA, including signed headers, body and dot stuffing, is
+preserved. Diagnostic failures omit additions without rejecting the message.
+The default streaming relay path is unchanged. This option adds headers only
+to the built-in relay path; custom delivery callbacks remain responsible for
+their own output.
+
+When findings exist, the callback returns a dictionary containing these fields:
+`Nssmtpd-Link-Findings`, `Nssmtpd-Link-Host-Mismatch`, and
+`Nssmtpd-Link-Embedded-Redirect`. The relay accepts only these names and bounded
+ASCII values without control characters. These are informational custom
+headers, not authentication verdicts or a spam classification.
+
+To preserve DKIM, `smtpd::authdetails` omits any proposed name listed in any
+DKIM-Signature or ARC-Message-Signature `h=` tag, including oversigned fields.
+Malformed signature tags suppress all additions. Existing diagnostic fields
+are neither replaced nor duplicated; received fields remain untrusted and must
+not be interpreted as verified findings from this receiver. No Subject or body
+rewriting, signature verification, or Authentication-Results header is added.
+Custom callbacks returning header dictionaries must provide equivalent
+signature protection. With this option off, callback return values are ignored.
 
 The optional event log records incoming recipient decisions, applied alias
 expansions, greylisting outcomes, and custom policy events. It is separate from

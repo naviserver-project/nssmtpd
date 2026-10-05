@@ -73,7 +73,10 @@ proc auth_test_interp {} {
         set spf none
         set queries 0
         set events {}
-        proc ns_config {args} {return $::enabled}
+        proc ns_config {args} {
+            if {[lindex $args end-1] eq "authdetailheaders"} {return 0}
+            return $::enabled
+        }
         proc ns_info {args} {return test}
         proc ns_conn {args} {return 192.0.2.1}
         proc ns_smtpd {command args} {
@@ -186,6 +189,21 @@ test auth-link-bounds {oversize messages are explicitly uninspected} -body {
 test auth-link-anchor-limit {HTML link scanning is bounded} -constraints html_parser -body {
     smtpd::AuthHtmlLinks [string repeat {<a href="https://example.org/">Help</a>} 101]
 } -result {link-limit exceeded}
+
+test auth-header-protection {all signatures and existing header names protect additions} -body {
+    set details {link-host-mismatch {example.org evil.test} link-embedded-redirect {evil.test other.test}}
+    smtpd::AuthLinkHeaders $details \
+        {{v=1; h=From:NSsmtpd-Link-Host-Mismatch} {i=1; h=Subject:Nssmtpd-Link-Findings}} \
+        {Nssmtpd-Link-Embedded-Redirect}
+} -result {}
+
+test auth-header-malformed {an unparseable signature suppresses all diagnostic additions} -body {
+    smtpd::AuthLinkHeaders {link-host-mismatch {example.org evil.test}} {{v=1; broken}} {}
+} -result {}
+
+test auth-header-clean {absence of findings adds no header or implicit clean verdict} -body {
+    smtpd::AuthLinkHeaders {link-status inspected} {} {}
+} -result {}
 
 # Local variables:
 #    mode: tcl
