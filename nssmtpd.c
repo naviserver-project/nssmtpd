@@ -763,6 +763,42 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
         SendLogOpen(serverPtr);
     }
 
+    /*
+     * Resolve the greylist snapshot alongside the module's log files and
+     * publish the completed path for the Tcl lifecycle callbacks.
+     */
+    {
+        Tcl_DString path;
+        const char *filename = Ns_ConfigString(section, "greylistfile", NULL);
+        const char *resolved;
+
+        Tcl_DStringInit(&path);
+        if (filename == NULL || *filename == '\0') {
+            Ns_DStringPrintf(&path, "smtpgreylist-%s.state", server);
+            filename = path.string;
+            Ns_SetIUpdateSz(Ns_ConfigCreateSection(section), "greylistfile", 12,
+                            filename, TCL_INDEX_NONE);
+        }
+        if (Ns_PathIsAbsolute(filename)) {
+            resolved = ns_strdup(filename);
+        } else {
+#if NS_VERSION_NUM >= 50000
+            resolved = Ns_ConfigFilename(section, "greylistfile", 12,
+                                         Ns_ServerLogDir(server), filename,
+                                         NS_FALSE, NS_FALSE);
+#else
+            Tcl_DString full;
+            Tcl_DStringInit(&full);
+            Ns_HomePath(&full, "logs", filename, (char *)0L);
+            resolved = Ns_DStringExport(&full);
+#endif
+        }
+        Ns_SetIUpdateSz(Ns_ConfigCreateSection(section), "greylistfile", 12,
+                        resolved, TCL_INDEX_NONE);
+        ns_free((void *)resolved);
+        Tcl_DStringFree(&path);
+    }
+
     serverPtr->deferaccept = Ns_ConfigBool(section, "deferaccept", NS_FALSE);
     serverPtr->eventlog.fd = NS_INVALID_FD;
     Ns_MutexSetName2(&serverPtr->eventlog.lock, "smtp:eventlog", module);

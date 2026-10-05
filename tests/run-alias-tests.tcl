@@ -99,6 +99,15 @@ proc alias_runner::run {nsroot root mode} {
                 incr summaries
             }
         }
+        if {$mode eq "greyexternal" && $status == 0} {
+            # The startup fixture must have been atomically replaced by the
+            # real ns_atshutdown callback before the server process exits.
+            set f [open [file join $home logs greylist.state] r]
+            try {set snapshot [read $f]} finally {close $f}
+            if {[dict get $snapshot version] != 1 || [dict exists $snapshot startupfixture]} {
+                error "Greylist shutdown callback did not replace the startup snapshot:\n$output"
+            }
+        }
         if {$status != 0 || [string first ALIAS_TEST_FAILURES=0 $output] < 0} {
             error "NaviServer tests failed: $detail\n$output"
         }

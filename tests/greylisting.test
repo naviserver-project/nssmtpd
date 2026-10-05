@@ -6,6 +6,17 @@ configure {*}$argv
 set active [expr {$::env(ALIAS_TEST_MODE) eq "greyexternal"}]
 set trusted [expr {$::env(ALIAS_TEST_MODE) eq "greytrusted"}]
 testConstraint config_greylisting_enabled_external_peer $active
+test grey-startup-restore {prestartup restores state and initproc preserves it} -constraints config_greylisting_enabled_external_peer -body {
+    dict get [smtpd::GreylistCheck {192.0.2.42 saved@example.test one@example.test} [clock seconds]] reason
+} -result known
+
+# The external mode overrides the filename; other modes use the default.
+test grey-snapshot-path {snapshot names resolve against the server log directory} -body {
+    set name [expr {$active ? "greylist.state" : "smtpgreylist-test.state"}]
+    expr {[file normalize [ns_config ns/server/test/module/nssmtpd greylistfile]] eq
+          [file normalize [file join $::env(ALIAS_TEST_HOME) logs $name]]}
+} -result 1
+
 proc grey_reset {} {
     if {[nsv_exists smtpd-greylist mutex]} {
         ns_mutex eval [nsv_get smtpd-greylist mutex] {
@@ -234,7 +245,66 @@ test grey-disabled-state {unset/empty policy does not allocate greylist state} -
     expr {[nsv_exists smtpd-greylist mutex] == ($::env(ALIAS_TEST_MODE) in {greyexternal greytrusted})}
 } -result 1
 
+test grey-persistence {pending and passed entries round-trip without extending timestamps} -constraints config_greylisting_enabled_external_peer -setup {
+    grey_reset
+    set now [clock seconds]
+    set path [file join $::env(ALIAS_TEST_HOME) roundtrip.state]
+    set pending {192.0.2.1 sender@example.test one@example.test}
+    set passed {192.0.2.2 sender@example.test one@example.test}
+    set expected [list [expr {$now-60}] [expr {$now+600}] 0]
+    nsv_set smtpd-greylist-entries $pending $expected
+    nsv_set smtpd-greylist-entries $passed [list [expr {$now-600}] [expr {$now+3600}] 1]
+    nsv_set smtpd-greylist-entries {192.0.2.3 expired@example.test one@example.test} [list [expr {$now-1000}] [expr {$now-1}] 0]
+    nsv_set smtpd-greylist-entries {192.0.2.4 future@example.test one@example.test} [list [expr {$now+10}] [expr {$now+1000}] 1]
+} -body {
+    smtpd::GreylistSave $path
+    grey_reset
+    smtpd::GreylistRestore $path
+    list [nsv_array size smtpd-greylist-entries] \
+        [expr {[nsv_get smtpd-greylist-entries $pending] eq $expected}] \
+        [dict get [smtpd::GreylistCheck $pending $now] reason] \
+        [dict get [smtpd::GreylistCheck $passed $now] reason]
+} -cleanup {file delete -force $path} -result {2 1 early known}
+
+test grey-persistence-invalid {a malformed snapshot is data and cannot replace the current table} -constraints config_greylisting_enabled_external_peer -setup {
+    grey_reset
+    set path [file join $::env(ALIAS_TEST_HOME) invalid.state]
+    set f [open $path w]
+    try {puts $f {version 1 entries {{192.0.2.1 sender@example.test one@example.test} {0 bad 1}}}} finally {close $f}
+    nsv_set smtpd-greylist-entries sentinel {1 2 0}
+} -body {
+    smtpd::GreylistRestore $path
+    list [nsv_array size smtpd-greylist-entries] [nsv_get smtpd-greylist-entries sentinel]
+} -cleanup {file delete -force $path} -result {1 {1 2 0}}
+
+test grey-persistence-limit {reload discards expired/future records and respects the configured bound} -constraints config_greylisting_enabled_external_peer -setup {
+    grey_reset
+    set saved [nsv_get smtpd-greylist config]
+    set path [file join $::env(ALIAS_TEST_HOME) bounded.state]
+    set now [clock seconds]
+    set entries {}
+    foreach ip {192.0.2.1 192.0.2.2 192.0.2.3} {
+        dict set entries [list $ip sender@example.test one@example.test] [list [expr {$now-10}] [expr {$now+600}] 0]
+    }
+    dict set entries {192.0.2.4 expired@example.test one@example.test} [list [expr {$now-600}] [expr {$now-1}] 1]
+    dict set entries {192.0.2.5 future@example.test one@example.test} [list [expr {$now+60}] [expr {$now+600}] 1]
+    set f [open $path w]
+    try {puts $f [dict create version 1 entries $entries]} finally {close $f}
+} -body {
+    # Restore reads the configured value, matching a reduced limit at restart.
+    set section ns/server/[ns_info server]/module/nssmtpd
+    set config [ns_configsection $section]
+    set previous [ns_set get $config greylistmaxentries]
+    ns_set update $config greylistmaxentries 2
+    try {smtpd::GreylistRestore $path} finally {ns_set update $config greylistmaxentries $previous}
+    nsv_array size smtpd-greylist-entries
+} -cleanup {
+    nsv_set smtpd-greylist config $saved
+    file delete -force $path
+} -result 2
+
 set failures $::tcltest::numTests(Failed)
+
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown

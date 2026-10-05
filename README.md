@@ -786,11 +786,28 @@ This overload behavior weakens filtering and should be monitored.
 
 `smtpd::init` initializes greylisting when a recipient policy is configured.
 A custom `initproc` using greylisting must call `smtpd::greylistinit` once at
-startup. Initialization clears previous state; do not call it per connection.
-State is in memory only: restarting NaviServer resets it, and the next delivery
-may be delayed again. There is no persistence or cross-instance coordination
-in this first implementation. Missing initialization causes a temporary policy
-failure, not an unfiltered acceptance.
+startup. Repeated initialization preserves existing entries. Missing
+initialization causes a temporary policy failure.
+
+Greylist entries are automatically preserved across orderly restarts in
+`smtpgreylist-${server}.state` in the server's log directory. Use persistent
+storage for that directory, or override the snapshot location:
+
+```tcl
+ns_param greylistfile /var/www/openacs/etc/mail/greylist.state
+```
+
+Relative `greylistfile` names are resolved against the server's log directory;
+absolute paths are used directly. An empty value selects the default filename.
+The directory must already exist and be writable. `ns_atprestartup` restores
+pending and passed tuples before SMTP starts, and `ns_atshutdown`
+saves a snapshot by atomic replacement. Original timestamps are retained;
+expired entries and entries dated in the future are discarded on reload, and
+`greylistmaxentries` bounds the restored table. File failures are logged without
+preventing startup or mail processing. A missing file starts with an empty table.
+The snapshot contains envelope addresses and peer IPs and is owner-readable.
+An abrupt termination loses changes since the last orderly shutdown. Each
+server instance needs its own file; this does not coordinate multiple instances.
 
 Notice logs record policy deferrals/rejections and greylist `new`, `retry`,
 `expired` and `capacity` decisions with envelope information. They contain no

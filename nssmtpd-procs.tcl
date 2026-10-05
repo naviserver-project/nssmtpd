@@ -547,10 +547,90 @@ proc smtpd::greylistinit {} {
     }
     ns_mutex eval [nsv_get smtpd-greylist mutex] {
         nsv_set smtpd-greylist config $config
-        nsv_set smtpd-greylist sweep 0
-        nsv_array reset smtpd-greylist-entries {}
+        if {![nsv_exists smtpd-greylist initialized]} {
+            nsv_set smtpd-greylist sweep 0
+            nsv_array reset smtpd-greylist-entries {}
+            nsv_set smtpd-greylist initialized 1
+        }
     }
 }
+
+# Snapshots are Tcl data, never scripts. Keep the stored timestamps so a restart
+# neither restarts a pending delay nor extends an already granted lifetime.
+proc smtpd::GreylistRestore {file} {
+    smtpd::greylistinit
+    if {![file exists $file]} {return}
+    try {
+        set channel [open $file r]
+        try {
+            fconfigure $channel -encoding utf-8 -translation lf
+            set snapshot [read $channel 16777217]
+        } finally {close $channel}
+        if {[string length $snapshot] > 16777216} {::error "snapshot exceeds 16 MiB"}
+        if {[dict get $snapshot version] != 1} {::error "unsupported snapshot version"}
+        set entries [dict get $snapshot entries]
+        set now [clock seconds]
+        set restored {}
+        set limit [dict get [nsv_get smtpd-greylist config] maxentries]
+        dict for {key record} $entries {
+            if {[llength $key] != 3 || [llength $record] != 3} {::error "invalid greylist entry"}
+            lassign $record first expires passed
+            if {![string is wideinteger -strict $first] || $first < 0
+                || ![string is wideinteger -strict $expires] || $expires <= $first
+                || $passed ni {0 1}} {::error "invalid greylist timestamps or state"}
+            if {$first <= $now && $now < $expires && [dict size $restored] < $limit} {
+                dict set restored $key $record
+            }
+        }
+        ns_mutex eval [nsv_get smtpd-greylist mutex] {
+            nsv_array reset smtpd-greylist-entries $restored
+            nsv_set smtpd-greylist sweep 0
+        }
+        ns_log Notice "smtpd greylist: restored [dict size $restored] entries from $file"
+    } on error {message options} {
+        ns_log Warning "smtpd greylist: cannot restore $file: $message"
+    }
+}
+
+proc smtpd::GreylistSave {file} {
+    set temporary ""
+    try {
+        set now [clock seconds]
+        ns_mutex eval [nsv_get smtpd-greylist mutex] {
+            set entries {}
+            foreach {key record} [nsv_array get smtpd-greylist-entries] {
+                lassign $record first expires passed
+                if {$first <= $now && $now < $expires} {dict set entries $key $record}
+            }
+        }
+        # The temporary file is in the same directory for atomic replacement.
+        # Tcl's tempfile creates it with permissions restricted to its owner.
+        set channel [file tempfile temporary $file.tmp]
+        try {
+            fconfigure $channel -encoding utf-8 -translation lf
+            puts $channel [dict create version 1 entries $entries]
+        } finally {close $channel}
+        file rename -force $temporary $file
+        set temporary ""
+        ns_log Notice "smtpd greylist: saved [dict size $entries] entries to $file"
+    } on error {message options} {
+        ns_log Warning "smtpd greylist: cannot save $file: $message"
+    } finally {
+        if {$temporary ne ""} {file delete -force $temporary}
+    }
+}
+
+# Register before startup, while the server's Tcl library is initialized.
+# initproc runs at startup; greylistinit must preserve the restored table.
+set smtpdGreylistSection ns/server/[ns_info server]/module/nssmtpd
+if {[ns_config $smtpdGreylistSection recipientpolicyproc ""] ne ""} {
+    ns_runonce {
+        set file [ns_config ns/server/[ns_info server]/module/nssmtpd greylistfile]
+        ns_atprestartup smtpd::GreylistRestore $file
+        ns_atshutdown smtpd::GreylistSave $file
+    }
+}
+unset smtpdGreylistSection
 
 proc smtpd::greylist {context} {
     set path ns/server/[ns_info server]/module/nssmtpd

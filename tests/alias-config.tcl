@@ -2,6 +2,15 @@
 # Isolated configuration: no external relay, database, or fixed ports.
 set root $::env(ALIAS_TEST_ROOT)
 set nsroot $::env(ALIAS_TEST_NSROOT)
+file mkdir [file join $::env(ALIAS_TEST_HOME) logs]
+if {$::env(ALIAS_TEST_MODE) eq "greyexternal"} {
+    set now [clock seconds]
+    set key {192.0.2.42 saved@example.test one@example.test}
+    set f [open [file join $::env(ALIAS_TEST_HOME) logs greylist.state] w]
+    try {
+        puts $f [dict create version 1 startupfixture true entries [dict create $key [list [expr {$now-600}] [expr {$now+3600}] 1]]]
+    } finally {close $f}
+}
 ns_section ns/parameters {
     ns_param home $::env(ALIAS_TEST_HOME)
     ns_param tcllibrary [file join $nsroot tcl]
@@ -98,6 +107,11 @@ ns_section ns/server/test/module/nssmtpd {
         ns_param rejectunknownrecipients true
     } elseif {$::env(ALIAS_TEST_MODE) eq "policyempty"} {
         ns_param rejectunknownrecipients false
+    }
+    if {$::env(ALIAS_TEST_MODE) eq "greyexternal"} {
+        ns_param greylistfile greylist.state
+    } elseif {$::env(ALIAS_TEST_MODE) eq "greytrusted"} {
+        ns_param greylistfile ""
     }
     if {[string match grey* $::env(ALIAS_TEST_MODE)]} {
         ns_param rejectunknownrecipients true
