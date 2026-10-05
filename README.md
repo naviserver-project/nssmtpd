@@ -1106,3 +1106,17 @@ or line deadline. `readtimeout` retains its existing configuration and default.
 No private driver socket fields or new NaviServer socket accessors are required.
 The test suite includes silent peers, EOF, truncated greetings, EOF after HELO,
 and successful delivery after a delayed greeting, using `ns_connchan` fixtures.
+
+HTML link diagnostics are also included in `authdetailsproc` Details. They flag
+hostname link text that differs from the actual URL host, and URL-valued query
+parameters pointing to another host. These are informational indicators, not
+spam verdicts: legitimate tracking links can produce the same findings. No links
+are fetched and only hostnames are logged, not URL paths or recipient-bearing
+queries. At most one example of each indicator is retained per message.
+
+Link inspection requires Tcllib `mime` and NaviServer HTML/URL parsing commands.
+It decodes quoted-printable/base64 HTML, including multipart messages. Messages
+over 256 KiB are skipped; traversal is limited to 64 MIME parts and 100 anchors
+per HTML part. `link-status` reports missing dependencies, skipped messages, or
+parse errors; `link-limit` reports anchor truncation. An inspected message with
+no findings is not a guarantee that all phishing techniques were checked.

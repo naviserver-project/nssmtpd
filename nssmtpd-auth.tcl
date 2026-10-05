@@ -115,6 +115,106 @@ proc smtpd::AuthDkimDetails {signatures} {
     return $details
 }
 
+# Extract hostnames only; never resolve, fetch, or log recipient-bearing URLs.
+proc smtpd::AuthLinkHost {url} {
+    try {
+        set parts [ns_parseurl [string trim $url]]
+        # A host without proto is a protocol-relative URL. Relative paths
+        # have no host and are ignored along with non-HTTP schemes.
+        if {[dict exists $parts proto]
+            && [string tolower [dict get $parts proto]] ni {http https}} {return ""}
+        set host [string trimright [string tolower [dict get $parts host]] .]
+        if {![regexp {^[a-z0-9.-]+$} $host]} {return ""}
+        return $host
+    } on error {} {return ""}
+}
+
+proc smtpd::AuthHtmlLinks {html} {
+    set findings {}
+    set href ""
+    set label ""
+    set count 0
+    foreach item [ns_parsehtml $html] {
+        lassign $item type raw parsed
+        if {$type eq "text" && $href ne ""} {append label $raw}
+        if {$type ne "tag"} {continue}
+        set tag [string tolower [lindex $parsed 0]]
+        if {$tag eq "a"} {
+            incr count
+            if {$count > 100} {dict set findings link-limit exceeded; break}
+            set href ""
+            set label ""
+            dict for {key value} [lindex $parsed 1] {
+                if {[string equal -nocase $key href]} {set href [ns_unquotehtml $value]}
+            }
+            set host [AuthLinkHost $href]
+            if {$host eq ""} {set href ""; continue}
+            # Inspect URL-valued query parameters, independent of vendor names.
+            # Decode each value once; this is not a redirect traversal.
+            set queryStart [string first ? $href]
+            if {$queryStart >= 0} {
+                set query [lindex [split [string range $href $queryStart+1 end] #] 0]
+                foreach field [lrange [split $query &] 0 31] {
+                    set equals [string first = $field]
+                    if {$equals < 0} {continue}
+                    try {
+                        set target [AuthLinkHost [ns_urldecode [string range $field $equals+1 end]]]
+                        if {$target ne "" && $target ne $host} {
+                            dict set findings link-embedded-redirect [list $host $target]
+                        }
+                    } on error {} {continue}
+                }
+            }
+        } elseif {$tag eq "/a" && $href ne ""} {
+            set label [string trim [ns_unquotehtml $label]]
+            set shown [AuthLinkHost $label]
+            if {$shown eq "" && [regexp -nocase {^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.?$} $label]} {
+                set shown [string trimright [string tolower $label] .]
+            }
+            if {$shown ne "" && $shown ne $host} {
+                dict set findings link-host-mismatch [list $shown $host]
+            }
+            set href ""
+        }
+    }
+    return $findings
+}
+
+# Tcllib handles MIME transfer encodings and multipart boundaries. Keep this
+# optional, like the DNS diagnostics, and explicitly report missing support.
+proc smtpd::AuthLinkDetails {message} {
+    if {[string length $message] > 262144} {return {link-status message-size-limit}}
+    foreach command {ns_parsehtml ns_parseurl ns_unquotehtml ns_urldecode} {
+        if {[namespace which -command ::$command] eq ""} {return {link-status parser-unavailable}}
+    }
+    try {package require mime} on error {} {return {link-status mime-unavailable}}
+    set token ""
+    set details {link-status no-html}
+    try {
+        set token [mime::initialize -string $message]
+        set pending [list $token]
+        set count 0
+        while {[llength $pending]} {
+            incr count
+            if {$count > 64} {dict set details link-status part-limit; break}
+            set part [lindex $pending 0]
+            set pending [lrange $pending 1 end]
+            set properties [mime::getproperty $part]
+            if {[dict exists $properties parts]} {
+                lappend pending {*}[dict get $properties parts]
+            } elseif {[string equal -nocase [dict get $properties content] text/html]} {
+                dict set details link-status inspected
+                set details [dict merge $details [AuthHtmlLinks [mime::getbody $part]]]
+            }
+        }
+    } on error {} {
+        dict set details link-status parse-error
+    } finally {
+        if {$token ne ""} {mime::finalize $token -subordinates all}
+    }
+    return $details
+}
+
 # authdetailsproc callback: inspect the actual socket peer, never Received
 # headers supplied by a sender. Replayed mail therefore describes the relay.
 proc smtpd::authdetails {id} {
@@ -138,6 +238,7 @@ proc smtpd::authdetails {id} {
         }
         set details [dict merge $details [AuthDkimDetails [ns_smtpd gethdrs $id DKIM-Signature]]]
     }
+    set details [dict merge $details [AuthLinkDetails [lindex [ns_smtpd getbody $id] 0]]]
     smtpd::logevent $id authentication $details
 }
 
