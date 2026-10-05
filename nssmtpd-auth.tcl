@@ -28,7 +28,7 @@ proc smtpd::AuthDkimDetails {signatures} {
     }
     # Bound DNS work for untrusted headers: eight signatures, five seconds
     # shared across all key lookups. Presence of a key is not verification.
-    set deadline [expr {[clock milliseconds] + 5000}]
+    set deadline [ns_time incr [ns_time get] 5]
     set cache {}
     set index 0
     foreach signature [lrange $signatures 0 7] {
@@ -60,14 +60,15 @@ proc smtpd::AuthDkimDetails {signatures} {
             dict set details $prefix-key [dict get $cache $name]
             continue
         }
+        set remaining [ns_time diff $deadline [ns_time get]]
         set status lookup-error
         if {[namespace which -command ::ns_dns] eq ""} {
             set status dns-unavailable
-        } elseif {[clock milliseconds] >= $deadline} {
+        } elseif {[ns_time format $remaining] <= 0} {
             set status lookup-timeout
         } else {
             try {
-                set response [AuthDns $name [expr {($deadline - [clock milliseconds]) / 1000.0}]]
+                set response [AuthDns $name $remaining]
                 set rcode [dict get $response rcode]
                 if {[dict get $response truncated]} {
                     set status truncated-response

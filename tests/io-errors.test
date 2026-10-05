@@ -35,8 +35,8 @@ proc io_send {mode} {
 
 test smtp-io-timeout {silent peer reports greeting timeout with destination} -body {
     lassign [io_send silent] failed result code elapsed port
-    list $failed $code [string match "*greeting*127.0.0.1:$port*timeout after 3 seconds*" $result] \
-        [expr {$elapsed >= 2500 && $elapsed < 8000}]
+    list $failed $code [string match "*greeting*127.0.0.1:$port*timeout after 1.5 seconds*" $result] \
+        [expr {$elapsed >= 1300 && $elapsed < 8000}]
 } -result {1 {NSSMTPD READ TIMEOUT} 1 1}
 
 test smtp-io-eof {EOF is not reported as stale EAGAIN} -body {
@@ -66,8 +66,8 @@ test smtp-io-long-reply {overlong upstream reply fails rather than parsing fragm
 
 test smtp-io-write-timeout {stalled DATA receiver produces bounded write timeout, not EAGAIN} -body {
     lassign [io_send write-timeout] failed result code elapsed
-    list $failed [string match {*I/O error during *timeout after 3 seconds*} $result] \
-        [expr {$elapsed >= 2500 && $elapsed < 10000}]
+    list $failed [string match {*I/O error during *timeout after 1.5 seconds*} $result] \
+        [expr {$elapsed >= 1300 && $elapsed < 10000}]
 } -result {1 1 1}
 
 # Run the listener and log-filter callbacks in NaviServer interpreters.
@@ -231,7 +231,7 @@ test smtp-incoming-timeout {idle timeout is identified and logged at Notice} -bo
     set channel [io_open]
     try {
         gets $channel
-        lassign [io_find_log {*timeout after 3 seconds*}] severity message
+        lassign [io_find_log {*timeout after 1.5 seconds*}] severity message
         list [eof $channel] $severity [string match {*read during command/reply*} $message]
     } finally {close $channel}
 } -result {1 Notice 1}

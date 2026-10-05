@@ -1166,3 +1166,8 @@ representation suitable for signature verification or reserializing received mai
 empty values in named lookups. Forwarding uses the original wire data, not a
 serialization of the parsed set. NaviServer 4.99 remains a compilation target;
 the new case-insensitive Tcl interface and diagnostic features target 5+.
+
+SMTP `readtimeout` and `writetimeout` accept NaviServer time values such as
+`500ms`, `1.5s`, or `1m`; both default to `60s`. Unitless values remain seconds.
+The optional `segvtimeout` uses the same syntax, retaining its default `-1`
+(no delay before termination).

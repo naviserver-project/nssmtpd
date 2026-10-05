@@ -66,6 +66,7 @@ test auth-unsigned {absence of a signature requires no DNS lookup} -body {
 
 proc auth_test_interp {} {
     interp create authTest
+    interp alias authTest ns_time {} ns_time
     authTest eval [list source [file join $::env(ALIAS_TEST_ROOT) nssmtpd-auth.tcl]]
     authTest eval {
         set enabled 1

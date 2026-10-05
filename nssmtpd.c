@@ -172,8 +172,8 @@ typedef struct _smtpdConfig {
     int maxline;
     int maxdata;
     int maxrcpt;
-    int readtimeout;
-    int writetimeout;
+    Ns_Time readtimeout;
+    Ns_Time writetimeout;
     char *relayhost;
     char *relayuser;
     char *relaypassword;
@@ -541,7 +541,7 @@ NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 // Free list of connection structures
 static smtpdConn *connList = NULL;
 static Ns_Mutex connLock;
-static int segvTimeout;
+static Ns_Time segvTimeout;
 static const char hex[] = "0123456789ABCDEF";
 
 // Static DNS stuff
@@ -829,12 +829,10 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     if (!Ns_ConfigGetInt(section, "debug", &serverPtr->debug)) {
         serverPtr->debug = 1;
     }
-    if (!Ns_ConfigGetInt(section, "readtimeout", &serverPtr->readtimeout)) {
-        serverPtr->readtimeout = 60;
-    }
-    if (!Ns_ConfigGetInt(section, "writetimeout", &serverPtr->writetimeout)) {
-        serverPtr->writetimeout = 60;
-    }
+    Ns_ConfigTimeUnitRange(section, "readtimeout", "60s", 0, 0, INT_MAX, 0,
+                           &serverPtr->readtimeout);
+    Ns_ConfigTimeUnitRange(section, "writetimeout", "60s", 0, 0, INT_MAX, 0,
+                           &serverPtr->writetimeout);
     if (!Ns_ConfigGetInt(section, "bufsize", &bufsize)) {
         serverPtr->bufsize = 1024 * 4;
     } else {
@@ -1018,12 +1016,17 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     /* Segv/panic handler */
     if ((serverPtr->flags & SMTPD_SEGV) != 0u) {
-        if (!Ns_ConfigGetInt(section, "segvtimeout", &segvTimeout)) {
-            segvTimeout = -1;
-        }
+        Tcl_DString ds;
+
+        Ns_ConfigTimeUnitRange(section, "segvtimeout", "-1", -1, 0, INT_MAX, 0,
+                               &segvTimeout);
         ns_signal(SIGSEGV, SmtpdSegv);
         Tcl_SetPanicProc(SmtpdPanic);
-        Ns_Log(Notice, "nssmtpd: SEGV and Panic trapping is activated for %d seconds", segvTimeout);
+        Tcl_DStringInit(&ds);
+        Ns_DStringAppendTime(&ds, &segvTimeout);
+        Ns_Log(Notice, "nssmtpd: SEGV and Panic trapping is activated for %.*s seconds",
+               (int)ds.length, ds.string);
+        Tcl_DStringFree(&ds);
     }
 #ifdef USE_SAVI
     {
@@ -1127,25 +1130,29 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 static void SmtpdPanic(const char *fmt, ...)
 {
     va_list ap;
-    time_t now = time(0);
+    struct timespec delay = {segvTimeout.sec, segvTimeout.usec * 1000L};
 
     va_start(ap, fmt);
     Ns_Log(Error, "nssmtpd:[%d]: panic: %s %p %p %p",
            getpid(), fmt, va_arg(ap, void *), va_arg(ap, void *), va_arg(ap, void *));
     va_end(ap);
-    while (time(0) - now < segvTimeout) {
-        sleep(1);
+    if (delay.tv_sec >= 0) {
+        while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+            /* Resume the remaining delay after an interrupted sleep. */
+        }
     }
     kill(getpid(), SIGKILL);
 }
 
 static void SmtpdSegv(int UNUSED(sig))
 {
-    time_t now = time(0);
+    struct timespec delay = {segvTimeout.sec, segvTimeout.usec * 1000L};
 
     Ns_Log(Error, "nssmtpd: SIGSEGV received %d", getpid());
-    while (time(0) - now < segvTimeout) {
-        sleep(1);
+    if (delay.tv_sec >= 0) {
+        while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+            /* Resume the remaining delay after an interrupted sleep. */
+        }
     }
     kill(getpid(), SIGKILL);
 }
@@ -2735,7 +2742,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     Ns_Sock       sock;
     smtpdRcpt    *rcpt;
     smtpdConn    *relay;
-    Ns_Time       timeout = { conn->config->writetimeout, 0 };
+    Ns_Time       timeout = conn->config->writetimeout;
     TCL_SIZE_T    size = 0;
     int           vcount = 0;
     Ns_Conn      *nsconn = Ns_GetConn();
@@ -3459,7 +3466,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Ns_Sock       sock;
     Tcl_Obj      *data;
     smtpdConn    *conn;
-    Ns_Time       timeout = { config->writetimeout, 0 };
+    Ns_Time       timeout = config->writetimeout;
     TCL_SIZE_T    dataLength = 0;
     Tcl_DString   dataDString;
     Ns_Time       startTime;
@@ -3832,8 +3839,14 @@ SmtpdRecv(smtpdConn *conn, char *buffer, size_t length, Ns_Time *timeoutPtr, Ns_
             }
         }
         if (*rcPtr == NS_TIMEOUT) {
+            Tcl_DString ds;
+
             conn->peerFailure = NS_TRUE;
-            snprintf(conn->readError, sizeof(conn->readError), "timeout after %d seconds", conn->config->readtimeout);
+            Tcl_DStringInit(&ds);
+            Ns_DStringAppendTime(&ds, &conn->config->readtimeout);
+            snprintf(conn->readError, sizeof(conn->readError), "timeout after %.*s seconds",
+                     (int)ds.length, ds.string);
+            Tcl_DStringFree(&ds);
             return -1;
         }
         if (*rcPtr != NS_OK) {
@@ -3848,7 +3861,7 @@ SmtpdRead(smtpdConn *conn, void *vbuf, ssize_t len, Ns_ReturnCode *rcPtr)
 {
     ssize_t nread, n;
     char *buf = (char *) vbuf;
-    Ns_Time timeout = { conn->config->readtimeout, 0 };
+    Ns_Time timeout = conn->config->readtimeout;
 
     Ns_Log(SmtpdDebug,"SmtpdRead");
 
@@ -3905,8 +3918,14 @@ SmtpdWriteWait(smtpdConn *conn, unsigned int direction, const Ns_Time *deadline)
         break;
     }
     if (conn->ioStatus == NS_TIMEOUT) {
+        Tcl_DString ds;
+
         conn->peerFailure = NS_TRUE;
-        snprintf(conn->writeError, sizeof(conn->writeError), "timeout after %d seconds", conn->config->writetimeout);
+        Tcl_DStringInit(&ds);
+        Ns_DStringAppendTime(&ds, &conn->config->writetimeout);
+        snprintf(conn->writeError, sizeof(conn->writeError), "timeout after %.*s seconds",
+                 (int)ds.length, ds.string);
+        Tcl_DStringFree(&ds);
     } else if (conn->ioStatus != NS_OK) {
         snprintf(conn->writeError, sizeof(conn->writeError), "socket wait failed: %s", strerror(socketError));
     }
@@ -3927,7 +3946,7 @@ static ssize_t SmtpdUnixSend(smtpdConn *conn, const char *buffer, size_t length)
     conn->writeError[0] = '\0';
     conn->ioStatus = NS_OK;
     Ns_GetTime(&deadline);
-    Ns_IncrTime(&deadline, conn->config->writetimeout, 0);
+    Ns_IncrTime(&deadline, conn->config->writetimeout.sec, conn->config->writetimeout.usec);
 
     if (sock->arg == NULL) {
         const char *buf = buffer;
@@ -4991,7 +5010,7 @@ static int SmtpdCheckSpam(smtpdConn *conn)
     Ns_Sock sock;
     smtpdRcpt *rcpt;
     smtpdConn *spamd;
-    Ns_Time timeout = { conn->config->writetimeout, 0 };
+    Ns_Time timeout = conn->config->writetimeout;
 
     if (conn->config->spamdhost == NULL) {
         return 0;

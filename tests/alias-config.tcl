@@ -71,8 +71,8 @@ ns_section ns/server/test/module/nssmtpd {
     }
     ns_param address 127.0.0.1
     ns_param port $::env(ALIAS_TEST_PORT)
-    ns_param readtimeout 3
-    ns_param writetimeout 3
+    ns_param readtimeout [expr {$::env(ALIAS_TEST_MODE) eq "io" ? "1500ms" : "3"}]
+    ns_param writetimeout [expr {$::env(ALIAS_TEST_MODE) eq "io" ? "1.5s" : "3"}]
     ns_param maxrcpt 3
     ns_param relaydomains example.test
     ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]

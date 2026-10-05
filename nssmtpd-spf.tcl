@@ -7,9 +7,9 @@ proc smtpd::SpfError {result message} {
 }
 
 proc smtpd::SpfRemaining {deadline} {
-    set ms [expr {$deadline - [clock milliseconds]}]
-    if {$ms <= 0} {SpfError temperror "SPF evaluation deadline exceeded"}
-    return [expr {$ms / 1000.0}]
+    set remaining [ns_time diff $deadline [ns_time get]]
+    if {[ns_time format $remaining] <= 0} {SpfError temperror "SPF evaluation deadline exceeded"}
+    return $remaining
 }
 
 proc smtpd::SpfName {name} {
@@ -71,7 +71,7 @@ proc smtpd::SpfCheck {ip sender helo timeout} {
     set domain [SpfName $origin]
     if {![SpfDomainValid $domain]} {return none}
     set ctx [dict create ip $ip family $family sender $sender local $local origin $origin helo $helo \
-                 deadline [expr {[clock milliseconds]+wide($timeout*1000)}] terms 0 voids 0 active {}]
+                 deadline [ns_time incr [ns_time get] [ns_time seconds $timeout] [ns_time microseconds $timeout]] terms 0 voids 0 active {}]
     try {
         return [SpfEvaluate ctx $domain]
     } trap {NSSMTPD SPF RESULT} {message options} {
