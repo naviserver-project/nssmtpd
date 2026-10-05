@@ -190,19 +190,30 @@ test auth-link-anchor-limit {HTML link scanning is bounded} -constraints html_pa
     smtpd::AuthHtmlLinks [string repeat {<a href="https://example.org/">Help</a>} 101]
 } -result {link-limit exceeded}
 
-test auth-header-protection {all signatures and existing header names protect additions} -body {
+proc auth_header_fields {details fields} {
+    set received [ns_set create -nocase received {*}$fields]
+    try {
+        set headers [smtpd::AuthLinkHeaders $details $received]
+        try {return [ns_set array $headers]} finally {ns_set free $headers}
+    } finally {ns_set free $received}
+}
+
+test auth-header-protection {duplicate DKIM signatures, ARC and existing empty fields protect additions} -body {
     set details {link-host-mismatch {example.org evil.test} link-embedded-redirect {evil.test other.test}}
-    smtpd::AuthLinkHeaders $details \
-        {{v=1; h=From:NSsmtpd-Link-Host-Mismatch} {i=1; h=Subject:Nssmtpd-Link-Findings}} \
-        {Nssmtpd-Link-Embedded-Redirect}
+    auth_header_fields $details {
+        DKIM-Signature {v=1; h=From}
+        dkim-signature {v=1; h=From:NSsmtpd-Link-Host-Mismatch}
+        ARC-Message-Signature {i=1; h=Subject:Nssmtpd-Link-Findings}
+        Nssmtpd-Link-Embedded-Redirect {}
+    }
 } -result {}
 
 test auth-header-malformed {an unparseable signature suppresses all diagnostic additions} -body {
-    smtpd::AuthLinkHeaders {link-host-mismatch {example.org evil.test}} {{v=1; broken}} {}
+    auth_header_fields {link-host-mismatch {example.org evil.test}} {DKIM-Signature {v=1; broken}}
 } -result {}
 
 test auth-header-clean {absence of findings adds no header or implicit clean verdict} -body {
-    smtpd::AuthLinkHeaders {link-status inspected} {} {}
+    auth_header_fields {link-status inspected} {}
 } -result {}
 
 # Local variables:

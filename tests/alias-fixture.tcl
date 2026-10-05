@@ -8,9 +8,20 @@ proc header_test_auth {id} {
     source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
     if {[nsv_exists alias-test header-error]} {error "diagnostics unavailable"}
     if {[nsv_exists alias-test header-invalid]} {
-        return [dict create Nssmtpd-Link-Findings "bad\r\nInjected: yes"]
+        return [ns_set create -nocase diagnostics Nssmtpd-Link-Findings "bad\r\nInjected: yes"]
     }
+    nsv_set alias-test header-all [ns_smtpd gethdrs $id]
+    set copy [ns_smtpd headers $id]
+    try {
+        set values [ns_smtpd gethdrs $id x-duplicate]
+        set first [ns_smtpd gethdr $id X-DUPLICATE]
+        set present [expr {[ns_set find $copy x-empty] >= 0}]
+        ns_set put $copy X-Duplicate detached
+        nsv_set alias-test header-accessors [list $values $first $present \
+            [ns_smtpd gethdrs $id X-Duplicate]]
+    } finally {ns_set free $copy}
     set result [smtpd::authdetails $id]
+
     return $result
 }
 

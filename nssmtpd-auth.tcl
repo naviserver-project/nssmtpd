@@ -221,33 +221,45 @@ proc smtpd::AuthLinkDetails {message} {
 # Conservatively omit every proposed field mentioned in any signature's h=,
 # including oversigned (not yet present) fields. Malformed signatures suppress
 # all additions rather than guessing what they protect.
-proc smtpd::AuthLinkHeaders {details signatures existing} {
-    set protected [lmap name $existing {string tolower $name}]
-    foreach signature $signatures {
-        try {
-            set tags [AuthTags $signature]
-            foreach name [split [dict get $tags h] :] {
-                lappend protected [string tolower [string trim $name]]
+proc smtpd::AuthLinkHeaders {details received} {
+    set protected [ns_set copy $received]
+    set headers [ns_set create -nocase diagnostics]
+    try {
+        foreach {name signature} [ns_set array $received] {
+            switch -nocase -- $name {
+                DKIM-Signature -
+                ARC-Message-Signature {}
+                default {continue}
             }
-        } on error {} {return {}}
-    }
-    set headers {}
-    set findings {}
-    foreach {key name reason} {
-        link-host-mismatch Nssmtpd-Link-Host-Mismatch host-mismatch
-        link-embedded-redirect Nssmtpd-Link-Embedded-Redirect embedded-redirect
-    } {
-        if {[dict exists $details $key]} {
-            lappend findings $reason
-            if {[string tolower $name] ni $protected} {
-                dict set headers $name [join [dict get $details $key] { -> }]
+            try {
+                set tags [AuthTags $signature]
+                foreach name [split [dict get $tags h] :] {
+                    ns_set put $protected [string trim $name] {}
+                }
+            } on error {} {return $headers}
+        }
+        set findings {}
+        foreach {key name reason} {
+            link-host-mismatch Nssmtpd-Link-Host-Mismatch host-mismatch
+            link-embedded-redirect Nssmtpd-Link-Embedded-Redirect embedded-redirect
+        } {
+            if {[dict exists $details $key]} {
+                lappend findings $reason
+                if {[ns_set find $protected $name] < 0} {
+                    ns_set put $headers $name [join [dict get $details $key] { -> }]
+                }
             }
         }
+        if {$findings ne "" && [ns_set find $protected Nssmtpd-Link-Findings] < 0} {
+            ns_set put $headers Nssmtpd-Link-Findings [join $findings {, }]
+        }
+        return $headers
+    } on error {message options} {
+        ns_set free $headers
+        return -options $options $message
+    } finally {
+        ns_set free $protected
     }
-    if {$findings ne "" && "nssmtpd-link-findings" ni $protected} {
-        dict set headers Nssmtpd-Link-Findings [join $findings {, }]
-    }
-    return $headers
 }
 
 # authdetailsproc callback: inspect the actual socket peer, never Received
@@ -278,12 +290,7 @@ proc smtpd::authdetails {id} {
     set details [dict merge $details [AuthLinkDetails [lindex [ns_smtpd getbody $id] 0]]]
     smtpd::logevent $id authentication $details
     if {$addheaders} {
-        set existing {}
-        foreach name {Nssmtpd-Link-Findings Nssmtpd-Link-Host-Mismatch Nssmtpd-Link-Embedded-Redirect} {
-            if {[llength [ns_smtpd gethdrs $id $name]]} {lappend existing $name}
-        }
-        return [AuthLinkHeaders $details \
-            [concat [ns_smtpd gethdrs $id DKIM-Signature] [ns_smtpd gethdrs $id ARC-Message-Signature]] $existing]
+        return [AuthLinkHeaders $details [ns_smtpd headers $id]]
     }
     return {}
 }

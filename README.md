@@ -245,7 +245,7 @@ The default streaming relay path is unchanged. This option adds headers only
 to the built-in relay path; custom delivery callbacks remain responsible for
 their own output.
 
-When findings exist, the callback returns a dictionary containing these fields:
+When findings exist, the callback returns a dynamic `ns_set` containing these fields:
 `Nssmtpd-Link-Findings`, `Nssmtpd-Link-Host-Mismatch`, and
 `Nssmtpd-Link-Embedded-Redirect`. The relay accepts only these names and bounded
 ASCII values without control characters. These are informational custom
@@ -257,8 +257,9 @@ Malformed signature tags suppress all additions. Existing diagnostic fields
 are neither replaced nor duplicated; received fields remain untrusted and must
 not be interpreted as verified findings from this receiver. No Subject or body
 rewriting, signature verification, or Authentication-Results header is added.
-Custom callbacks returning header dictionaries must provide equivalent
-signature protection. With this option off, callback return values are ignored.
+Custom callbacks returning header sets must provide equivalent
+signature protection. Ownership of a returned set transfers to nssmtpd, which frees it after use.
+An empty string means no additional headers.
 
 The optional event log records incoming recipient decisions, applied alias
 expansions, greylisting outcomes, and custom policy events. It is separate from
@@ -1151,3 +1152,17 @@ over 256 KiB are skipped; traversal is limited to 64 MIME parts and 100 anchors
 per HTML part. `link-status` reports missing dependencies, skipped messages, or
 parse errors; `link-limit` reports anchor truncation. An inspected message with
 no findings is not a guarantee that all phishing techniques were checked.
+
+### Parsed header sets (NaviServer 5+)
+
+`ns_smtpd headers $id` returns a detached, case-insensitive `ns_set` in parsing
+order, retaining duplicate fields and empty values. NaviServer reclaims this
+temporary set when the SMTP connection ends (which may span multiple mail
+transactions). Changes to this copy do not affect the SMTP transaction.
+The parsed view retains the existing address normalization; it is not a raw
+representation suitable for signature verification or reserializing received mail.
+
+`gethdr` and `gethdrs` keep their existing reverse parsing order and filtering of
+empty values in named lookups. Forwarding uses the original wire data, not a
+serialization of the parsed set. NaviServer 4.99 remains a compilation target;
+the new case-insensitive Tcl interface and diagnostic features target 5+.

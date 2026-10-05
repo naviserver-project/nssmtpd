@@ -279,7 +279,7 @@ typedef struct _smtpdConn {
     struct {
         size_t offset;
         Tcl_DString data;
-        smtpdHdr *headers;
+        Ns_Set *headers;
     } body;
     struct {
         ssize_t pos;
@@ -2230,13 +2230,8 @@ SmtpdConnReset(smtpdConn *conn)
     Tcl_DStringSetLength(&conn->reply, 0);
     Tcl_DStringSetLength(&conn->body.data, 0);
 
-    while (conn->body.headers) {
-        smtpdHdr *next = conn->body.headers->next;
-        ns_free(conn->body.headers->name);
-        ns_free(conn->body.headers->value);
-        ns_free(conn->body.headers);
-        conn->body.headers = next;
-    }
+    Ns_SetFree(conn->body.headers);
+    conn->body.headers = NULL;
     conn->body.offset = 0;
 
     while (conn->rcpt.list) {
@@ -2653,7 +2648,7 @@ SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, const char *user, const
  * SmtpdAuthDetails --
  *
  *      Run informational diagnostics once. In buffered relay mode, accept
- *      a bounded dictionary of diagnostic headers from the callback.
+ *      a transferred set of diagnostic headers from the callback.
  *
  * Results:
  *      None. Callback errors leave delivery unaffected.
@@ -2670,27 +2665,46 @@ SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers)
         conn->authDetailsDone = NS_TRUE;
         if (conn->config->authdetailsproc != NULL && *conn->config->authdetailsproc != '\0'
             && SmtpdConnEval(conn, conn->config->authdetailsproc) == TCL_OK
-            && headers != NULL) {
-            Tcl_Obj *result = Tcl_GetObjResult(conn->interp), *key, *value;
-            Tcl_DictSearch search;
-            TCL_SIZE_T count;
-            int done;
+            && conn->config->authdetailheaders) {
+            Tcl_Obj *result = Tcl_GetObjResult(conn->interp);
+            const char *setId = Tcl_GetString(result);
+            Ns_Set *set;
+            size_t index;
 
-            if (Tcl_DictObjSize(NULL, result, &count) != TCL_OK || count > 3) {
-                Ns_Log(Warning, "nssmtpd: invalid diagnostic header dictionary; omitted");
+            if (*setId == '\0') {
                 return;
             }
-            Tcl_DictObjFirst(NULL, result, &search, &key, &value, &done);
-            for (; !done; Tcl_DictObjNext(&search, &key, &value, &done)) {
-                const char *name = Tcl_GetString(key), *text;
+            Tcl_IncrRefCount(result);
+            set = Ns_TclGetSet(conn->interp, setId);
+            if (set == NULL || Ns_SetSize(set) > 3) {
+                Ns_Log(Warning, "nssmtpd: invalid diagnostic header set; omitted");
+                if (set != NULL) {
+                    (void)Ns_TclFreeSet(conn->interp, setId);
+                }
+                Tcl_DecrRefCount(result);
+                return;
+            }
+            for (index = 0; index < Ns_SetSize(set); index++) {
+
+                const char *name = Ns_SetKey(set, index), *text;
                 TCL_SIZE_T length, i;
                 bool valid = NS_TRUE;
 
-                text = Tcl_GetStringFromObj(value, &length);
-                if ((strcmp(name, "Nssmtpd-Link-Findings") != 0
-                     && strcmp(name, "Nssmtpd-Link-Host-Mismatch") != 0
-                     && strcmp(name, "Nssmtpd-Link-Embedded-Redirect") != 0)
-                    || length > 700) {
+                text = Ns_SetValue(set, index);
+                if (text == NULL) {
+                    text = "";
+                }
+                length = (TCL_SIZE_T)strlen(text);
+                if (strcasecmp(name, "Nssmtpd-Link-Findings") == 0) {
+                    name = "Nssmtpd-Link-Findings";
+                } else if (strcasecmp(name, "Nssmtpd-Link-Host-Mismatch") == 0) {
+                    name = "Nssmtpd-Link-Host-Mismatch";
+                } else if (strcasecmp(name, "Nssmtpd-Link-Embedded-Redirect") == 0) {
+                    name = "Nssmtpd-Link-Embedded-Redirect";
+                } else {
+                    valid = NS_FALSE;
+                }
+                if (length > 700) {
                     valid = NS_FALSE;
                 }
                 for (i = 0; valid && i < length; i++) {
@@ -2699,13 +2713,18 @@ SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers)
                     }
                 }
                 if (!valid) {
-                    Tcl_DStringSetLength(headers, 0);
+                    if (headers != NULL) {
+                        Tcl_DStringSetLength(headers, 0);
+                    }
                     Ns_Log(Warning, "nssmtpd: invalid diagnostic header field; omitted");
                     break;
                 }
-                Ns_DStringPrintf(headers, "%s: %s\r\n", name, text);
+                if (headers != NULL) {
+                    Ns_DStringPrintf(headers, "%s: %s\r\n", name, text);
+                }
             }
-            Tcl_DictObjDone(&search);
+            (void)Ns_TclFreeSet(conn->interp, setId);
+            Tcl_DecrRefCount(result);
         }
     }
 }
@@ -4399,12 +4418,27 @@ static char *SmtpdStrTrim(char *str)
     return str;
 }
 
+/* Parsed fields retain spelling and arrival order for the legacy accessors.
+ * The detached Tcl view uses NaviServer's lowercase, case-insensitive sets. */
+
+static Ns_Set *
+SmtpdHeaderSet(smtpdConn *conn)
+{
+    if (conn->body.headers == NULL) {
+        conn->body.headers = Ns_SetCreate("smtp headers");
+    }
+    return conn->body.headers;
+}
+
 static const char *SmtpdGetHeader(smtpdConn *conn, const char *name)
 {
-    smtpdHdr *hdr;
-    for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
-        if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
-            return hdr->value;
+    Ns_Set *set = SmtpdHeaderSet(conn);
+    size_t i;
+
+    for (i = Ns_SetSize(set); i > 0; ) {
+        const char *value = Ns_SetValue(set, --i);
+        if (strcasecmp(name, Ns_SetKey(set, i)) == 0 && value != NULL && *value != '\0') {
+            return value;
         }
     }
     return "";
@@ -4413,11 +4447,10 @@ static const char *SmtpdGetHeader(smtpdConn *conn, const char *name)
 #if defined(USE_DSPAM) || defined (USE_SAVI) || defined(USE_CLAMAV)
 static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int alloc)
 {
-    smtpdHdr *hdr = ns_calloc(1, sizeof(smtpdHdr));
-    hdr->name = ns_strdup(name);
-    hdr->value = alloc ? ns_strdup(value) : value;
-    hdr->next = conn->body.headers;
-    conn->body.headers = hdr;
+    Ns_SetPut(SmtpdHeaderSet(conn), name, value);
+    if (!alloc) {
+        ns_free(value);
+    }
 }
 #endif
 
@@ -4428,7 +4461,7 @@ static void SmtpdConnAddHeader(smtpdConn *conn, char *name, char *value, int all
 static void SmtpdConnParseData(smtpdConn *conn)
 {
     size_t       size, len;
-    smtpdHdr    *header = NULL, *boundary = NULL, *fileHdr;
+    smtpdHdr    *header = NULL, *boundary = NULL, *fileHdr, *part;
     char        *body, *end, *line, *hdr, *ptr;
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
     unsigned int encodingSize, contentSize;
@@ -4463,8 +4496,6 @@ static void SmtpdConnParseData(smtpdConn *conn)
             break;
         // Create new SMTP header
         header = ns_calloc(1, sizeof(smtpdHdr));
-        header->next = conn->body.headers;
-        conn->body.headers = header;
         header->name = ns_calloc(1, (unsigned) (line - hdr) + 1);
         memcpy(header->name, hdr, (unsigned) (line - hdr));
         while (line < end && (*line == ':' || *line == ' ' || *line == '\t')) {
@@ -4490,12 +4521,12 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 if ((ptr = SmtpdStrPos(header->value, "boundary="))) {
                     for (ptr += 9; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
-                    header = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
-                    header->name = (char *) ns_calloc(1, (unsigned) (line - ptr) + 3);
-                    memcpy(header->name, "--", 2);
-                    memcpy(header->name + 2, ptr, (unsigned) (line - ptr));
-                    header->next = boundary;
-                    boundary = header;
+                    part = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
+                    part->name = (char *) ns_calloc(1, (unsigned) (line - ptr) + 3);
+                    memcpy(part->name, "--", 2);
+                    memcpy(part->name + 2, ptr, (unsigned) (line - ptr));
+                    part->next = boundary;
+                    boundary = part;
                 }
 
             } else if (!strcasecmp(header->name, "Sender") ||
@@ -4517,7 +4548,13 @@ static void SmtpdConnParseData(smtpdConn *conn)
                 }
             }
         }
+        Ns_SetPut(SmtpdHeaderSet(conn), header->name, header->value);
+        ns_free(header->name);
+        ns_free(header->value);
+        ns_free(header);
+        header = NULL;
         // Reached end of the headers and everything is fine
+
         while (*end == '\r' || *end == '\n') {
             end++;
         }
@@ -4536,6 +4573,8 @@ static void SmtpdConnParseData(smtpdConn *conn)
     hdr = strstr(body, boundary->name);
     while (hdr) {
         char *encodingType = NULL, *contentType = NULL;
+        size_t fileIndex = 0;
+
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
         char  *filePtr = NULL;
 #endif
@@ -4582,14 +4621,14 @@ static void SmtpdConnParseData(smtpdConn *conn)
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     if (!fileHdr) {
                         fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
-                        fileHdr->next = conn->body.headers;
-                        conn->body.headers = fileHdr;
                         fileHdr->name = ns_strdup(SMTPD_HDR_FILE);
+                        fileIndex = Ns_SetPut(SmtpdHeaderSet(conn), SMTPD_HDR_FILE, NULL);
                     } else {
                         ns_free(fileHdr->value);
                     }
                     fileHdr->value = ns_calloc(1, (unsigned) (line - ptr) + 1);
                     memcpy(fileHdr->value, ptr, (unsigned) (line - ptr));
+                    Ns_SetPutValue(SmtpdHeaderSet(conn), fileIndex, fileHdr->value);
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                     filePtr = ptr;
 #endif
@@ -4620,11 +4659,11 @@ static void SmtpdConnParseData(smtpdConn *conn)
                     for (ptr += 5; *ptr == ' ' || *ptr == '"'; ptr++);
                     for (line = ptr; *line != '\0' && *line != '\n' && *line != '\r' && *line != '"'; line++);
                     fileHdr = (smtpdHdr *) ns_calloc(1, sizeof(smtpdHdr));
-                    fileHdr->next = conn->body.headers;
-                    conn->body.headers = fileHdr;
                     fileHdr->name = ns_strdup(SMTPD_HDR_FILE);
+                    fileIndex = Ns_SetPut(SmtpdHeaderSet(conn), SMTPD_HDR_FILE, NULL);
                     fileHdr->value = ns_calloc(1, (unsigned) (line - ptr) + 1);
                     memcpy(fileHdr->value, ptr, (unsigned) (line - ptr));
+                    Ns_SetPutValue(SmtpdHeaderSet(conn), fileIndex, fileHdr->value);
 #if defined(USE_CLAMAV) || defined(USE_SAVI)
                     filePtr = ptr;
 #endif
@@ -4694,6 +4733,17 @@ static void SmtpdConnParseData(smtpdConn *conn)
             // Next header
             end = strchr((hdr = end), '\n');
         }
+        if (fileHdr != NULL) {
+            ns_free(fileHdr->name);
+            ns_free(fileHdr->value);
+            ns_free(fileHdr);
+        }
+    }
+    while (boundary != NULL) {
+        header = boundary->next;
+        ns_free(boundary->name);
+        ns_free(boundary);
+        boundary = header;
     }
 }
 
@@ -5316,6 +5366,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdSpf,
         cmdSessions,
         cmdLogEvent,
+        cmdHeaders,
         cmdGetHdr,
         cmdGetHdrs,
         cmdGetBody,
@@ -5356,6 +5407,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "spf",
         "sessions",
         "logevent",
+        "headers",
         "gethdr",
         "gethdrs",
         "getbody",
@@ -6160,43 +6212,59 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         break;
     }
-    case cmdGetHdr:{
-            smtpdHdr *hdr;
-            if (objc < 4) {
-                Tcl_WrongNumArgs(interp, 2, objv, "name");
-                return TCL_ERROR;
-            }
-            name = Tcl_GetString(objv[3]);
-            for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
-                if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
-                    Tcl_SetObjResult(interp, Tcl_NewStringObj(hdr->value, -1));
-                    break;
-                }
-            }
-            break;
+    case cmdHeaders: {
+        Ns_Set *copy, *source = SmtpdHeaderSet(conn);
+        size_t i;
+        if (objc != 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "id");
+            return TCL_ERROR;
         }
+        copy = Ns_SetCreate("smtp headers");
 
-    case cmdGetHdrs:{
-            Tcl_Obj *item, *list = Tcl_NewListObj(0, 0);
-            smtpdHdr *hdr;
-            if (objc > 3) {
-                name = Tcl_GetString(objv[3]);
-            }
-            for (hdr = conn->body.headers; hdr != NULL; hdr = hdr->next) {
-                if (objc > 3) {
-                    if (!strcasecmp(name, hdr->name) && hdr->value && *hdr->value) {
-                        Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(hdr->value, -1));
-                    }
-                } else {
-                    item = Tcl_NewListObj(0, 0);
-                    Tcl_ListObjAppendElement(interp, item, Tcl_NewStringObj(hdr->name, -1));
-                    Tcl_ListObjAppendElement(interp, item, Tcl_NewStringObj(hdr->value, -1));
-                    Tcl_ListObjAppendElement(interp, list, item);
-                }
-            }
-            Tcl_SetObjResult(interp, list);
-            break;
+#if NS_VERSION_NUM >= 50000
+        copy->flags |= NS_SET_OPTION_NOCASE;
+#endif
+        for (i = 0; i < Ns_SetSize(source); i++) {
+            Ns_SetPut(copy, Ns_SetKey(source, i), Ns_SetValue(source, i));
         }
+        if (Ns_TclEnterSet(interp, copy, NS_TCL_SET_DYNAMIC) != TCL_OK) {
+            Ns_SetFree(copy);
+            return TCL_ERROR;
+        }
+        break;
+    }
+    case cmdGetHdr:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name");
+            return TCL_ERROR;
+        }
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(SmtpdGetHeader(conn, Tcl_GetString(objv[3])), -1));
+        break;
+
+    case cmdGetHdrs: {
+        Tcl_Obj *list = Tcl_NewListObj(0, NULL);
+        Ns_Set *set = SmtpdHeaderSet(conn);
+        size_t i;
+
+        if (objc > 3) {
+            name = Tcl_GetString(objv[3]);
+        }
+        for (i = Ns_SetSize(set); i > 0; ) {
+            const char *value = Ns_SetValue(set, --i), *key = Ns_SetKey(set, i);
+            if (objc > 3) {
+                if (strcasecmp(name, key) == 0 && value != NULL && *value != '\0') {
+                    Tcl_ListObjAppendElement(interp, list, Tcl_NewStringObj(value, -1));
+                }
+            } else {
+                Tcl_Obj *item = Tcl_NewListObj(0, NULL);
+                Tcl_ListObjAppendElement(interp, item, Tcl_NewStringObj(key, -1));
+                Tcl_ListObjAppendElement(interp, item, Tcl_NewStringObj(value != NULL ? value : "", -1));
+                Tcl_ListObjAppendElement(interp, list, item);
+            }
+        }
+        Tcl_SetObjResult(interp, list);
+        break;
+    }
 
     case cmdGetBody:{
             Tcl_Obj *obj = Tcl_NewListObj(0, 0);

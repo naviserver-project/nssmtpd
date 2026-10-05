@@ -69,7 +69,30 @@ test headers-size {oversized DATA is rejected without queuing partial mail} -bod
     list $code [expr {[llength [header_messages]] == $before}]
 } -result {552 1}
 
+test headers-accessors {duplicate order, empty fields, case-insensitive lookup and detached ownership} -body {
+    header_submit "X-Duplicate: first\r\nx-duplicate: second\r\nX-Empty:\r\n$original"
+    nsv_get alias-test header-accessors
+} -result {{second first} second 1 {second first}}
+
+test headers-existing-empty {an empty received diagnostic header also prevents duplication} -body {
+    header_submit "Nssmtpd-Link-Findings:\r\n$original"
+    set wire [lindex [header_messages] end 1]
+    regexp -all -line {^Nssmtpd-Link-Findings:} $wire
+} -result 1
+
+test headers-legacy-spelling {legacy enumeration preserves spelling and includes empty values} -body {
+    header_submit "X-Duplicate: first\r\nx-duplicate: second\r\nX-Empty:\r\n$original"
+    lsearch -all -inline -index 0 -regexp [nsv_get alias-test header-all] {^[Xx]-(Duplicate|duplicate|Empty)$}
+} -result {{X-Empty {}} {x-duplicate second} {X-Duplicate first}}
+
+test headers-multipart {MIME attachment names remain available in the parsed set} -body {
+    header_submit "From: sender@example.test\r\nContent-Type: multipart/mixed; boundary=test-boundary\r\n\r\n--test-boundary\r\nContent-Type: text/plain; name=example.txt\r\nContent-Disposition: attachment; filename=final.txt\r\n\r\ncontent\r\n--test-boundary--\r\n"
+    lsearch -all -inline -index 0 -exact [nsv_get alias-test header-all] X-Smtpd-File
+} -result {{X-Smtpd-File final.txt}}
+
 set failures $::tcltest::numTests(Failed)
+
+
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
 ns_shutdown
