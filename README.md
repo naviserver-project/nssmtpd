@@ -910,6 +910,16 @@ ns_param datapolicyproc {
 }
 ```
 
+Greylist decisions include `greylist-early-retries` and
+`greylist-elapsed-seconds` in their findings. The count covers early RCPT
+attempts for the same peer/sender/original-recipient tuple, not necessarily
+one message; elapsed seconds are measured from that tuple's first attempt.
+These observations do not change greylisting or automatically reject mail.
+Counts persist with the greylist state; older snapshots without counts load
+with zero. A policy chain merges a rule's returned findings into its shared
+findings. DATA policy events also record the expanded recipient list, shown
+in nsstats Details alongside policy findings.
+
 `spfpolicy` collects `spf-result` and sets `spf-fail` only for `fail`; disabled,
 unavailable, and evaluator-error results remain distinct. It always continues.
 `dkimkeypolicy` collects the existing per-signature DNS diagnostics and sets

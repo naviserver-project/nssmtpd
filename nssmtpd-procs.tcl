@@ -500,6 +500,9 @@ proc smtpd::policychain {rules context} {
                 4 {set decision {action continue}}
                 default {::error $result}
             }
+            if {[dict exists $decision findings]} {
+                set findings [dict merge $findings [dict get $decision findings]]
+            }
             set action [dict get $decision action]
             if {$action ni {continue accept defer reject}} {::error "invalid policy action"}
         } on error {message options} {
@@ -555,7 +558,7 @@ proc smtpd::checkdatapolicy {id} {
         if {[string length $message] > 400 || ![regexp {^[\x20-\x7e]+$} $message]} {
             ::error "datapolicyproc returned an invalid message"
         }
-        smtpd::logevent $id message-policy [dict merge {reason message-policy} $result [dict create code $code]]
+        smtpd::logevent $id message-policy [dict merge {reason message-policy} $result [dict create code $code recipients [dict get $context recipients]]]
         if {$action eq "accept"} {return 1}
         ns_smtpd setreply $id "$code [expr {$action eq "reject" ? "5.7.1" : "4.7.1"}] $message\r\n"
     } on error {message options} {
@@ -670,11 +673,15 @@ proc smtpd::GreylistRestore {file} {
         set restored {}
         set limit [dict get [nsv_get smtpd-greylist config] maxentries]
         dict for {key record} $entries {
-            if {[llength $key] != 3 || [llength $record] != 3} {::error "invalid greylist entry"}
-            lassign $record first expires passed
+            if {[llength $key] != 3 || [llength $record] ni {3 4}} {::error "invalid greylist entry"}
+            lassign $record first expires passed early
             if {![string is wideinteger -strict $first] || $first < 0
                 || ![string is wideinteger -strict $expires] || $expires <= $first
                 || $passed ni {0 1}} {::error "invalid greylist timestamps or state"}
+            if {$early eq ""} {set early 0}
+            if {![string is wideinteger -strict $early] || $early < 0} {
+                ::error "invalid greylist retry count"
+            }
             if {$first <= $now && $now < $expires && [dict size $restored] < $limit} {
                 dict set restored $key $record
             }
@@ -790,15 +797,21 @@ proc smtpd::GreylistCheck {key now} {
         }
         set reason new
         if {[nsv_get smtpd-greylist-entries $key record]} {
-            lassign $record first expires passed
+            lassign $record first expires passed early
+            if {$early eq ""} {set early 0}
             if {$now < $expires && $now >= $first} {
+                set findings [dict create greylist-early-retries $early \
+                                  greylist-elapsed-seconds [expr {$now - $first}]]
                 if {$passed || $now - $first >= [dict get $config delay]} {
                     nsv_set smtpd-greylist-entries $key \
-                        [list $first [expr {$now + [dict get $config lifetime]}] 1]
-                    return [dict create action accept reason [expr {$passed ? "known" : "retry"}]]
+                        [list $first [expr {$now + [dict get $config lifetime]}] 1 $early]
+                    return [dict create action accept reason [expr {$passed ? "known" : "retry"}] findings $findings]
                 }
                 # Early retries must not move the first-seen time or expiry.
-                return [dict create action defer reason early]
+                incr early
+                nsv_set smtpd-greylist-entries $key [list $first $expires $passed $early]
+                dict set findings greylist-early-retries $early
+                return [dict create action defer reason early findings $findings]
             }
             nsv_unset smtpd-greylist-entries $key
             set reason expired
@@ -809,8 +822,8 @@ proc smtpd::GreylistCheck {key now} {
             return [dict create action accept reason capacity]
         }
         nsv_set smtpd-greylist-entries $key \
-            [list $now [expr {$now + [dict get $config retrywindow]}] 0]
-        return [dict create action defer reason $reason]
+            [list $now [expr {$now + [dict get $config retrywindow]}] 0 0]
+        return [dict create action defer reason $reason findings {greylist-early-retries 0 greylist-elapsed-seconds 0}]
     }
 }
 

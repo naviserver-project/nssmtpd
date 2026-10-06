@@ -170,7 +170,28 @@ test grey-timing {early retries do not reset timer; boundary retry grants slidin
         lappend actions [dict get [smtpd::GreylistCheck tuple $now] action]
     }
     list $actions [nsv_get smtpd-greylist-entries tuple]
-} -result {{defer defer defer accept accept} {1000 606200 1}}
+} -result {{defer defer defer accept accept} {1000 606200 1 2}}
+
+test grey-retry-findings {early counts and elapsed time survive acceptance without changing the timer} -constraints config_greylisting_enabled_external_peer -setup {
+    grey_reset
+} -body {
+    set results {}
+    foreach now {1000 1010 1020 1300 1400} {
+        set decision [smtpd::GreylistCheck tuple $now]
+        lappend results [dict get $decision findings]
+    }
+    set results
+} -result {{greylist-early-retries 0 greylist-elapsed-seconds 0} {greylist-early-retries 1 greylist-elapsed-seconds 10} {greylist-early-retries 2 greylist-elapsed-seconds 20} {greylist-early-retries 2 greylist-elapsed-seconds 300} {greylist-early-retries 2 greylist-elapsed-seconds 400}}
+
+test grey-chain-findings {greylist decision findings join the shared policy findings} -constraints config_greylisting_enabled_external_peer -setup {
+    grey_reset
+} -body {
+    set result [smtpd::policychain {
+        {dict set findings earlier true; continue}
+        {smtpd::greylist $context}
+    } {peeraddr 192.0.2.1 sender sender@example.test recipient one@example.test}]
+    dict get $result findings
+} -result {earlier true greylist-early-retries 0 greylist-elapsed-seconds 0}
 
 test grey-expiry {pending window and passed lifetime expire} -constraints config_greylisting_enabled_external_peer -setup {
     grey_reset
@@ -189,7 +210,7 @@ test grey-backwards-clock {clock rollback cannot create a premature allowance} -
     smtpd::GreylistCheck tuple 1000
     smtpd::GreylistCheck tuple 1300
     list [dict get [smtpd::GreylistCheck tuple 900] action] [nsv_get smtpd-greylist-entries tuple]
-} -result {defer {900 15300 0}}
+} -result {defer {900 15300 0 0}}
 
 test grey-capacity {bounded table preserves existing entries and bypasses new tuples at capacity} -constraints config_greylisting_enabled_external_peer -setup {
     grey_reset
@@ -251,7 +272,7 @@ test grey-persistence {pending and passed entries round-trip without extending t
     set path [file join $::env(ALIAS_TEST_HOME) roundtrip.state]
     set pending {192.0.2.1 sender@example.test one@example.test}
     set passed {192.0.2.2 sender@example.test one@example.test}
-    set expected [list [expr {$now-60}] [expr {$now+600}] 0]
+    set expected [list [expr {$now-60}] [expr {$now+600}] 0 7]
     nsv_set smtpd-greylist-entries $pending $expected
     nsv_set smtpd-greylist-entries $passed [list [expr {$now-600}] [expr {$now+3600}] 1]
     nsv_set smtpd-greylist-entries {192.0.2.3 expired@example.test one@example.test} [list [expr {$now-1000}] [expr {$now-1}] 0]
