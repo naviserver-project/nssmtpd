@@ -1,0 +1,71 @@
+# -*- Tcl -*-
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+proc header_messages {} {
+    set path [file join $::env(ALIAS_TEST_HOME) sink-messages.list]
+    if {![file exists $path]} {return {}}
+    set f [open $path]
+    fconfigure $f -translation binary
+    try {set text [read $f]} finally {close $f}
+    return $text
+}
+
+proc header_submit {message} {
+    set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    fconfigure $channel -translation binary -buffering none
+    try {
+        gets $channel
+        foreach command {{EHLO test.example} {MAIL FROM:<sender@example.test>} {RCPT TO:<one@example.test>} DATA} {
+            puts -nonewline $channel "$command\r\n"
+            while {[gets $channel reply] >= 0 && [string index $reply 3] eq "-"} {}
+        }
+        puts -nonewline $channel "$message.\r\n"
+        gets $channel reply
+        puts -nonewline $channel "QUIT\r\n"
+        gets $channel
+        return [string range $reply 0 2]
+    } finally {close $channel}
+}
+
+set original "From: sender@example.test\r\nTo: one@example.test\r\nSubject:  unchanged\r\nDKIM-Signature: v=1; d=example.test; s=test; h=From:To:Subject;\r\n\tb=AAAA; bh=AAAA\r\nContent-Type: text/html\r\n\r\n<a href=\"https://evil.example/\">example.org</a>\r\n..dot-stuffed\r\n"
+
+foreach {flags expected} {{spf-fail true dkim-no-key true} 550 {spf-fail true} 250 {dkim-no-key true} 250 {} 250} {
+    test headers-combined-policy-$expected-$flags {combined findings reject only before upstream DATA is forwarded} -setup {
+        set before [llength [header_messages]]
+        nsv_set alias-test data-rules [list \
+            "[list set findings $flags]; expr {\"continue\"}" \
+            {expr {[dict exists $findings spf-fail] && [dict exists $findings dkim-no-key] ? "reject" : "continue"}}]
+    } -body {
+        set code [header_submit $original]
+        list [expr {$code eq $expected}] \
+            [expr {[llength [header_messages]] == $before + ($expected eq "250")}]
+    } -cleanup {
+        nsv_unset alias-test data-rules
+    } -result {1 1}
+}
+
+test headers-policy-error {rule errors defer without forwarding to the relay} -setup {
+    set before [llength [header_messages]]
+    nsv_set alias-test data-rules {{dict set findings test true; error broken}}
+} -body {
+    list [header_submit $original] [expr {[llength [header_messages]] == $before}]
+} -cleanup {
+    nsv_unset alias-test data-rules
+} -result {451 1}
+
+test datapolicy-pass-bytes {accepted original DATA is preserved without diagnostic header insertion} -body {
+    set code [header_submit $original]
+    set wire [lindex [header_messages] end 1]
+    list $code [expr {[string range $wire [string first "From:" $wire] end] eq $original}]
+} -result {250 1}
+set failures $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failures"
+ns_shutdown
+vwait forever
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

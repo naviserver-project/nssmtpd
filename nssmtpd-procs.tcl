@@ -469,6 +469,103 @@ proc smtpd::mail { id } {
     ns_log Debug(smtpd) "### smtpd::mail $id"
 }
 
+# Rules are trusted configuration scripts, evaluated with context and findings
+# in scope. Findings survive every outcome; only the configured rules decide.
+proc smtpd::policychain {rules context} {
+    set findings {}
+    set index 0
+    foreach rule $rules {
+        incr index
+        # Run in the global namespace, with isolated locals and a shared
+        # findings variable. Commands such as error must retain Tcl semantics.
+        lassign [apply {{context findingsVar script} {
+            upvar 1 $findingsVar findings
+            set completion [catch {eval $script} value options]
+            list $completion $value $options
+        } ::} $context findings $rule] code result options
+        if {$code == 2 && [dict get $options -level] == 1} {
+            set code [dict get $options -code]
+        }
+        try {
+            dict size $findings
+            switch -- $code {
+                0 {
+                    if {$result in {continue accept defer reject}} {
+                        set decision [dict create action $result]
+                    } else {
+                        set decision $result
+                    }
+                }
+                3 {set decision {action accept}}
+                4 {set decision {action continue}}
+                default {::error $result}
+            }
+            set action [dict get $decision action]
+            if {$action ni {continue accept defer reject}} {::error "invalid policy action"}
+        } on error {message options} {
+            ns_log Warning "smtpd policy chain: rule $index failed: $message"
+            if {[catch {dict size $findings}]} {set findings {}}
+            return [dict create action defer reason policy-rule-error \
+                policy-rule $index findings $findings]
+        }
+        if {$action eq "continue"} {continue}
+        return [dict merge [dict create reason policy-chain] $decision \
+            [dict create policy-rule $index findings $findings]]
+    }
+    return [dict create action accept reason policy-chain-end findings $findings]
+}
+
+# Collect SPF without making a delivery decision. Explicit rules interpret it.
+proc smtpd::spfpolicy {context findingsVar} {
+    upvar 1 $findingsVar findings
+    try {
+        set result [smtpd::checkspf -ip [dict get $context peeraddr] \
+            -sender [dict get $context sender] -helo [dict get $context helo]]
+    } trap {NSSMTPD SPF DISABLED} {} {
+        set result disabled
+    } trap {NSSMTPD SPF DEPENDENCY} {} {
+        set result unavailable
+    } on error {message options} {
+        set result evaluation-error
+        dict set findings spf-errorcode [dict get $options -errorcode]
+    }
+    dict set findings spf-result $result
+    dict unset findings spf-fail
+    if {$result eq "fail"} {dict set findings spf-fail true}
+    return continue
+}
+
+# DATA policy runs before either built-in relay forwarding or dataproc.
+proc smtpd::checkdatapolicy {id} {
+    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc ""]
+    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {return 1}
+    try {
+        set context [dict create id $id phase data peeraddr [ns_conn peeraddr] \
+            sender [ns_smtpd getfrom $id] helo [ns_smtpd gethelo $id] \
+            recipients [lmap rcpt [ns_smtpd getrcpt $id] {lindex $rcpt 0}]]
+        set result [uplevel #0 [list {*}$prefix $context]]
+        set action [dict get $result action]
+        switch -- $action {
+            accept {set code 250; set message "Message accepted"}
+            defer {set code 451; set message "Please try again later"}
+            reject {set code 550; set message "Message rejected by policy"}
+            default {::error "datapolicyproc returned an invalid action"}
+        }
+        if {[dict exists $result message]} {set message [dict get $result message]}
+        if {[string length $message] > 400 || ![regexp {^[\x20-\x7e]+$} $message]} {
+            ::error "datapolicyproc returned an invalid message"
+        }
+        smtpd::logevent $id message-policy [dict merge {reason message-policy} $result [dict create code $code]]
+        if {$action eq "accept"} {return 1}
+        ns_smtpd setreply $id "$code [expr {$action eq "reject" ? "5.7.1" : "4.7.1"}] $message\r\n"
+    } on error {message options} {
+        ns_log Warning "smtpd DATA policy failed: $message"
+        smtpd::logevent $id message-policy {action defer reason callback-error code 451}
+        ns_smtpd setreply $id "451 4.3.0 Message policy unavailable\r\n"
+    }
+    return 0
+}
+
 # An optional RCPT policy, separate from recipient existence checks. The
 # callback sees the original envelope and must not mutate the SMTP session.
 proc smtpd::checkpolicy {id} {
@@ -484,7 +581,7 @@ proc smtpd::checkpolicy {id} {
     try {
         set sender [ns_smtpd getfrom $id]
         if {$sender eq "<>"} {set sender ""}
-        set context [dict create id $id peeraddr [ns_conn peeraddr] \
+        set context [dict create id $id phase rcpt peeraddr [ns_conn peeraddr] \
                          sender $sender helo [ns_smtpd gethelo $id] \
                          recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
         set result [uplevel #0 [list {*}$prefix $context]]
@@ -642,8 +739,12 @@ proc smtpd::greylist {context} {
         if {[lindex $exception 0] eq [lindex $pair 0]
             && [lindex $exception 1] eq [lindex $pair 1]} {
             try {
-                set result [smtpd::checkspf -ip [dict get $context peeraddr] \
-                                -sender [dict get $context sender] -helo [dict get $context helo]]
+                if {[dict exists $context spf-result]} {
+                    set result [dict get $context spf-result]
+                } else {
+                    set result [smtpd::checkspf -ip [dict get $context peeraddr] \
+                                    -sender [dict get $context sender] -helo [dict get $context helo]]
+                }
                 if {$result eq "pass"} {
                     return [dict create action accept reason verified-report-sender]
                 }

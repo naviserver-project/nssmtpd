@@ -141,6 +141,32 @@ test auth-spf-unavailable {unavailable SPF is not confused with absence of a pol
     }
 } -cleanup {interp delete authTest} -result unavailable
 
+rename ns_smtpd auth_policy_ns_smtpd
+proc ns_smtpd {args} {
+    if {[lindex $args 0] eq "headers"} {
+        return [ns_set create -nocase received {*}$::authPolicyHeaders]
+    }
+    return [auth_policy_ns_smtpd {*}$args]
+}
+foreach {label headers response expected} [list \
+    unsigned {} {rcode 0 truncated 0 answer {}} 0 \
+    missing [list DKIM-Signature $authSignature] {rcode 0 truncated 0 answer {}} 1 \
+    timeout [list DKIM-Signature $authSignature] timeout 0 \
+    present [list DKIM-Signature $authSignature] {rcode 0 truncated 0 answer {{example TXT {v=DKIM1; p=AAAA} 60}}} 0 \
+    mixed [list DKIM-Signature $authSignature DKIM-Signature {invalid}] {rcode 0 truncated 0 answer {}} 0 \
+    limited [concat {*}[lrepeat 9 [list DKIM-Signature $authSignature]]] {rcode 0 truncated 0 answer {}} 0] {
+    test auth-policy-$label {DKIM no-key aggregate requires all signatures to have definitively absent keys} -body {
+        set authPolicyHeaders $headers
+        set authResponse $response
+        set authQueries {}
+        set findings {earlier true}
+        set action [smtpd::dkimkeypolicy {id 1 phase data} findings]
+        list $action [dict get $findings earlier] [expr {[dict exists $findings dkim-no-key] == $expected}]
+    } -result {continue true 1}
+}
+rename ns_smtpd {}
+rename auth_policy_ns_smtpd ns_smtpd
+
 rename ::smtpd::AuthDns {}
 rename ::smtpd::AuthDnsReal ::smtpd::AuthDns
 if {!$authHadDns} {rename ::ns_dns {}}

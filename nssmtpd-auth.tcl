@@ -116,6 +116,30 @@ proc smtpd::AuthDkimDetails {signatures} {
     return $details
 }
 
+# Collect key availability, not cryptographic DKIM verification. The aggregate
+# no-key finding requires every provided signature to have an absent key.
+proc smtpd::dkimkeypolicy {context findingsVar} {
+    upvar 1 $findingsVar findings
+    if {[dict get $context phase] ne "data"} {
+        ::error "DKIM key policy requires the DATA phase"
+    }
+    set received [ns_smtpd headers [dict get $context id]]
+    set signatures {}
+    foreach {name value} [ns_set array $received] {
+        if {[string equal -nocase $name DKIM-Signature]} {lappend signatures $value}
+    }
+    set details [AuthDkimDetails $signatures]
+    set findings [dict merge $findings $details]
+    set count [dict get $details dkim-signatures]
+    set absent [expr {$count > 0 && $count <= 8}]
+    for {set index 1} {$index <= min($count, 8)} {incr index} {
+        if {[dict get $details dkim-$index-key] ne "no-key"} {set absent false}
+    }
+    dict unset findings dkim-no-key
+    if {$absent} {dict set findings dkim-no-key true}
+    return continue
+}
+
 # Extract hostnames only; never resolve, fetch, or log recipient-bearing URLs.
 proc smtpd::AuthLinkHost {url} {
     try {

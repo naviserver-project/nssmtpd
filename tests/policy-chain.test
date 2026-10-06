@@ -1,0 +1,38 @@
+# -*- Tcl -*-
+# Explicit scripts, expressions, findings and Tcl completion codes.
+set chainContext {id 1 phase rcpt peeraddr 192.0.2.1 sender a@example.test helo example.test recipient b@example.test}
+test chain-findings {findings accumulate and expression selects the final decision} -body {
+    set result [smtpd::policychain {
+        {dict set findings spf-fail true; continue}
+        {dict set findings dkim-no-key true; return continue}
+        {expr {[dict exists $findings spf-fail] && [dict exists $findings dkim-no-key] ? "reject" : "continue"}}
+        {error unreachable}
+    } $chainContext]
+    list [dict get $result action] [dict get $result policy-rule] [dict get $result findings]
+} -result {reject 3 {spf-fail true dkim-no-key true}}
+
+test chain-break {break accepts immediately and retains accumulated findings} -body {
+    smtpd::policychain {{dict set findings example true; break} {error unreachable}} $chainContext
+} -result {reason policy-chain action accept policy-rule 1 findings {example true}}
+
+test chain-return {return can provide an explicit reply and reason} -body {
+    set result [smtpd::policychain {{return {action reject reason combined message {Authentication policy failed}}}} $chainContext]
+    list [dict get $result action] [dict get $result reason] [dict get $result message]
+} -result {reject combined {Authentication policy failed}}
+
+test chain-end {all continue rules accept at end with their findings} -body {
+    smtpd::policychain {{dict set findings result none; continue}} $chainContext
+} -result {action accept reason policy-chain-end findings {result none}}
+
+foreach script {{dict set findings before true; error broken} {dict set findings before true; expr {"garbage"}} {set findings invalid; expr {"accept"}}} {
+    test chain-invalid-$script {errors and malformed results defer} -body {
+        set result [smtpd::policychain [list $script] $chainContext]
+        list [dict get $result action] [dict get $result reason] [dict get $result policy-rule]
+    } -result {defer policy-rule-error 1}
+}
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

@@ -186,6 +186,7 @@ typedef struct _smtpdConfig {
     const char *aliasproc;
     const char *authdetailsproc;
     bool        authdetailheaders; /* Buffer relay DATA for diagnostic headers. */
+    const char *datapolicyproc;
     const char *dataproc;
     const char *errorproc;
     Ns_Mutex relaylock;
@@ -264,6 +265,7 @@ typedef struct _smtpdConn {
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
     bool authDetailsDone;
+    bool dataPolicyDone;
     Tcl_DString line;
     Tcl_DString reply;
     Tcl_Interp *interp;
@@ -412,16 +414,14 @@ typedef struct _dnsPacket {
 } dnsPacket;
 
 static bool parseEmail(smtpdEmail *addr, char *str);
+static bool parseSmtpEmail(smtpdEmail *addr, char *str);
+static bool SmtpdMailParameters(smtpdConn *conn, char *data);
 static char *encode64(const char *in, TCL_SIZE_T len);
 static char *decode64(const char *in, TCL_SIZE_T len, size_t *outlen);
 static char *encodeqp(const char *in, size_t len);
 static char *decodeqp(const char *in, TCL_SIZE_T len, size_t *outlen);
 static char *encodehex(const char *buf, size_t len);
 static char *decodehex(const char *str, size_t *len);
-static int parsePhrase(char **inp, char **phrasep, const char *specials);
-static int parseDomain(char **inp, char **domainp, char **commentp);
-static int parseRoute(char **inp, char **routep);
-static char *parseSpace(char *s);
 static int parseInt(char *val);
 
 static void dnsInit(const char *name, ...);
@@ -467,6 +467,7 @@ static void SmtpdConnFree(smtpdConn *conn);
 static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
+static bool SmtpdDataPolicy(smtpdConn *conn);
 static void SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers);
 static int SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
                                Tcl_Obj *recipients, int limit, bool passthrough, Tcl_Obj **resolved);
@@ -892,6 +893,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->aliasproc = ns_strcopy(Ns_ConfigGetValue(section, "aliasproc"));
     serverPtr->authdetailsproc = ns_strcopy(Ns_ConfigGetValue(section, "authdetailsproc"));
     serverPtr->authdetailheaders = Ns_ConfigBool(section, "authdetailheaders", NS_FALSE);
+    serverPtr->datapolicyproc = ns_strcopy(Ns_ConfigGetValue(section, "datapolicyproc"));
     serverPtr->dataproc = ns_strcopy(Ns_ConfigString(section, "dataproc", "smtpd::data"));
     serverPtr->errorproc = ns_strcopy(Ns_ConfigString(section, "errorproc", "smtpd::error"));
 
@@ -1877,20 +1879,14 @@ static void SmtpdThread(smtpdConn *conn)
                 continue;
             }
             SmtpdConnReset(conn);
-            /* Check for optional SIZE parameter */
             conn->transaction++;
             conn->transactionActive = NS_TRUE;
-            if ((data = SmtpdStrPos(&conn->line.string[10], " SIZE="))) {
-                if (atoi(data + 6) > config->maxdata) {
-                    if (SmtpdPuts(conn, "552 Too much mail data\r\n") != NS_OK) {
-                        goto error;
-                    }
-                    SmtpdConnReset(conn);
-                    continue;
-                }
-                *data = '\0';
-            }
             data = Ns_StrTrim(&conn->line.string[10]);
+            if (!SmtpdMailParameters(conn, data)) {
+                if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) goto error;
+                SmtpdConnReset(conn);
+                continue;
+            }
             /* Email address verification */
             if (!strcmp(data, "<>") || !strcasecmp(data, "postmaster"))
                 conn->from.addr = ns_strdup(data);
@@ -1898,7 +1894,7 @@ static void SmtpdThread(smtpdConn *conn)
                 smtpdEmail addr;
                 /* Prepare error reply because address parser modifies the buffer */
                 Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognized\r\n", data);
-                if (parseEmail(&addr, data)) {
+                if (parseSmtpEmail(&addr, data)) {
                     Tcl_DStringSetLength(&conn->reply, 0);
                     if (SmtpdCheckDomain(conn, addr.domain)) {
                         conn->from.addr = ns_malloc(strlen(addr.mailbox) + strlen(addr.domain) + 2);
@@ -1968,14 +1964,14 @@ static void SmtpdThread(smtpdConn *conn)
                 }
                 continue;
             }
-            data = &conn->line.string[8];
+            data = Ns_StrTrim(&conn->line.string[8]);
             while (*data && isspace(*data)) {
                 data++;
             }
             /* Prepare error reply because address parser modifies the buffer */
             Ns_DStringPrintf(&conn->reply, "553 %s... Address unrecognized\r\n", data);
             /* Email address verification */
-            if (parseEmail(&addr, data)) {
+            if (parseSmtpEmail(&addr, data)) {
                 Tcl_DStringSetLength(&conn->reply, 0);
                 /* Check for allowed for relaying domains */
                 if (SmtpdCheckRelay(conn, &addr, &host, &port)) {
@@ -2089,6 +2085,11 @@ static void SmtpdThread(smtpdConn *conn)
 
                 if (rcpt != NULL
                     && (size = SmtpdRelayData(conn, rcpt->relay.host, rcpt->relay.port)) < 0) {
+                    if (size == -2) {
+                        SmtpdTransactionEnd(conn, "message-policy-rejected");
+                        SmtpdConnReset(conn);
+                        continue;
+                    }
                     Ns_Log(SmtpdDebug, "SmtpdRelayData failed");
                     goto done;
                 }
@@ -2126,6 +2127,14 @@ static void SmtpdThread(smtpdConn *conn)
             /* Quick headers scan */
             if (!conn->authDetailsDone) {
                 SmtpdConnParseData(conn);
+            }
+            if (!SmtpdDataPolicy(conn)) {
+                SmtpdTransactionEnd(conn, "message-policy-rejected");
+                if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
+                    goto error;
+                }
+                SmtpdConnReset(conn);
+                continue;
             }
             /* Optional diagnostics only: relay acceptance may already have
              * happened. A diagnostic callback error must not reject mail. */
@@ -2257,6 +2266,7 @@ SmtpdConnReset(smtpdConn *conn)
     SmtpdTransactionEnd(conn, "reset");
     conn->dataStarted = conn->relayAccepted = NS_FALSE;
     conn->authDetailsDone = NS_FALSE;
+    conn->dataPolicyDone = NS_FALSE;
     conn->messageBytes = 0;
     conn->relayReply[0] = '\0';
 
@@ -2688,6 +2698,42 @@ SmtpdAuthPlainCommand(smtpdConn *conn, smtpdConn *relay, const char *user, const
 /*
  *----------------------------------------------------------------------
  *
+ * SmtpdDataPolicy --
+ *
+ *      Apply the configured DATA policy once, before forwarding mail.
+ *
+ * Results:
+ *      True to continue delivery; false with a bounded SMTP reply on failure.
+ *
+ * Side effects:
+ *      Evaluates Tcl and records the policy decision.
+ *
+ *----------------------------------------------------------------------
+ */
+static bool
+SmtpdDataPolicy(smtpdConn *conn)
+{
+    int accepted = 0;
+
+    if (conn->dataPolicyDone) {
+        return NS_TRUE;
+    }
+    conn->dataPolicyDone = NS_TRUE;
+    if (conn->config->datapolicyproc == NULL || *conn->config->datapolicyproc == '\0') {
+        return NS_TRUE;
+    }
+    if (SmtpdConnEval(conn, "smtpd::checkdatapolicy") != TCL_OK
+        || Tcl_GetBooleanFromObj(conn->interp, Tcl_GetObjResult(conn->interp), &accepted) != TCL_OK) {
+        Tcl_DStringSetLength(&conn->reply, 0);
+        Tcl_DStringAppend(&conn->reply, "451 4.3.0 Message policy unavailable\r\n", -1);
+        return NS_FALSE;
+    }
+    return accepted != 0;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
  * SmtpdAuthDetails --
  *
  *      Run informational diagnostics once. In buffered relay mode, accept
@@ -3017,7 +3063,8 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (SmtpdPuts(conn, "354 Start mail input; end with <CRLF>.<CRLF>\r\n") != NS_OK) {
         goto error;
     }
-    if (conn->config->authdetailheaders) {
+    if (conn->config->authdetailheaders
+        || (conn->config->datapolicyproc != NULL && *conn->config->datapolicyproc != '\0')) {
         Tcl_DString wire, headers;
 
         /* Preserve SMTP transparency and signed bytes: buffer the original
@@ -3044,6 +3091,15 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         Tcl_DStringInit(&headers);
         Tcl_DStringAppend(&wire, conn->body.data.string, conn->body.data.length);
         SmtpdConnParseData(conn);
+        if (!SmtpdDataPolicy(conn)) {
+            Tcl_DStringFree(&headers);
+            Tcl_DStringFree(&wire);
+            SmtpdConnFree(relay);
+            if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
+                return -1;
+            }
+            return -2;
+        }
         SmtpdAuthDetails(conn, &headers);
         rc = SmtpdWriteDString(relay, &headers);
         if (rc == NS_OK) rc = SmtpdWriteDString(relay, &wire);
@@ -5391,6 +5447,406 @@ static unsigned int SmtpdFlags(const char *name)
     return 0u;
 }
 
+/* Separate supported ESMTP parameters from the path before address parsing. */
+static bool
+SmtpdMailParameters(smtpdConn *conn, char *data)
+{
+    char *p = data;
+    bool quoted = NS_FALSE;
+
+    if (*p != '<') return NS_TRUE;
+    for (p++; *p != '\0'; p++) {
+        if (*p == '\\' && quoted && p[1] != '\0') {
+            p++;
+        } else if (*p == '"') {
+            quoted = !quoted;
+        } else if (*p == '>' && !quoted) {
+            break;
+        }
+    }
+    if (*p != '>' || p[1] == '\0') return NS_TRUE;
+    p++;
+    if (*p != ' ' && *p != '\t') return NS_TRUE;
+    *p++ = '\0';
+    while (*p != '\0') {
+        char *parameter, *end;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') break;
+        parameter = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t') p++;
+        if (*p != '\0') *p++ = '\0';
+        if (strncasecmp(parameter, "SIZE=", 5) == 0) {
+            unsigned long long size;
+            const char *digits = parameter + 5;
+            if (*digits == '\0') goto syntax;
+            for (const char *d = digits; *d != '\0'; d++) {
+                if (*d < '0' || *d > '9') goto syntax;
+            }
+            errno = 0;
+            size = strtoull(digits, &end, 10);
+            if (errno == ERANGE || size > (unsigned long long)conn->config->maxdata) {
+                Tcl_DStringAppend(&conn->reply, "552 Too much mail data\r\n", -1);
+                return NS_FALSE;
+            }
+        } else if (strcasecmp(parameter, "BODY=8BITMIME") != 0
+                   && strcasecmp(parameter, "BODY=7BIT") != 0) {
+            Tcl_DStringAppend(&conn->reply, "555 Unsupported MAIL parameter\r\n", -1);
+            return NS_FALSE;
+        }
+    }
+    return NS_TRUE;
+ syntax:
+    Tcl_DStringAppend(&conn->reply, "501 Invalid MAIL parameter\r\n", -1);
+    return NS_FALSE;
+}
+
+typedef struct {
+    Tcl_DString name, local, domain, address, mailbox;
+} EmailParts;
+
+static void
+EmailPartsInit(EmailParts *parts)
+{
+    Tcl_DStringInit(&parts->name);
+    Tcl_DStringInit(&parts->local);
+    Tcl_DStringInit(&parts->domain);
+    Tcl_DStringInit(&parts->address);
+    Tcl_DStringInit(&parts->mailbox);
+}
+
+static void
+EmailPartsFree(EmailParts *parts)
+{
+    Tcl_DStringFree(&parts->name);
+    Tcl_DStringFree(&parts->local);
+    Tcl_DStringFree(&parts->domain);
+    Tcl_DStringFree(&parts->address);
+    Tcl_DStringFree(&parts->mailbox);
+}
+
+static bool
+EmailAtom(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9')
+        || (c != '\0' && strchr("!#$%&'*+-/=?^_`{|}~", c) != NULL);
+}
+
+/* Header CFWS is permitted between constituents, never inside a DNS label.
+ * SMTP paths have no CFWS; only surrounding command whitespace is stripped. */
+static bool
+EmailSpace(const char **input, bool header, const char **error)
+{
+    const char *p = *input;
+
+    while (*p == ' ' || *p == '\t' || (header && (*p == '(' || *p == '\r'))) {
+        if (*p == '(') {
+            int depth = 1;
+            p++;
+            while (*p != '\0' && depth > 0) {
+                if (*p == '\\' && p[1] != '\0') {
+                    p++;
+                    if ((unsigned char)*p < 32 || *p == 127) break;
+                } else if (*p == '(') {
+                    depth++;
+                } else if (*p == ')') {
+                    depth--;
+                } else if ((unsigned char)*p < 32 && *p != '\t') {
+                    break;
+                }
+                p++;
+            }
+            if (depth != 0) {
+                *error = "invalid or unterminated comment";
+                return NS_FALSE;
+            }
+        } else if (*p == '\r') {
+            if (p[1] != '\n' || (p[2] != ' ' && p[2] != '\t')) {
+                *error = "invalid header folding";
+                return NS_FALSE;
+            }
+            p += 2;
+        } else {
+            p++;
+        }
+    }
+    *input = p;
+    return NS_TRUE;
+}
+
+static bool
+EmailQuoted(const char **input, Tcl_DString *decoded, bool display, bool header, const char **error)
+{
+    const char *p = *input + 1;
+
+    while (*p != '\0' && *p != '"') {
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\\') {
+            c = (unsigned char)*p;
+            if (c == '\0') break;
+            p++;
+        }
+        if (header && (c == '\r' || c == '\t')) {
+            if (c == '\r') {
+                if (*p != '\n' || (p[1] != ' ' && p[1] != '\t')) {
+                    *error = "invalid folding in quoted string";
+                    return NS_FALSE;
+                }
+                p++;
+            }
+            while (*p == ' ' || *p == '\t') p++;
+            c = ' ';
+        }
+        if (c < 32 || c == 127 || (!display && c > 126)) {
+            *error = "invalid character in quoted string";
+            return NS_FALSE;
+        }
+        Tcl_DStringAppend(decoded, (const char *)&c, 1);
+    }
+    if (*p != '"') {
+        *error = "unterminated quoted string";
+        return NS_FALSE;
+    }
+    *input = p + 1;
+    return NS_TRUE;
+}
+
+static bool
+EmailDomain(const char **input, Tcl_DString *domain, const char **error)
+{
+    const char *p = *input, *start = p;
+    if (*p == '[') {
+        Tcl_DString literal;
+        struct NS_SOCKADDR_STORAGE storage;
+        struct sockaddr *sa = (struct sockaddr *)&storage;
+        const char *ip;
+        bool ipv6;
+
+        p++;
+        while (*p != '\0' && *p != ']') p++;
+        if (*p != ']') {
+            *error = "unterminated address literal";
+            return NS_FALSE;
+        }
+        Tcl_DStringInit(&literal);
+        Tcl_DStringAppend(&literal, start + 1, (TCL_SIZE_T)(p - start - 1));
+        ipv6 = strncasecmp(literal.string, "IPv6:", 5) == 0;
+        ip = literal.string + (ipv6 ? 5 : 0);
+        if (ns_inet_pton(sa, ip) <= 0 || sa->sa_family != (ipv6 ? AF_INET6 : AF_INET)) {
+            Tcl_DStringFree(&literal);
+            *error = "invalid IP address literal";
+            return NS_FALSE;
+        }
+        Tcl_DStringFree(&literal);
+        p++;
+    } else {
+        do {
+            const char *label = p;
+            while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+                   || (*p >= '0' && *p <= '9') || *p == '-') p++;
+            if (p == label || p - label > 63 || *label == '-' || p[-1] == '-') {
+                *error = "invalid domain label";
+                return NS_FALSE;
+            }
+            if (*p != '.') break;
+            p++;
+        } while (NS_TRUE);
+    }
+    Tcl_DStringAppend(domain, start, (TCL_SIZE_T)(p - start));
+    if (domain->length > 255) {
+        *error = "domain is too long";
+        return NS_FALSE;
+    }
+    *input = p;
+    return NS_TRUE;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * EmailParse --
+ *
+ *      Parse one complete header mailbox or SMTP mailbox/path, validating
+ *      the original syntax before decoding quotes or removing header CFWS.
+ *
+ * Results:
+ *      True with parsed constituents, or false with a diagnostic.
+ *
+ * Side effects:
+ *      Appends constituents to the caller's initialized string buffers.
+ *      Never modifies the input. No DNS queries are performed.
+ *
+ *----------------------------------------------------------------------
+ */
+static bool
+EmailParse(const char *input, bool smtp, EmailParts *parts, const char **error)
+{
+    const char *p = input, *start;
+    bool angle = NS_FALSE, quoted = NS_FALSE;
+
+    *error = "invalid mailbox syntax";
+    if (strstr(input, "\xc0\x80") != NULL) {
+        *error = "embedded NUL in address";
+        return NS_FALSE;
+    }
+    if (!EmailSpace(&p, !smtp, error)) return NS_FALSE;
+    start = p;
+    if (!smtp && *p != '<') {
+        /* Look for an angle address outside comments and quoted words.
+         * If absent, parse the original input as a bare addr-spec. */
+        while (*p != '\0' && *p != '<' && *p != '@') {
+            if (*p == '"') {
+                if (!EmailQuoted(&p, &parts->name, NS_TRUE, NS_TRUE, error)) return NS_FALSE;
+            } else if (*p == ' ' || *p == '\t' || *p == '(' || *p == '\r') {
+                if (!EmailSpace(&p, NS_TRUE, error)) return NS_FALSE;
+                if (parts->name.length > 0 && parts->name.string[parts->name.length - 1] != ' ') {
+                    Tcl_DStringAppend(&parts->name, " ", 1);
+                }
+            } else if (EmailAtom((unsigned char)*p) || *p == '.' || (unsigned char)*p > 127) {
+                Tcl_DStringAppend(&parts->name, p++, 1);
+            } else {
+                break;
+            }
+        }
+        if (*p != '<') {
+            p = start;
+            Tcl_DStringSetLength(&parts->name, 0);
+        } else if (parts->name.length > 0 && parts->name.string[parts->name.length - 1] == ' ') {
+            Tcl_DStringSetLength(&parts->name, parts->name.length - 1);
+        }
+    }
+    if (*p == '<') {
+        angle = NS_TRUE;
+        p++;
+        if (!smtp && !EmailSpace(&p, NS_TRUE, error)) return NS_FALSE;
+        if (smtp && *p == '@') {
+            /* RFC 5321 requires accepting and ignoring obsolete source routes. */
+            Tcl_DString route;
+            Tcl_DStringInit(&route);
+            do {
+                p++;
+                Tcl_DStringSetLength(&route, 0);
+                if (!EmailDomain(&p, &route, error)) {
+                    Tcl_DStringFree(&route);
+                    return NS_FALSE;
+                }
+                if (*p != ',') break;
+                p++;
+                if (*p != '@') {
+                    Tcl_DStringFree(&route);
+                    *error = "invalid source route";
+                    return NS_FALSE;
+                }
+            } while (NS_TRUE);
+            Tcl_DStringFree(&route);
+            if (*p++ != ':') {
+                *error = "invalid source route";
+                return NS_FALSE;
+            }
+        }
+        if (smtp && *p == '>') {
+            p++;
+            if (!EmailSpace(&p, NS_FALSE, error) || *p != '\0') return NS_FALSE;
+            Tcl_DStringAppend(&parts->address, "<>", 2);
+            return NS_TRUE;
+        }
+    }
+    if (*p == '"') {
+        quoted = NS_TRUE;
+        if (!EmailQuoted(&p, &parts->local, NS_FALSE, !smtp, error)) return NS_FALSE;
+    } else {
+        bool needAtom = NS_TRUE;
+        while (EmailAtom((unsigned char)*p) || *p == '.') {
+            if (*p == '.') {
+                if (needAtom) {
+                    *error = "empty atom in local part";
+                    return NS_FALSE;
+                }
+                needAtom = NS_TRUE;
+            } else {
+                needAtom = NS_FALSE;
+            }
+            Tcl_DStringAppend(&parts->local, p++, 1);
+        }
+        if (needAtom) {
+            *error = "empty atom in local part";
+            return NS_FALSE;
+        }
+    }
+    if (!smtp && !EmailSpace(&p, NS_TRUE, error)) return NS_FALSE;
+    if (*p++ != '@') {
+        *error = "expected @ after local part";
+        return NS_FALSE;
+    }
+    if (!smtp && !EmailSpace(&p, NS_TRUE, error)) return NS_FALSE;
+    if (!EmailDomain(&p, &parts->domain, error)) return NS_FALSE;
+    if (!smtp && !EmailSpace(&p, NS_TRUE, error)) return NS_FALSE;
+    if (angle && *p++ != '>') {
+        *error = "expected closing >";
+        return NS_FALSE;
+    }
+    if (!EmailSpace(&p, !smtp, error) || *p != '\0') {
+        *error = "unexpected trailing input";
+        return NS_FALSE;
+    }
+    if (quoted) {
+        Tcl_DStringAppend(&parts->mailbox, "\"", 1);
+        for (TCL_SIZE_T i = 0; i < parts->local.length; i++) {
+            char c = parts->local.string[i];
+            if (c == '\\' || c == '"') Tcl_DStringAppend(&parts->mailbox, "\\", 1);
+            Tcl_DStringAppend(&parts->mailbox, &c, 1);
+        }
+        Tcl_DStringAppend(&parts->mailbox, "\"", 1);
+    } else {
+        Tcl_DStringAppend(&parts->mailbox, parts->local.string, parts->local.length);
+    }
+    Tcl_DStringAppend(&parts->address, parts->mailbox.string, parts->mailbox.length);
+    Tcl_DStringAppend(&parts->address, "@", 1);
+    Tcl_DStringAppend(&parts->address, parts->domain.string, parts->domain.length);
+    return NS_TRUE;
+}
+
+/* Legacy internal representation: pointers remain in the caller's buffer.
+ * Preserve necessary local-part quoting when building SMTP envelope strings. */
+static bool
+EmailLegacy(smtpdEmail *addr, char *input, bool smtp)
+{
+    EmailParts parts;
+    const char *error;
+    bool valid;
+
+    EmailPartsInit(&parts);
+    valid = EmailParse(input, smtp, &parts, &error) && parts.domain.length > 0;
+    if (valid) {
+        char *p = input;
+        memcpy(p, parts.mailbox.string, (size_t)parts.mailbox.length + 1);
+        addr->mailbox = p;
+        p += parts.mailbox.length + 1;
+        memcpy(p, parts.domain.string, (size_t)parts.domain.length + 1);
+        addr->domain = p;
+        p += parts.domain.length + 1;
+        addr->name = NULL;
+        if (parts.name.length > 0) {
+            memcpy(p, parts.name.string, (size_t)parts.name.length + 1);
+            addr->name = p;
+        }
+    }
+    EmailPartsFree(&parts);
+    return valid;
+}
+
+static bool
+parseEmail(smtpdEmail *addr, char *str)
+{
+    return EmailLegacy(addr, str, NS_FALSE);
+}
+
+static bool
+parseSmtpEmail(smtpdEmail *addr, char *str)
+{
+    return EmailLegacy(addr, str, NS_TRUE);
+}
+
 static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj * const objv[])
 {
     char          *name = NULL;
@@ -5411,6 +5867,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdLocal,
         cmdEncode,
         cmdDecode,
+        cmdParseEmail,
         cmdCheckEmail,
         cmdCheckDomain,
         cmdVirusVersion,
@@ -5452,6 +5909,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "local",
         "encode",
         "decode",
+        "parseemail",
         "checkemail",
         "checkdomain",
         "virusversion",
@@ -6025,20 +6483,67 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         Tcl_SetObjResult(interp, Tcl_NewIntObj(SmtpdCheckDomain(0, Tcl_GetString(objv[2])) ? 1 : 0));
         break;
 
-    case cmdCheckEmail:{
-            smtpdEmail addr;
-            char *email;
-            if (objc < 3) {
-                Tcl_WrongNumArgs(interp, 1, objv, "email");
-                return TCL_ERROR;
-            }
-            /* parseEmail modifies its input; never mutate a Tcl object's bytes. */
-            email = ns_strdup(Tcl_GetString(objv[2]));
-            if (parseEmail(&addr, email))
-                Tcl_AppendResult(interp, addr.mailbox, "@", addr.domain, (char *)0L);
-            ns_free(email);
-            break;
+    case cmdParseEmail: {
+        Tcl_Obj *emailObj;
+        const char *syntax = "header";
+        Ns_ObjvSpec opts[] = {
+            {"-syntax", Ns_ObjvString, &syntax, NULL},
+            {"--", Ns_ObjvBreak, NULL, NULL},
+            {NULL, NULL, NULL, NULL}
+        };
+        Ns_ObjvSpec args[] = {
+            {"email", Ns_ObjvObj, &emailObj, NULL},
+            {NULL, NULL, NULL, NULL}
+        };
+        EmailParts parts;
+        const char *email, *error = NULL;
+        TCL_SIZE_T length;
+        bool smtp;
+
+        if (Ns_ParseObjv(opts, args, interp, 2, objc, objv) != NS_OK) return TCL_ERROR;
+        smtp = strcmp(syntax, "smtp") == 0;
+        if (!smtp && strcmp(syntax, "header") != 0) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("syntax must be header or smtp", -1));
+            return TCL_ERROR;
         }
+        email = Tcl_GetStringFromObj(emailObj, &length);
+        EmailPartsInit(&parts);
+        if ((size_t)length != strlen(email)) {
+            error = "embedded NUL in address";
+        } else if (!EmailParse(email, smtp, &parts, &error)) {
+            /* The parser supplied a diagnostic. */
+        } else {
+            Tcl_Obj *dict = Tcl_NewDictObj();
+            EventPut(dict, "localpart", parts.local.string);
+            EventPut(dict, "domain", parts.domain.string);
+            EventPut(dict, "address", parts.address.string);
+            if (parts.name.length > 0) EventPut(dict, "name", parts.name.string);
+            Tcl_SetObjResult(interp, dict);
+            EmailPartsFree(&parts);
+            return TCL_OK;
+        }
+        Ns_TclPrintfResult(interp, "Could not parse email \"%s\": %s", email, error);
+        EmailPartsFree(&parts);
+        return TCL_ERROR;
+    }
+
+    case cmdCheckEmail: {
+        EmailParts parts;
+        const char *email, *error;
+        TCL_SIZE_T length;
+
+        if (objc != 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "email");
+            return TCL_ERROR;
+        }
+        email = Tcl_GetStringFromObj(objv[2], &length);
+        EmailPartsInit(&parts);
+        if ((size_t)length == strlen(email) && EmailParse(email, NS_FALSE, &parts, &error)) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj(parts.address.string, parts.address.length));
+        }
+        EmailPartsFree(&parts);
+        break;
+    }
 
     case cmdSpamVersion:
 #ifdef USE_DSPAM
@@ -6618,240 +7123,6 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
     return TCL_OK;
 }
 
-static bool parseEmail(smtpdEmail *addr, char *str)
-{
-    int tok = ' ', ingroup = 0;
-    char *phrase, *mailbox, *domain, *comment;
-
-    while (tok) {
-        tok = parsePhrase(&str, &phrase, ingroup ? ",%@<;" : ",%@<:");
-        switch (tok) {
-        case ',':
-        case '\0':
-        case ';':
-            if (tok == ';') {
-                ingroup = 0;
-            }
-            break;
-
-        case ':':
-            ingroup++;
-            break;
-
-        case '%':
-        case '@':
-            (void) parseDomain(&str, &domain, &comment);
-            if (!*phrase || !*domain) {
-                return NS_FALSE;
-            }
-            addr->name = comment;
-            addr->mailbox = phrase;
-            addr->domain = domain;
-            return NS_TRUE;
-
-        case '<':
-            tok = parsePhrase(&str, &mailbox, "%@>");
-            switch (tok) {
-            case '%':
-            case '@':
-                if (!*mailbox) {
-                    *--str = '@';
-                    tok = parseRoute(&str, &comment);
-                    if (tok != ':') {
-                        while (tok && tok != '>') {
-                            tok = *str++;
-                        }
-                        continue;
-                    }
-                    tok = parsePhrase(&str, &mailbox, "%@>");
-                    if (tok != '@' && tok != '%') {
-                        continue;
-                    }
-                }
-                (void) parseDomain(&str, &domain, 0);
-                if (!*mailbox || !*domain) {
-                    return NS_FALSE;
-                }
-                addr->name = phrase;
-                addr->mailbox = mailbox;
-                addr->domain = domain;
-                return NS_TRUE;
-            }
-        }
-    }
-    return NS_FALSE;
-}
-
-/*
- * Parse an RFC 822 "phrase",stopping at 'specials'
- */
-static int parsePhrase(char **inp, char **phrasep, const char *specials)
-{
-    char *src = *inp, *dst;
-
-    src = parseSpace(src);
-    *phrasep = dst = src;
-    for (;;) {
-        char c = *src++;
-
-        if (c == '\"') {
-            while ((c = *src)) {
-                src++;
-                if (c == '\"') {
-                    break;
-                }
-                if (c == '\\') {
-                    if (!(c = *src)) {
-                        break;
-                    }
-                    src++;
-                }
-                *dst++ = c;
-            }
-
-        } else if (isspace(c) || c == '(') {
-            src--;
-            src = parseSpace(src);
-            *dst++ = ' ';
-
-        } else if (!c || strchr(specials, c)) {
-            if (dst > *phrasep && dst[-1] == ' ') {
-                dst--;
-            }
-            *dst = '\0';
-            *inp = src;
-            return c;
-
-        } else {
-            *dst++ = c;
-        }
-    }
-}
-
-/*
- * Parse a domain.  If 'commentp' is non-nil,parses any trailing comment
- */
-static int parseDomain(char **inp, char **domainp, char **commentp)
-{
-    int comment;
-    char *src = *inp, *dst, *cdst;
-
-    if (commentp) {
-        *commentp = NULL;
-    }
-    src = parseSpace(src);
-    *domainp = dst = src;
-    for (;;) {
-        char c = *src++;
-
-        if (isalnum(c) || c == '-' || c == '[' || c == ']') {
-            *dst++ = c;
-            if (commentp) {
-                *commentp = NULL;
-            }
-
-        } else if (c == '.') {
-            if (dst > *domainp && dst[-1] != '.') {
-                *dst++ = c;
-            }
-            if (commentp) {
-                *commentp = NULL;
-            }
-
-        } else if (c == '(') {
-            if (commentp) {
-                *commentp = cdst = src;
-                comment = 1;
-                while (comment && (c = *src)) {
-                    src++;
-                    if (c == '(') {
-                        comment++;
-                    } else if (c == ')') {
-                        comment--;
-                    } else if (c == '\\' && (c = *src)) {
-                        src++;
-                    }
-                    if (comment) {
-                        *cdst++ = c;
-                    }
-                }
-                *cdst = '\0';
-            } else {
-                src--;
-                src = parseSpace(src);
-            }
-
-        } else if (!isspace(c)) {
-            if (dst > *domainp && dst[-1] == '.') {
-                dst--;
-            }
-            *dst = '\0';
-            *inp = src;
-            return c;
-        }
-    }
-}
-
-/*
- * Parse a source route (at-domain-list)
- */
-static int parseRoute(char **inp, char **routep)
-{
-    char *src = *inp, *dst;
-
-    src = parseSpace(src);
-    *routep = dst = src;
-    for (;;) {
-        char c = *src++;
-        if (isalnum(c) || c == '-' || c == '[' || c == ']' || c == ',' || c == '@') {
-            *dst++ = c;
-        } else if (c == '.') {
-            if (dst > *routep && dst[-1] != '.') {
-                *dst++ = c;
-            }
-        } else if (isspace(c) || c == '(') {
-            src--;
-            src = parseSpace(src);
-        } else {
-            while (dst > *routep && (dst[-1] == '.' || dst[-1] == ',' || dst[-1] == '@')) {
-                dst--;
-            }
-            *dst = '\0';
-            *inp = src;
-            return c;
-        }
-    }
-}
-
-/*
- * Parse comments and whitespaces
- */
-static char *parseSpace(char *s)
-{
-    int c, comment;
-
-    while ((c = *s)) {
-        if (c == '(') {
-            comment = 1;
-            s++;
-            while ((comment && (c = *s))) {
-                s++;
-                if (c == '\\' && *s) {
-                    s++;
-                } else if (c == '(') {
-                    comment++;
-                } else if (c == ')') {
-                    comment--;
-                }
-            }
-            s--;
-        } else if (!isspace(c)) {
-            break;
-        }
-        s++;
-    }
-    return s;
-}
 
 static int parseInt(char *val)
 {

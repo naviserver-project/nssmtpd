@@ -132,6 +132,104 @@ test recipient-filelookup {strict classical lookup preserves identity and reject
     set results
 } -result {one@remote.test identity@example.test {NSSMTPD ALIAS UNKNOWN} one@remote.test}
 
+# SPF rejection is an explicit rule, independently of greylisting.
+foreach spfResult {fail pass softfail neutral none temperror permerror error garbage} {
+    test recipient-spf-$spfResult {only SPF fail rejects external recipients} -setup {
+        policy_map
+        set config [ns_configsection ns/server/test/module/nssmtpd]
+        set oldSpf [ns_config ns/server/test/module/nssmtpd spfproc ""]
+        ns_set update $config spfproc policy_test_spf
+        set oldPolicy [ns_config ns/server/test/module/nssmtpd recipientpolicyproc ""]
+        ns_set update $config recipientpolicyproc [list smtpd::policychain {
+            {smtpd::spfpolicy $context findings}
+            {expr {[dict exists $findings spf-fail] ? "reject" : "continue"}}
+        }]
+        nsv_array reset spf-policy-test [list calls 0 results [list $spfResult]]
+    } -body {
+        set expected [expr {!$trusted && $spfResult eq "fail" ? "550 503 {}" : "250 250 one@remote.test"}]
+        list [expr {[policy_session known@example.test] eq $expected}] \
+            [expr {[nsv_get spf-policy-test calls] == ($trusted ? 0 : 1)}]
+    } -cleanup {
+        ns_set update $config spfproc $oldSpf
+        ns_set update $config recipientpolicyproc $oldPolicy
+    } -result {1 1}
+}
+
+test recipient-spf-rollback {SPF rejection preserves the previously accepted recipient} -setup {
+    policy_map
+    set config [ns_configsection ns/server/test/module/nssmtpd]
+    set oldSpf [ns_config ns/server/test/module/nssmtpd spfproc ""]
+    ns_set update $config spfproc policy_test_spf
+    set oldPolicy [ns_config ns/server/test/module/nssmtpd recipientpolicyproc ""]
+    ns_set update $config recipientpolicyproc [list smtpd::policychain {
+        {smtpd::spfpolicy $context findings}
+        {expr {[dict exists $findings spf-fail] ? "reject" : "continue"}}
+    }]
+    nsv_array reset spf-policy-test {calls 0 results {pass fail}}
+} -body {
+    set expected [expr {$trusted ? "{250 250} 250 {identity@example.test one@remote.test}" : "{250 550} 250 one@remote.test"}]
+    expr {[policy_session {known@example.test identity@example.test}] eq $expected}
+} -cleanup {
+    ns_set update $config spfproc $oldSpf
+    ns_set update $config recipientpolicyproc $oldPolicy
+} -result 1
+
+test recipient-spf-observational {an evaluator alone does not impose an implicit rejection} -setup {
+    policy_map
+    set config [ns_configsection ns/server/test/module/nssmtpd]
+    set oldSpf [ns_config ns/server/test/module/nssmtpd spfproc ""]
+    ns_set update $config spfproc policy_test_spf
+    nsv_array reset spf-policy-test {calls 0 results fail}
+} -body {
+    policy_session known@example.test
+} -cleanup {
+    ns_set update $config spfproc $oldSpf
+} -result {250 250 one@remote.test}
+
+test recipient-data-policy {local delivery respects DATA rejection before dataproc} -setup {
+    policy_map
+    nsv_set alias-test data-rules {{dict create action reject reason test-data-policy}}
+    set savedBody [nsv_get alias-test body]
+} -body {
+    set result [policy_session known@example.test]
+    list [expr {[lrange $result 0 1] eq [expr {$trusted ? "250 250" : "250 550"}]}] \
+        [expr {$trusted || [nsv_get alias-test body] eq $savedBody}]
+} -cleanup {
+    nsv_unset alias-test data-rules
+} -result {1 1}
+
+foreach address {{nobody+|sleep 1; ping -p cafebabe -c 3 sploit.wu.ac.at@localhost} {user @ example.test} {user@exam ple.test} {a..b@example.test}} {
+    test recipient-invalid-syntax-$address {malformed envelope is rejected before alias or policy handling} -body {
+        policy_map
+        lrange [policy_session [list $address]] 0 1
+    } -result {553 503}
+}
+
+foreach {path expected} {
+    {<bounce-lite6.39265260631.4-355+1791622104+f8771ef23b8323544edfb6e3671837541e1faac9@openacs.org>} 250
+    {<sender@example.test> BODY=8BITMIME SIZE=100} 250
+    {<sender@example.test> SIZE=100 BODY=7BIT} 250
+    {<@relay.example:sender@example.test>} 250
+    {<"john smith"@example.test>} 250
+    {<john smith@example.test>} 553
+    {<sender @example.test>} 553
+    {<sender@example.test>garbage} 553
+    {<sender@example.test> SIZE=garbage} 501
+    {<sender@example.test> UNKNOWN=test} 555
+} {
+    test sender-envelope-$path {address validation remains separate from supported MAIL parameters} -body {
+        set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+        fconfigure $channel -translation crlf -buffering line
+        try {
+            gets $channel
+            policy_command $channel {HELO test.example}
+            set code [string range [policy_command $channel "MAIL FROM:$path"] 0 2]
+            policy_command $channel QUIT
+            set code
+        } finally {close $channel}
+    } -result $expected
+}
+
 file delete -force $aliasfile
 set failures $::tcltest::numTests(Failed)
 cleanupTests

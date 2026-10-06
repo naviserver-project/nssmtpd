@@ -85,6 +85,8 @@ test nssmtpd-received {listener prepends its trace header and retains existing h
          [expr {[string first $message $data] >= 0}]
 } -result {1 1}
 
+source [file join $::env(ALIAS_TEST_ROOT) tests parseemail.test]
+source [file join $::env(ALIAS_TEST_ROOT) tests policy-chain.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests spf.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests spf-tcl.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests spf-auto.test]

@@ -4,6 +4,13 @@ source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
 source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
 
+proc header_test_policy {context} {
+    if {[nsv_get alias-test data-rules rules]} {
+        return [smtpd::policychain $rules $context]
+    }
+    return {action accept}
+}
+
 proc header_test_auth {id} {
     source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
     if {[nsv_exists alias-test header-error]} {error "diagnostics unavailable"}
@@ -22,6 +29,16 @@ proc header_test_auth {id} {
     } finally {ns_set free $copy}
     set result [smtpd::authdetails $id]
 
+    return $result
+}
+
+# Deterministic evaluator for SMTP policy integration tests; no DNS I/O.
+proc policy_test_spf {args} {
+    if {![nsv_exists spf-policy-test results]} {return pass}
+    set call [nsv_incr spf-policy-test calls]
+    set results [nsv_get spf-policy-test results]
+    set result [lindex $results [expr {min($call-1, [llength $results]-1)}]]
+    if {$result eq "error"} {error "test evaluator unavailable"}
     return $result
 }
 

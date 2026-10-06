@@ -29,7 +29,7 @@ foreach section {ns/parameters ns/sendmail} {
 }
 ns_section ns/servers {
     ns_param test {Alias tests}
-    if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {ns_param sink {STARTTLS test sink}}
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {ns_param sink {STARTTLS test sink}}
 }
 ns_section ns/server/test {
     ns_param minthreads 2
@@ -52,10 +52,12 @@ ns_section ns/server/test/module/nssock {
     ns_param port 0
 }
 ns_section ns/server/test/module/nssmtpd {
-    if {$::env(ALIAS_TEST_MODE) eq "headers"} {
+    if {$::env(ALIAS_TEST_MODE) in {headers datapolicy}} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
         ns_param authdetailsproc header_test_auth
-        ns_param authdetailheaders true
+        ns_param authdetailheaders [expr {$::env(ALIAS_TEST_MODE) eq "headers"}]
+        ns_param datapolicyproc header_test_policy
+        ns_param spfproc policy_test_spf
         ns_param maxdata 16384
     }
     if {$::env(ALIAS_TEST_MODE) in {events eventsoff}} {
@@ -84,8 +86,9 @@ ns_section ns/server/test/module/nssmtpd {
     ns_param writetimeout [expr {$::env(ALIAS_TEST_MODE) eq "io" ? "1.5s" : "3"}]
     ns_param maxrcpt 3
     ns_param relaydomains example.test
-    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
+    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {headers datapolicy events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
     ns_param rcptproc [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff} ? "event_test_rcpt" : ([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
+    if {[string match policy* $::env(ALIAS_TEST_MODE)]} {ns_param datapolicyproc header_test_policy}
     ns_param dataproc alias_test_data
     if {$::env(ALIAS_TEST_MODE) in {events eventsoff enabled untrusted proxy greyexternal greytrusted greyoff greyempty}} {
         ns_param aliasproc {alias_test_resolver {prefix argument}}
@@ -121,7 +124,7 @@ ns_section ns/server/test/module/nssmtpd {
             ns_param recipientpolicyproc ""
         }
     }
-    if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
         ns_param eventlogging true
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
@@ -132,7 +135,7 @@ ns_section alias-test {
     ns_param source $root
 }
 
-if {$::env(ALIAS_TEST_MODE) in {proxy headers}} {
+if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {
     ns_section ns/server/sink/tcl {
         ns_param initfile [file join $nsroot bin init.tcl]
         ns_param initcmds [list source [file join $root tests alias-fixture.tcl]]

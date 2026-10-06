@@ -1,0 +1,89 @@
+# -*- Tcl -*-
+# Complete address parsing preserves quoting and never performs DNS lookups.
+test parseemail-basic {bare mailbox returns parsed constituents} -body {
+    ns_smtpd parseemail user@example.org
+} -result {localpart user domain example.org address user@example.org}
+
+test parseemail-name {display name and quoted local part are distinct} -body {
+    ns_smtpd parseemail {Example User <"john smith"@example.org>}
+} -result {localpart {john smith} domain example.org address {"john smith"@example.org} name {Example User}}
+
+test parseemail-quoted {quotes and backslashes retain valid envelope serialization} -body {
+    ns_smtpd parseemail {"a\"b\\c"@example.org}
+} -result {localpart {a"b\c} domain example.org address {"a\"b\\c"@example.org}}
+
+test parseemail-cfws {header comments and whitespace around constituents are legal} -body {
+    ns_smtpd parseemail {User (comment) <john (local) @ (domain) example.org> (tail)}
+} -result {localpart john domain example.org address john@example.org name User}
+
+test parseemail-fold {folding whitespace inside a quoted header local part is unfolded} -body {
+    ns_smtpd parseemail "\"john\r\n smith\"@example.org"
+} -result {localpart {john smith} domain example.org address {"john smith"@example.org}}
+
+test parseemail-ip {IPv4 and IPv6 literals are validated without resolution} -body {
+    list [dict get [ns_smtpd parseemail {user@[192.0.2.1]}] domain] \
+         [dict get [ns_smtpd parseemail {user@[IPv6:2001:db8::1]}] domain]
+} -result {{[192.0.2.1]} {[IPv6:2001:db8::1]}}
+
+test parseemail-smtp {SMTP mode accepts a mailbox/path but no display name} -body {
+    list [ns_smtpd parseemail -syntax smtp {<"john smith"@example.org>}] \
+        [ns_smtpd parseemail -syntax smtp <>]
+} -result {{localpart {john smith} domain example.org address {"john smith"@example.org}} {localpart {} domain {} address <>}}
+
+test parseemail-route {obsolete SMTP source route is validated and ignored} -body {
+    ns_smtpd parseemail -syntax smtp {<@relay.example,@other.example:user@example.org>}
+} -result {localpart user domain example.org address user@example.org}
+
+test parseemail-shared {neither parser nor compatibility wrapper mutates Tcl input} -body {
+    set address {Name <user@example.org>}
+    set copy $address
+    list [dict get [ns_smtpd parseemail $address] address] [ns_smtpd checkemail $address] $copy $address
+} -result {user@example.org user@example.org {Name <user@example.org>} {Name <user@example.org>}}
+
+foreach address [list \
+    {nobody+|sleep 1; ping -p cafebabe -c 3 sploit.wu.ac.at@localhost} \
+    {nobody+|sleep 1; ping -p cafebabe -c 3 sploit.wu.ac.at @ localhost} \
+    {xxx <nobody+|sleep 1; ping -p cafebabe -c 3 sploit.wu.ac.at @ localhost>} \
+    {a..b@example.org} {.a@example.org} {a.@example.org} \
+    {a@exam ple.org} {a@example..org} {a@-example.org} {a@example-.org} \
+    {a@example.org.} {a@example.org garbage} {Name <a@example.org} \
+    {a@example.org,b@example.org} {Group: a@example.org;} \
+    {"unterminated@example.org} {a@[999.1.2.3]} {a@[IPv6:not-an-ip]} \
+    "a@example.org\nInjected: yes" "a@example.org\x00suffix" \
+    "a@[string repeat x 64].org"] {
+    test parseemail-invalid-$address {complete malformed input raises an ordinary Tcl error; checkemail returns empty} -body {
+        set code [catch {ns_smtpd parseemail $address} message options]
+        list $code [string match {Could not parse email *: *} $message] \
+            [dict get $options -errorcode] [ns_smtpd checkemail $address]
+    } -result {1 1 NONE {}}
+}
+
+foreach address {{User <user@example.org>} {user @example.org} {user@ example.org} {< user@example.org>} {<user@example.org >} {user(comment)@example.org}} {
+    test parseemail-smtp-invalid-$address {SMTP syntax rejects header-only whitespace and display names} -body {
+        catch {ns_smtpd parseemail -syntax smtp $address}
+    } -result 1
+}
+
+test parseemail-name-nul {embedded NUL in display name is rejected before extraction} -body {
+    catch {ns_smtpd parseemail "Name\x00Hidden <user@example.org>"} message
+    string match {*embedded NUL in address} $message
+} -result 1
+
+test parseemail-bounce {existing OpenACS bounce local parts longer than 64 octets remain usable} -body {
+    set address bounce-lite6.39265260631.4-355+1791622104+f8771ef23b8323544edfb6e3671837541e1faac9@openacs.org
+    expr {[dict get [ns_smtpd parseemail -syntax smtp $address] address] eq $address}
+} -result 1
+
+test parseemail-atext {plus and pipe are valid characters, not indicators of a syntax error} -body {
+    dict get [ns_smtpd parseemail {nobody+|tag@example.org}] localpart
+} -result nobody+|tag
+
+test parseemail-checkquote {compatibility wrapper preserves necessary quotes} -body {
+    ns_smtpd checkemail {"john smith"@example.org}
+} -result {"john smith"@example.org}
+
+# Local variables:
+#    mode: tcl
+#    tcl-indent-level: 4
+#    indent-tabs-mode: nil
+# End:

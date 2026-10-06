@@ -213,7 +213,7 @@ change recipients, connection flags or SMTP replies.
 `none` (no SPF policy), `disabled`, `unavailable`, or `evaluation-error`.
 It uses the actual connection peer, not a sender-supplied Received header;
 replayed mail therefore describes the replaying relay. Local peers are marked
-`not-checked-local`. Unlike greylisting exceptions, diagnostics run for every
+`not-checked-local`. Diagnostics run for every
 completed external DATA transaction when this callback and event logging are enabled.
 
 DKIM diagnostics require nsdns with `lookup -details -jointxt -timeout`.
@@ -227,7 +227,9 @@ key names are queried once per message. SPF has its evaluator's separate timeout
 The `authentication` event is joined to the existing rows by server, session
 and transaction in nsstats, where its metadata appears only under Details.
 Old records cannot acquire diagnostics retroactively. Diagnostics run when
-event logging or diagnostic headers are enabled. Delivery decisions remain unchanged.
+event logging or diagnostic headers are enabled. These observations do not
+alter delivery. Explicit policy chains can use the same evaluators to decide
+whether a message should be accepted.
 
 To include link findings in mail forwarded through the configured relay:
 
@@ -817,6 +819,105 @@ that change IP addresses between retries may be delayed repeatedly. Spammers
 that retry can pass. This is a small SMTP policy, not content filtering. The
 existing streaming relay still forwards before its message-data/spamd checks.
 
+### Parsing and validating email addresses
+
+```tcl
+ns_smtpd parseemail {Example User <"john smith"@example.org>}
+# localpart {john smith} domain example.org address {"john smith"@example.org} name {Example User}
+
+ns_smtpd parseemail -syntax smtp {<"john smith"@example.org>}
+# localpart {john smith} domain example.org address {"john smith"@example.org}
+```
+
+The default `header` syntax parses one complete mailbox, optionally with a
+display name and angle brackets. Header comments and folding whitespace are
+allowed between constituents; quoted local parts are decoded into `localpart`.
+The `address` field retains the quoting/escaping needed for a valid mailbox.
+`name` is present only for a display name. Groups, address lists, trailing
+unparsed text, malformed domain labels/literals and unquoted spaces inside a
+local part are rejected. Existing long local parts (including OpenACS bounce\naddresses) remain supported; parsing does not add a new SMTP mailbox-size\nrestriction. Domains are DNS-style labels or IPv4/IPv6 address
+literals. Syntax validation performs no DNS lookup and grants no relay permission.
+
+`-syntax smtp` parses a bare mailbox or angle path with SMTP quoting rules,
+without header display names, comments or whitespace around `@`. It also accepts
+`<>` as the null reverse path (empty `localpart` and `domain`), and validates and
+ignores obsolete SMTP source routes. MAIL and RCPT use this syntax before any
+normalization; a null RCPT is rejected. SIZE and BODY parameters of MAIL are
+handled separately. Existing command-level handling of null senders remains.
+
+Like `ns_parseurl`, a parse failure raises an ordinary Tcl error with a message
+`Could not parse email "...": reason`, without a custom error code or partial
+result. `ns_smtpd checkemail` uses the header parser and retains its string
+contract: a valid serialized address or an empty string, without mutating its
+Tcl input. It now rejects malformed addresses that the former phrase extractor
+accepted. Header whitespace around `@` is legal; the corresponding SMTP path
+is rejected. Valid local parts containing spaces remain quoted in the output.
+
+### Explicit policy chains and accumulated findings
+
+`recipientpolicyproc` remains a command prefix accepting an SMTP context and
+returning an accept/defer/reject dictionary. Existing single callbacks keep
+working. `smtpd::policychain rules context` also accepts an ordered list of Tcl
+scripts. Each script sees `$context` and a shared `$findings` dictionary, can
+call helpers or evaluate expressions, and returns `continue`, `accept`, `defer`,
+`reject`, or a dictionary with `action`, optional `reason`, and optional `message`.
+`continue` advances to the next script; any other action stops the chain. At the
+end, the chain accepts. Tcl `continue`, `break` (accept), and `return` are also
+supported. Errors and invalid results defer with reason `policy-rule-error`.
+The result includes all accumulated `findings` and the one-based deciding
+`policy-rule` index. These are included in event metadata. Rules are trusted
+configuration scripts; they must not modify SMTP sessions or send mail.
+
+RCPT contexts include `phase rcpt` and the original `recipient`. DATA contexts
+include `phase data` and a `recipients` list (after alias expansion). Trusted
+local clients bypass both policy hooks. Findings belong to one chain invocation;
+there is no shared mutable dictionary across SMTP transactions or phases.
+
+DKIM signatures are available only after DATA. Use `datapolicyproc` for a
+combined SPF/DKIM rule. This optional hook runs before the built-in relay sends
+message bytes or before `dataproc` for local delivery. It buffers relay DATA up
+to `maxdata`, even without `authdetailheaders`, preserving original signed bytes
+and dot stuffing. A rejection returns `550 5.7.1`; a deferral returns `451`.
+Rejected messages are not queued by the relay. The event is `message-policy`,
+and the transaction outcome is `message-policy-rejected`. Empty/unset leaves
+the existing streaming behavior unchanged. Diagnostic callbacks remain purely
+informational.
+
+```tcl
+ns_param spfproc smtpd::spfauto
+ns_param recipientpolicyproc {
+    smtpd::policychain {
+        {smtpd::greylist $context}
+    }
+}
+ns_param datapolicyproc {
+    smtpd::policychain {
+        {smtpd::spfpolicy $context findings}
+        {smtpd::dkimkeypolicy $context findings}
+        {
+            if {[dict exists $findings spf-fail]
+                && [dict exists $findings dkim-no-key]} {
+                dict create action reject reason spf-fail-and-dkim-no-key \
+                    message "Authentication policy failed"
+            } else {
+                continue
+            }
+        }
+    }
+}
+```
+
+`spfpolicy` collects `spf-result` and sets `spf-fail` only for `fail`; disabled,
+unavailable, and evaluator-error results remain distinct. It always continues.
+`dkimkeypolicy` collects the existing per-signature DNS diagnostics and sets
+`dkim-no-key` only when at least one signature exists and **all** provided
+signature keys are definitively absent. An unsigned message, a key lookup
+error/timeout, invalid signature tags, any present/revoked key, or exceeding
+the eight-signature limit does not produce that aggregate finding. Key presence
+is not cryptographic verification. A DATA rejection affects all recipients of
+the message. Neither configuring `spfproc` nor collecting findings implicitly
+rejects mail; the visible chain owns the decision.
+
 ### Optional SPF-verified greylist exceptions
 
 Large mail providers can retry from different IP addresses, repeatedly creating
@@ -836,8 +937,9 @@ ns_section "ns/server/$server/module/nssmtpd" {
 
 The exception matches the exact, case-sensitive **envelope sender and original
 recipient**, before alias expansion. Null envelope senders are not eligible for this exception, since the pair alone cannot constrain their HELO identity. Only an SPF `pass` for that pair bypasses
-greylisting. Other SPF results, disabled evaluation and callback errors follow
-ordinary greylisting. Unmatched pairs make no SPF query. Relay authorization,
+greylisting. Other results, disabled evaluation and callback errors follow
+ordinary greylisting. Unmatched pairs do not cause an SPF lookup unless another
+configured policy rule requests it. Relay authorization,
 unknown-recipient rejection and later checks still apply. The recipient event
 records an accepted exception with reason `verified-report-sender`.
 
@@ -1013,8 +1115,8 @@ use another SPF implementation and provide their own caching/time limits.
 `ns_smtpd gethelo id` exposes the actual client HELO/EHLO identity, rather than
 the reverse DNS hostname. It is retained across MAIL/RSET and cleared after
 STARTTLS and at session release. The policy context includes it as `helo`.
-SPF evaluation is independent of the accept/defer decision and can be reused by
-other policies. Outbound MX routing for future direct delivery remains separate.
+SPF evaluation alone does not impose a delivery decision. Use explicit policy
+rules to interpret the result, as shown below. Outbound MX routing for future direct delivery remains separate.
 
 For deployment, first run `make test`.
  After enabling the setting, verify from
@@ -1071,7 +1173,8 @@ server. Below is a summary of available commands:
   - `ns_smtpd encode /base64|hex|qprint/ /text/`
   - `ns_smtpd decode /base64|hex|qprint/ /text/`
 - **Validation and Versioning:**
-  - `ns_smtpd checkemail /email/` &nbsp;&nbsp;&nbsp; *(Returns a valid email in the form name@domain)*
+  - `ns_smtpd parseemail ?-syntax header|smtp? ?--? /email/` *(Returns parsed address constituents as a dictionary)*
+  - `ns_smtpd checkemail /email/` *(Returns the parsed address, or an empty string on invalid input)*
   - `ns_smtpd checkdomain /domain/`
   - `ns_smtpd virusversion` &nbsp;&nbsp;&nbsp; *(Returns anti-virus tool version)*
   - `ns_smtpd spamversion` &nbsp;&nbsp;&nbsp; *(Returns anti-spam tool version)*
