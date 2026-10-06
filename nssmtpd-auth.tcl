@@ -38,6 +38,17 @@ proc smtpd::AuthDkimDetails {signatures} {
         try {
             if {[string length $signature] > 16384} {::error "oversized signature"}
             set tags [AuthTags $signature]
+            if {[dict exists $tags a]} {
+                set algorithm [dict get $tags a]
+                if {![regexp {^[a-z0-9-]+$} $algorithm]} {
+                    ::error "invalid signature algorithm"
+                }
+                dict set details $prefix-algorithm $algorithm
+                if {$algorithm eq "rsa-sha1"} {
+                    dict set details $prefix-algorithm-status obsolete
+                    dict set details dkim-obsolete-algorithm true
+                }
+            }
             set domain [dict get $tags d]
             set selector [dict get $tags s]
             set name "$selector._domainkey.$domain"
@@ -174,6 +185,11 @@ proc smtpd::AuthHtmlLinks {html} {
             }
             set host [AuthLinkHost $href]
             if {$host eq ""} {set href ""; continue}
+            set hosts [expr {[dict exists $findings link-destination-hosts]
+                             ? [dict get $findings link-destination-hosts] : {}}]
+            if {$host ni $hosts} {
+                dict lappend findings link-destination-hosts $host
+            }
             # Inspect URL-valued query parameters, independent of vendor names.
             # Decode each value once; this is not a redirect traversal.
             set queryStart [string first ? $href]
@@ -231,7 +247,23 @@ proc smtpd::AuthLinkDetails {message} {
                 lappend pending {*}[dict get $properties parts]
             } elseif {[string equal -nocase [dict get $properties content] text/html]} {
                 dict set details link-status inspected
-                set details [dict merge $details [AuthHtmlLinks [mime::getbody $part]]]
+                set links [AuthHtmlLinks [mime::getbody $part]]
+                # Preserve hosts across HTML parts, with a message-wide cap.
+                set hosts [expr {[dict exists $details link-destination-hosts]
+                                 ? [dict get $details link-destination-hosts] : {}}]
+                if {[dict exists $links link-destination-hosts]} {
+                    foreach host [dict get $links link-destination-hosts] {
+                        if {$host ni $hosts} {
+                            if {[llength $hosts] >= 100} {
+                                dict set details link-destination-limit exceeded
+                                break
+                            }
+                            lappend hosts $host
+                        }
+                    }
+                    dict set links link-destination-hosts $hosts
+                }
+                set details [dict merge $details $links]
             }
         }
     } on error {} {

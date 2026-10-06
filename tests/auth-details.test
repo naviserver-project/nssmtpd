@@ -18,6 +18,16 @@ test auth-no-key {missing TXT distinguishes unverifiable signature from bad cryp
     list [dict get $result dkim-1-key] [dict get $result dkim-1-verification] $authQueries
 } -result {no-key not-performed default._domainkey.example.test}
 
+test auth-obsolete-algorithm {SHA-1 is diagnosed even with a published key} -body {
+    set authQueries {}
+    set authResponse {rcode 0 truncated 0 answer {{example.test TXT {v=DKIM1; p=AAAA} 60}}}
+    set result [smtpd::AuthDkimDetails [list [string map {rsa-sha256 rsa-sha1} $authSignature] $authSignature]]
+    list [dict get $result dkim-1-algorithm] [dict get $result dkim-1-algorithm-status] \
+        [dict get $result dkim-obsolete-algorithm] [dict get $result dkim-1-key] \
+        [dict get $result dkim-1-verification] [dict get $result dkim-2-algorithm] \
+        [dict exists $result dkim-2-algorithm-status] [llength $authQueries]
+} -result {rsa-sha1 obsolete true key-present-not-verified not-performed rsa-sha256 0 1}
+
 test auth-dns-errors {NXDOMAIN, SERVFAIL, truncation and timeout remain distinct} -body {
     set results {}
     foreach authResponse {
@@ -185,29 +195,37 @@ test auth-link-url-parts {parser handles schemes and protocol-relative URLs} -co
 
 test auth-link-mismatch {hostname label including nested markup differs from target} -constraints html_parser -body {
     smtpd::AuthHtmlLinks {<a href="https://redirect.example/path"><b>Server.Openacs.org</b></a>}
-} -result {link-host-mismatch {server.openacs.org redirect.example}}
+} -result {link-destination-hosts redirect.example link-host-mismatch {server.openacs.org redirect.example}}
 
 test auth-link-redirect {HTML entities and encoded query URL are decoded without fetching} -constraints html_parser -body {
     smtpd::AuthHtmlLinks {<a href="https://redirect.example/?x=1&amp;adj_redirect=https%3A%2F%2Fother.example%2Flogin%3Fuser%3Dprivate">Confirm</a>}
-} -result {link-embedded-redirect {redirect.example other.example}}
+} -result {link-destination-hosts redirect.example link-embedded-redirect {redirect.example other.example}}
 
-test auth-link-benign {ordinary labels and matching normalized hosts produce no finding} -constraints html_parser -body {
+test auth-link-benign {ordinary labels retain destinations without suspicious findings} -constraints html_parser -body {
     smtpd::AuthHtmlLinks {<a href="https://EXAMPLE.org./a?next=https%3A%2F%2Fexample.org%2Fb">example.org</a><a href="/relative">Help</a><a href="mailto:a@example.org">Contact</a>}
-} -result {}
+} -result {link-destination-hosts example.org}
 
 test auth-link-userinfo {userinfo cannot disguise the actual hostname} -constraints html_parser -body {
     smtpd::AuthHtmlLinks {<a href="https://example.org@evil.example/">example.org</a>}
-} -result {link-host-mismatch {example.org evil.example}}
+} -result {link-destination-hosts evil.example link-host-mismatch {example.org evil.example}}
 
 test auth-link-multipart {base64 HTML inside multipart is inspected} -constraints html_parser -body {
     set html {<a href="https://evil.example/">example.org</a>}
     set message "MIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=test\n\n--test\nContent-Type: text/plain\n\nHello\n--test\nContent-Type: text/html\nContent-Transfer-Encoding: base64\n\n[binary encode base64 $html]\n--test--\n"
     smtpd::AuthLinkDetails $message
-} -result {link-status inspected link-host-mismatch {example.org evil.example}}
+} -result {link-status inspected link-destination-hosts evil.example link-host-mismatch {example.org evil.example}}
 
 test auth-link-qp {quoted-printable soft breaks and encoded equals signs are decoded} -constraints html_parser -body {
     smtpd::AuthLinkDetails "Content-Type: text/html\nContent-Transfer-Encoding: quoted-printable\n\n<a href=3D\"https://evil.exa=\nmple/\">example.org</a>"
-} -result {link-status inspected link-host-mismatch {example.org evil.example}}
+} -result {link-status inspected link-destination-hosts evil.example link-host-mismatch {example.org evil.example}}
+
+test auth-link-button-hosts {generic buttons retain only unique destination hosts} -constraints html_parser -body {
+    smtpd::AuthHtmlLinks {<a href="https://inygma.org.in/public/uploads/laststand.html#private@example.org">View Document</a><a href="https://inygma.org.in/other?user=private">Open</a><a href="https://facturo.pro/?tracking=private">Help</a>}
+} -result {link-destination-hosts {inygma.org.in facturo.pro}}
+
+test auth-link-multiple-parts {destination hosts accumulate across HTML parts} -constraints html_parser -body {
+    smtpd::AuthLinkDetails "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=test\n\n--test\nContent-Type: text/html\n\n<a href=\"https://one.example/private\">Open</a>\n--test\nContent-Type: text/html\n\n<a href=\"https://two.example/private\">Open</a>\n--test--\n"
+} -result {link-status inspected link-destination-hosts {one.example two.example}}
 
 test auth-link-bounds {oversize messages are explicitly uninspected} -body {
     smtpd::AuthLinkDetails [string repeat x 262145]
@@ -215,7 +233,7 @@ test auth-link-bounds {oversize messages are explicitly uninspected} -body {
 
 test auth-link-anchor-limit {HTML link scanning is bounded} -constraints html_parser -body {
     smtpd::AuthHtmlLinks [string repeat {<a href="https://example.org/">Help</a>} 101]
-} -result {link-limit exceeded}
+} -result {link-destination-hosts example.org link-limit exceeded}
 
 proc auth_header_fields {details fields} {
     set received [ns_set create -nocase received {*}$fields]

@@ -217,8 +217,11 @@ replayed mail therefore describes the replaying relay. Local peers are marked
 completed external DATA transaction when this callback and event logging are enabled.
 
 DKIM diagnostics require nsdns with `lookup -details -jointxt -timeout`.
-They record each signature's domain, selector and key lookup status: `no-key`,
+They record each signature's algorithm, domain, selector and key lookup status: `no-key`,
 `revoked-key`, `key-present-not-verified`, or a distinct lookup/record error.
+`rsa-sha1` produces a per-signature `algorithm-status obsolete` and a shared
+`dkim-obsolete-algorithm true` finding, independent of key availability. This
+is an algorithm diagnostic, not a cryptographic signature check.
 An unresolved CNAME is reported as such, not as an absent key. At most eight
 signatures are inspected, with five seconds shared across DNS queries; repeated
 key names are queried once per message. SPF has its evaluator's separate timeout.
@@ -1259,7 +1262,11 @@ No private driver socket fields or new NaviServer socket accessors are required.
 The test suite includes silent peers, EOF, truncated greetings, EOF after HELO,
 and successful delivery after a delayed greeting, using `ns_connchan` fixtures.
 
-HTML link diagnostics are also included in `authdetailsproc` Details. They flag
+HTML link diagnostics are also included in `authdetailsproc` Details.
+`link-destination-hosts` records up to 100 unique HTTP(S) anchor destination
+hosts per message, including generic buttons such as "View Document".
+`link-destination-limit exceeded` indicates additional hosts were omitted.
+They also flag
 hostname link text that differs from the actual URL host, and URL-valued query
 parameters pointing to another host. These are informational indicators, not
 spam verdicts: legitimate tracking links can produce the same findings. No links
