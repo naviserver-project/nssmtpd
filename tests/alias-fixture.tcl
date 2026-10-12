@@ -161,3 +161,16 @@ proc grey_test_policy {tag context} {
 #    tcl-indent-level: 4
 #    indent-tabs-mode: nil
 # End:
+
+proc incoming_auth_verify {prefix id user password} {
+    if {$user eq "ConfiguredUser"} {return [smtpd::authfile $id $user $password]}
+    nsv_incr incoming-auth calls
+    if {$user eq "FileUser"} {return [smtpd::authfile -file [nsv_get incoming-auth filename] $id $user $password]}
+    if {$prefix ne "prefix"} {error "prefix lost"}
+    if {$user eq "error"} {error "secret=$password"}
+    if {$user eq "invalid"} {return "not-a-boolean"}
+    nsv_set incoming-auth session $id
+    return [expr {$user eq "MacUser" && $password eq {MiXeD$Pass;[not Tcl]}}]
+}
+
+source [file join [ns_config alias-test source] nssmtpd-credentials.tcl]

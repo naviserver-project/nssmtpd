@@ -541,7 +541,7 @@ proc smtpd::spfpolicy {context findingsVar} {
 # DATA policy runs before either built-in relay forwarding or dataproc.
 proc smtpd::checkdatapolicy {id} {
     set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc ""]
-    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL])} {return 1}
+    if {$prefix eq "" || ([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL]) || [ns_smtpd getauthuser $id] ne ""} {return 1}
     try {
         set context [dict create id $id phase data peeraddr [ns_conn peeraddr] \
             sender [ns_smtpd getfrom $id] helo [ns_smtpd gethelo $id] \
@@ -576,7 +576,7 @@ proc smtpd::checkpolicy {id} {
     if {$prefix eq ""} {
         return 1
     }
-    if {[ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL]} {
+    if {([ns_smtpd getflag $id -1] & [ns_smtpd flag LOCAL]) || [ns_smtpd getauthuser $id] ne ""} {
         smtpd::logevent $id policy [dict create action accept reason local-bypass \
                                       recipient [lindex [ns_smtpd getrcpt $id 0] 0]]
         return 1

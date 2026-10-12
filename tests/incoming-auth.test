@@ -1,0 +1,290 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+nsv_set incoming-auth calls 0
+nsv_set alias-sink messages {}
+nsv_set alias-sink error ""
+proc auth_response {channel command} {
+    if {$command ne ""} {puts $channel $command; flush $channel}
+    set reply ""
+    set stop [expr {[clock milliseconds]+5000}]
+    while {[clock milliseconds] < $stop} {
+        if {[gets $channel line] >= 0} {
+            if {[regexp {^[0-9]{3}[- ]} $line]} {
+                append reply $line \n
+                if {[string index $line 3] eq " "} {return [string trimright $reply \n]}
+            }
+        } elseif {[eof $channel]} {error "SMTP EOF"}
+        after 5
+    }
+    error "SMTP reply timeout: $reply"
+}
+proc auth_open {{tls 1}} {
+    if {$tls} {
+        set c [open [list | openssl s_client -connect 127.0.0.1:$::env(ALIAS_TEST_PORT) \
+                         -starttls smtp -servername localhost -quiet -ign_eof \
+                         -ignore_unexpected_eof 2>@1] r+]
+    } else {
+        set c [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
+    }
+    fconfigure $c -blocking 0 -buffering line -translation crlf
+    # s_client consumes the initial greeting and performs the pre-TLS EHLO.
+    if {!$tls} {auth_response $c ""}
+    return $c
+}
+proc auth_plain {{user MacUser} {password {MiXeD$Pass;[not Tcl]}} {authz ""}} {
+    return [binary encode base64 "$authz\0$user\0$password"]
+}
+proc auth_close {c} {catch {auth_response $c QUIT}; catch {close $c}}
+test auth-1 {plaintext AUTH is denied and not advertised} -body {
+    set c [auth_open 0]
+    try {
+        set ehlo [auth_response $c {EHLO mac.example}]
+        list [string match {*AUTH*} $ehlo] [auth_response $c "AUTH PLAIN [auth_plain]"] [nsv_get incoming-auth calls]
+    } finally {auth_close $c}
+} -result {0 {538 5.7.11 Encryption required for authentication} 0}
+test auth-2 {TLS EHLO advertises PLAIN and unauthenticated relay stays denied} -body {
+    set c [auth_open]
+    try {
+        set ehlo [auth_response $c {EHLO mac.example}]
+        auth_response $c {MAIL FROM:<sender@example.test>}
+        list [string match {*250-AUTH PLAIN*} $ehlo] \
+             [string match {550 *} [auth_response $c {RCPT TO:<target@remote.test>}]] \
+             [auth_response $c "AUTH PLAIN [auth_plain]"]
+    } finally {auth_close $c}
+} -result {1 1 {503 5.5.1 AUTH not permitted now}}
+test auth-3 {case-sensitive credentials survive parsing; RSET retains authorization} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set login [auth_response $c "AUTH PLAIN [auth_plain]"]
+        set user [ns_smtpd getauthuser [nsv_get incoming-auth session]]
+        set repeat [auth_response $c "AUTH PLAIN [auth_plain]"]
+        auth_response $c RSET
+        auth_response $c {MAIL FROM:<sender@example.test>}
+        set recipient [auth_response $c {RCPT TO:<target@remote.test>}]
+        list $login $user $repeat [string match {250 *} $recipient]
+    } finally {auth_close $c}
+} -result {{235 2.7.0 Authentication successful} MacUser {503 5.5.1 AUTH not permitted now} 1}
+test auth-4 {challenge response and cancellation} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set prompt [auth_response $c {AUTH PLAIN}]
+        set cancel [auth_response $c *]
+        auth_response $c {AUTH PLAIN}
+        list $prompt $cancel [auth_response $c [auth_plain]]
+    } finally {auth_close $c}
+} -result {{334 } {501 5.5.2 Invalid AUTH response} {235 2.7.0 Authentication successful}}
+test auth-5 {bad credentials and delegated identities do not authorize relay} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set bad [auth_response $c "AUTH PLAIN [auth_plain MacUser wrong]"]
+        set delegated [auth_response $c "AUTH PLAIN [auth_plain MacUser {MiXeD$Pass;[not Tcl]} other]"]
+        auth_response $c {MAIL FROM:<sender@example.test>}
+        list $bad $delegated [string match {550 *} [auth_response $c {RCPT TO:<target@remote.test>}]]
+    } finally {auth_close $c}
+} -result {{535 5.7.8 Authentication credentials invalid} {535 5.7.8 Authentication credentials invalid} 1}
+test auth-6 {verifier errors and invalid results fail closed} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        list [auth_response $c "AUTH PLAIN [auth_plain error secret]"] \
+             [auth_response $c "AUTH PLAIN [auth_plain invalid secret]"]
+    } finally {auth_close $c}
+} -result {{454 4.7.0 Authentication temporarily unavailable} {454 4.7.0 Authentication temporarily unavailable}}
+test auth-7 {strict base64 and PLAIN fields reject malformed payloads} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set replies {}
+        foreach data [list ab!! ==== AAA [binary encode base64 {no separators}] \
+                          [binary encode base64 "\0user\0pass\0extra"]] {
+            lappend replies [auth_response $c "AUTH PLAIN $data"]
+        }
+        lsort -unique $replies
+    } finally {auth_close $c}
+} -result {{501 5.5.2 Invalid AUTH response}}
+test auth-8 {AUTH requires post-TLS EHLO; unsupported mechanism rejected} -body {
+    set c [auth_open]
+    try {
+        set early [auth_response $c "AUTH PLAIN [auth_plain]"]
+        auth_response $c {EHLO mac.example}
+        list $early [auth_response $c {AUTH LOGIN}]
+    } finally {auth_close $c}
+} -result {{503 5.5.1 AUTH not permitted now} {504 5.5.4 Unsupported authentication mechanism}}
+test auth-9 {a fresh connection never inherits authenticated state} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        auth_response $c {MAIL FROM:<sender@example.test>}
+        string match {550 *} [auth_response $c {RCPT TO:<target@remote.test>}]
+    } finally {auth_close $c}
+} -result 1
+test auth-10 {three failed credential checks close the session} -body {
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set replies {}
+        for {set i 0} {$i < 3} {incr i} {lappend replies [auth_response $c "AUTH PLAIN [auth_plain MacUser wrong]"]}
+        list [lsort -unique $replies] [catch {auth_response $c NOOP}]
+    } finally {catch {close $c}}
+} -result {{{535 5.7.8 Authentication credentials invalid}} 1}
+test auth-11 {hashed SMTP account file verifies correct and incorrect passwords} -body {
+    set filename [file join $::env(ALIAS_TEST_HOME) smtp-users]
+    set password {MiXeD$Pass;[not Tcl]}
+    set record [smtpd::authcredential $password]
+    set f [open $filename w]
+    puts $f [dict create version 1 users [dict create MacUser $record]]
+    close $f
+    list [smtpd::authfile -file $filename 0 MacUser [encoding convertto utf-8 $password]] \
+         [smtpd::authfile -file $filename 0 MacUser wrong] \
+         [smtpd::authfile -file $filename 0 absent [encoding convertto utf-8 $password]]
+} -result {1 0 0}
+test auth-12 {credential files are data and malformed records fail closed} -body {
+    set filename [file join $::env(ALIAS_TEST_HOME) malformed-users]
+    set f [open $filename w]; puts $f {error "must not execute"}; close $f
+    catch {smtpd::authfile -file $filename 0 MacUser password}
+} -result 1
+test auth-13 {hashed file callback authenticates on the real TLS listener} -body {
+    set filename [file join $::env(ALIAS_TEST_HOME) smtp-file-users]
+    set f [open $filename w]
+    puts $f [dict create version 1 users [dict create FileUser [smtpd::authcredential {FilePass!}]]]
+    close $f
+    nsv_set incoming-auth filename $filename
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        auth_response $c "AUTH PLAIN [auth_plain FileUser {FilePass!}]"
+    } finally {auth_close $c}
+} -result {235 2.7.0 Authentication successful}
+test auth-14 {authenticated client delivers through the configured upstream relay} -body {
+    nsv_set alias-sink messages {}
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        auth_response $c "AUTH PLAIN [auth_plain]"
+        auth_response $c {MAIL FROM:<sender@example.test>}
+        auth_response $c {RCPT TO:<target@remote.test>}
+        set start [auth_response $c DATA]
+        puts $c "Subject: authenticated submission\n\nMessage from Mac"
+        set final [auth_response $c .]
+        set f [open [file join $::env(ALIAS_TEST_HOME) sink-messages.list]]
+        try {set messages [read $f]} finally {close $f}
+        list [string match {354 *} $start] [string match {250 *} $final] \
+             [lindex [lindex $messages 0] 0] \
+             [string match {*Message from Mac*} [lindex [lindex $messages 0] 1]]
+    } finally {auth_close $c}
+} -result {1 1 target@remote.test 1}
+test auth-15 {AUTH payloads and challenge responses are redacted in debug logs} -body {
+    nsv_set io-test logs {}
+    set filter [ns_logctl register io_log_filter]
+    set previous [ns_logctl severity Debug(smtpd) on]
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set token [auth_plain error UniqueSecret]
+        auth_response $c "AUTH PLAIN $token"
+        auth_response $c {AUTH PLAIN}
+        auth_response $c [auth_plain]
+        auth_response $c NOOP
+        ns_logctl flush
+        set logs [nsv_get io-test logs]
+        list [expr {[string first {AUTH [redacted]} $logs] >= 0}] \
+             [expr {[string first $token $logs] < 0}] \
+             [expr {[string first [auth_plain] $logs] < 0}] \
+             [expr {[string first UniqueSecret $logs] < 0}]
+    } finally {
+        auth_close $c
+        ns_logctl severity Debug(smtpd) $previous
+        ns_logctl unregister $filter
+    }
+} -result {1 1 1 1}
+test auth-manage-1 {add, update, and remove users while preserving other accounts} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) managed-users]
+    set first [smtpd::authfileadduser -file $path First FirstPass]
+    smtpd::authfileadduser -file $path Second SecondPass
+    smtpd::authfileadduser -file $path First NewPass
+    set old [smtpd::authfile -file $path 0 First FirstPass]
+    set updated [smtpd::authfile -file $path 0 First NewPass]
+    set removed [smtpd::authfileremoveuser -file $path First]
+    list $first $old $updated $removed [smtpd::authfileremoveuser -file $path First] \
+        [smtpd::authfile -file $path 0 Second SecondPass] [smtpd::authfile -file $path 0 First NewPass]
+} -result {First 0 1 1 0 1 0}
+test auth-manage-2 {invalid login or empty password creates no file; missing remove is harmless} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) invalid-users]
+    list [catch {smtpd::authfileadduser -file $path {user name} password}] \
+         [catch {smtpd::authfileadduser -file $path user ""}] [file exists $path] \
+         [smtpd::authfileremoveuser -file $path user]
+} -result {1 1 0 0}
+test auth-manage-3 {malformed files are preserved by administrative operations} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) invalid-existing]
+    set f [open $path w]; puts -nonewline $f malformed; close $f
+    set add [catch {smtpd::authfileadduser -file $path user password}]
+    set remove [catch {smtpd::authfileremoveuser -file $path user}]
+    set f [open $path]; try {set content [read $f]} finally {close $f}
+    list $add $remove $content [glob -nocomplain ${path}.tmp*]
+} -result {1 1 malformed {}}
+test auth-manage-4 {managed files are readable only by their owner} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) protected-users]
+    smtpd::authfileadduser -file $path user password
+    expr {([file attributes $path -permissions] & 0x1ff) == 0x180}
+} -result 1
+test auth-manage-5 {concurrent administrative additions preserve both users} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) concurrent-users]
+    set a [ns_thread create [list smtpd::authfileadduser -file $path First FirstPass]]
+    set b [ns_thread create [list smtpd::authfileadduser -file $path Second SecondPass]]
+    ns_thread wait $a
+    ns_thread wait $b
+    lsort [dict keys [dict get [smtpd::AuthFileRead $path] users]]
+} -result {First Second}
+test auth-config-1 {configured password file is shared by management and authentication} -body {
+    set user [smtpd::authfileadduser ConfiguredUser ConfiguredPass]
+    set c [auth_open]
+    try {
+        auth_response $c {EHLO mac.example}
+        set login [auth_response $c "AUTH PLAIN [auth_plain ConfiguredUser ConfiguredPass]"]
+    } finally {auth_close $c}
+    list $user $login [smtpd::authfileremoveuser ConfiguredUser] \
+         [smtpd::authfile 0 ConfiguredUser ConfiguredPass]
+} -result {ConfiguredUser {235 2.7.0 Authentication successful} 1 0}
+test auth-config-2 {configured path is resolved within the current server} -body {
+    smtpd::AuthFilePath
+} -result [file join $::env(ALIAS_TEST_HOME) configured-users]
+test auth-config-3 {missing or empty configuration fails with a clear error} -body {
+    rename ns_config auth_test_ns_config
+    proc ns_config {args} {return ""}
+    try {
+        set failed [catch {smtpd::AuthFilePath} message]
+        list $failed $message
+    } finally {
+        rename ns_config {}
+        rename auth_test_ns_config ns_config
+    }
+} -result {1 {nssmtpd authfile parameter is not configured}}
+test auth-parseargs-1 {ns_parseargs rejects missing arguments, extra arguments, and unknown options} -body {
+    set rejected {}
+    foreach command {authfile authfileadduser authfileremoveuser} {
+        foreach arguments [list {} {-unknown value unexpected extra} {-file}] {
+            lappend rejected [catch [list smtpd::$command {*}$arguments]]
+        }
+    }
+    lappend rejected [catch {smtpd::authfile 0 user password extra}] \
+        [catch {smtpd::authfileadduser user password extra}] \
+        [catch {smtpd::authfileremoveuser user extra}]
+    lsort -unique $rejected
+} -result 1
+test auth-parseargs-2 {end-of-options supports logins starting with a dash} -body {
+    smtpd::authfileadduser -- -MacUser password
+    list [smtpd::authfile -- 0 -MacUser password] \
+        [smtpd::authfileremoveuser -- -MacUser]
+} -result {1 1}
+set failed $::tcltest::numTests(Failed)
+cleanupTests
+puts "ALIAS_TEST_FAILURES=$failed"
+if {$failed} {ns_shutdown -restart} else {ns_shutdown}
+vwait forever

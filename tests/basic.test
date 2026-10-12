@@ -13,7 +13,7 @@ nsv_set alias-test policy {}
 
 test nssmtpd-session-validation {session commands reject missing and nonexistent IDs} -body {
     set failures {}
-    foreach command {logevent gethdr gethdrs getbody gethelo getfrom getfromdata setfrom
+    foreach command {logevent gethdr gethdrs getbody getauthuser gethelo getfrom getfromdata setfrom
         setfromdata getrcpt getrcptdata addrcpt setrcptdata delrcpt setflag
         unsetflag getflag setreply getline dump} {
         foreach args [list {} {-1}] {

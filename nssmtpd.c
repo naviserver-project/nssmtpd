@@ -87,6 +87,7 @@
 #define SMTP_NOOP           10
 #define SMTP_READ           11
 #define SMTP_STARTTLS       12
+#define SMTP_AUTH           13
 
 /* Server flags */
 #define SMTPD_VERIFIED       0x0000001u
@@ -184,6 +185,7 @@ typedef struct _smtpdConfig {
     const char *mailproc;
     const char *rcptproc;
     const char *aliasproc;
+    const char *authproc; /* Incoming AUTH verifier, distinct from diagnostics. */
     const char *authdetailsproc;
     bool        authdetailheaders; /* Buffer relay DATA for diagnostic headers. */
     const char *datapolicyproc;
@@ -264,6 +266,9 @@ typedef struct _smtpdConn {
     char relayReply[512];
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
+    char *authUser; /* Connection identity; independent of LOCAL/IP trust. */
+    unsigned int authFailures;
+    bool authExchange, ehlo;
     bool authDetailsDone;
     bool dataPolicyDone;
     Tcl_DString line;
@@ -467,6 +472,7 @@ static void SmtpdConnFree(smtpdConn *conn);
 static void SmtpdConnPrint(smtpdConn *conn);
 static void SmtpdRcptFree(smtpdConn *conn, char *addr, int index, unsigned int flags);
 static int SmtpdConnEval(smtpdConn *conn, const char *proc);
+static Ns_ReturnCode SmtpdAuthenticate(smtpdConn *conn);
 static bool SmtpdDataPolicy(smtpdConn *conn);
 static void SmtpdAuthDetails(smtpdConn *conn, Tcl_DString *headers);
 static int SmtpdResolveAliases(smtpdConfig *config, Tcl_Interp *interp,
@@ -891,6 +897,7 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
     serverPtr->mailproc = ns_strcopy(Ns_ConfigGetValue(section, "mailproc"));
     serverPtr->rcptproc = ns_strcopy(Ns_ConfigString(section, "rcptproc", "smtpd::rcpt"));
     serverPtr->aliasproc = ns_strcopy(Ns_ConfigGetValue(section, "aliasproc"));
+    serverPtr->authproc = ns_strcopy(Ns_ConfigGetValue(section, "authproc"));
     serverPtr->authdetailsproc = ns_strcopy(Ns_ConfigGetValue(section, "authdetailsproc"));
     serverPtr->authdetailheaders = Ns_ConfigBool(section, "authdetailheaders", NS_FALSE);
     serverPtr->datapolicyproc = ns_strcopy(Ns_ConfigGetValue(section, "datapolicyproc"));
@@ -1529,14 +1536,14 @@ SmtpdClassifyInput(const Tcl_DString *line)
     const char *p = line->string;
     size_t length = (size_t)line->length, tokenLength = 0, i;
     static const char *const implemented[] = {
-        "HELO", "EHLO", "MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT", "VRFY", "HELP",
+        "HELO", "EHLO", "MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT", "VRFY", "HELP", "AUTH",
 #ifdef HAVE_OPENSSL_EVP_H
         "STARTTLS",
 #endif
         NULL
     };
     static const char *const unsupported[] = {
-        "EXPN", "AUTH", "BDAT", "ETRN", "ATRN", "BURL", "TURN", "SEND", "SOML", "SAML",
+        "EXPN", "BDAT", "ETRN", "ATRN", "BURL", "TURN", "SEND", "SOML", "SAML",
 #ifndef HAVE_OPENSSL_EVP_H
         "STARTTLS",
 #endif
@@ -1680,6 +1687,16 @@ static void SmtpdThread(smtpdConn *conn)
         }
         input = SmtpdClassifyInput(&conn->line);
         Tcl_DStringSetLength(&conn->reply, 0);
+        /* AUTH payloads are case-sensitive and must never pass through folding. */
+        if (!strncasecmp(conn->line.string, "AUTH", 4)
+            && (conn->line.string[4] == ' ' || conn->line.string[4] == '\r'
+                || conn->line.string[4] == '\n' || conn->line.string[4] == '\0')) {
+            conn->cmd = SMTP_AUTH;
+            conn->lastStage = "AUTH";
+            if (SmtpdAuthenticate(conn) != NS_OK) {goto error;}
+            if ((conn->flags & SMTPD_ABORT) != 0u) {break;}
+            continue;
+        }
         Ns_StrToLower(conn->line.string);
         Ns_StrTrim(conn->line.string);
         conn->line.length = (int)strlen(conn->line.string);
@@ -1776,6 +1793,10 @@ static void SmtpdThread(smtpdConn *conn)
                         Ns_DStringPrintf(&conn->line, "250-STARTTLS\r\n");
                     }
 #endif
+                    if (config->authproc != NULL && *config->authproc != '\0'
+                        && (conn->flags & SMTPD_GOTSTARTTLS) != 0u && conn->authUser == NULL) {
+                        Ns_DStringPrintf(&conn->line, "250-AUTH PLAIN\r\n");
+                    }
                     Ns_DStringPrintf(&conn->line, "250-8BITMIME\r\n");
                     Ns_DStringPrintf(&conn->line, "250 HELP\r\n");
                     if (SmtpdWriteDString(conn, &conn->line) != NS_OK) {
@@ -1786,6 +1807,7 @@ static void SmtpdThread(smtpdConn *conn)
             if ((conn->flags & SMTPD_ABORT) != 0u) {
                 break;
             }
+            conn->ehlo = strcasecmp(conn->lastStage, "EHLO") == 0;
             conn->flags |= SMTPD_GOTHELO;
             continue;
         }
@@ -1796,6 +1818,10 @@ static void SmtpdThread(smtpdConn *conn)
             NS_TLS_SSL *ssl;
             int result;
 
+            if ((conn->flags & (SMTPD_GOTSTARTTLS | SMTPD_GOTMAIL)) != 0u) {
+                if (SmtpdPuts(conn, "503 5.5.1 STARTTLS not permitted now\r\n") != NS_OK) {goto error;}
+                continue;
+            }
             conn->cmd = SMTP_STARTTLS;
             conn->lastStage = "STARTTLS";
 
@@ -1839,6 +1865,7 @@ static void SmtpdThread(smtpdConn *conn)
             }
             Ns_Log(SmtpdDebug, "STARTTLS-ssl-command result=%d", result);
 
+            conn->ehlo = NS_FALSE;
             conn->flags &= ~(SMTPD_GOTHELO);
             ns_free(conn->helo);
             conn->helo = NULL;
@@ -1977,7 +2004,7 @@ static void SmtpdThread(smtpdConn *conn)
                 if (SmtpdCheckRelay(conn, &addr, &host, &port)) {
                     flags |= SMTPD_RELAY;
 
-                } else if ((conn->flags & SMTPD_LOCAL) == 0u) {
+                } else if ((conn->flags & SMTPD_LOCAL) == 0u && conn->authUser == NULL) {
                     Ns_DStringPrintf(&conn->reply, "550 %s@%s... Relaying denied\r\n", addr.mailbox, addr.domain);
                     Ns_Log(Notice, "nssmtpd: %ld: HOST: %s/%s, RCPT: %s@%s, Relaying denied",
                            conn->id, conn->host, Ns_ConnPeerAddr(nsconn), addr.mailbox, addr.domain);
@@ -2231,6 +2258,8 @@ static smtpdConn *SmtpdConnCreate(smtpdConfig *config, Ns_Sock *sock)
 
     conn->sock = sock;
     conn->cmd = SMTP_READ;
+    conn->authFailures = 0u;
+    conn->authExchange = conn->ehlo = NS_FALSE;
     conn->transaction = 0;
     conn->transactionActive = conn->dataStarted = conn->relayAccepted = NS_FALSE;
     conn->messageBytes = 0;
@@ -2331,6 +2360,145 @@ static void SmtpdConnPrint(smtpdConn *conn)
     nsconn->request.line = ns_strdup(conn->line.string);
 }
 
+/* Erase credential buffers without allowing the compiler to elide the writes. */
+static void
+SmtpdErase(char *bytes, size_t length)
+{
+    volatile unsigned char *p = (volatile unsigned char *)bytes;
+    while (length-- > 0u) {*p++ = 0;}
+}
+
+/* PLAIN: authzid NUL authcid NUL password. No delegated authorization IDs. */
+static Ns_ReturnCode
+SmtpdAuthenticate(smtpdConn *conn)
+{
+    const char *reply = "501 5.5.2 Invalid AUTH response\r\n";
+    char *payload, *decoded = NULL, *encoded = NULL;
+    size_t length = 0u, n, i, padding = 0u;
+    bool credentials = NS_FALSE;
+    int accepted = 0, status = TCL_ERROR;
+    Ns_ReturnCode rc;
+
+    conn->authExchange = NS_TRUE;
+    if (conn->config->authproc == NULL || *conn->config->authproc == '\0') {
+        reply = "502 5.5.1 Authentication disabled\r\n";
+        goto done;
+    }
+    if ((conn->flags & SMTPD_GOTSTARTTLS) == 0u) {
+        reply = "538 5.7.11 Encryption required for authentication\r\n";
+        goto done;
+    }
+    if (!conn->ehlo || conn->authUser != NULL || (conn->flags & SMTPD_GOTMAIL) != 0u) {
+        reply = "503 5.5.1 AUTH not permitted now\r\n";
+        goto done;
+    }
+    if (memchr(conn->line.string, '\0', (size_t)conn->line.length) != NULL) {goto done;}
+    payload = conn->line.string + 4;
+    while (*payload == ' ' || *payload == '\t') {payload++;}
+    Ns_StrTrim(payload);
+    if (strncasecmp(payload, "PLAIN", 5) != 0
+        || (payload[5] != '\0' && payload[5] != ' ' && payload[5] != '\t')) {
+        reply = "504 5.5.4 Unsupported authentication mechanism\r\n";
+        goto done;
+    }
+    payload += 5;
+    while (*payload == ' ' || *payload == '\t') {payload++;}
+    if (*payload == '\0') {
+        if (SmtpdPuts(conn, "334 \r\n") != NS_OK) {goto ioerror;}
+        SmtpdErase(conn->line.string, (size_t)conn->line.length);
+        if (SmtpdReadLine(conn, &conn->line, &rc) <= 0) {goto ioerror;}
+        if (memchr(conn->line.string, '\0', (size_t)conn->line.length) != NULL) {goto done;}
+        payload = Ns_StrTrim(conn->line.string);
+    }
+    if (strcmp(payload, "*") == 0) {goto done;}
+    n = strlen(payload);
+    /* Strict, canonical base64, bounded by maxline and a credential limit. */
+    if (n == 0u || n > 2048u || n % 4u != 0u) {goto done;}
+    for (i = 0u; i < n; i++) {
+        unsigned char c = (unsigned char)payload[i];
+        if (c == '=') {
+            padding++;
+            if (i < n-2u || padding > 2u) {goto done;}
+        } else if (padding != 0u || !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                                    || (c >= '0' && c <= '9') || c == '+' || c == '/')) {
+            goto done;
+        }
+    }
+    decoded = decode64(payload, (TCL_SIZE_T)n, &length);
+    encoded = ns_malloc(n + 1u);
+    (void)Ns_Base64Encode((const unsigned char *)decoded, length, encoded, 0, 0);
+    if (encoded == NULL || strcmp(encoded, payload) != 0) {goto done;}
+    {
+        char *user, *password, *first = memchr(decoded, '\0', length);
+        Tcl_Obj *prefix, **words, **args;
+        TCL_SIZE_T count;
+        int j;
+
+        if (first == NULL) {goto done;}
+        user = first + 1;
+        password = memchr(user, '\0', length - (size_t)(user-decoded));
+        if (password == NULL || password == user) {goto done;}
+        *password++ = '\0';
+        /* Initial implementation uses printable ASCII login identifiers. */
+        for (i = 0u; user[i] != '\0'; i++) {
+            if ((unsigned char)user[i] < 33u || (unsigned char)user[i] > 126u) {goto done;}
+        }
+        if ((size_t)(password-decoded) >= length
+            || memchr(password, '\0', length - (size_t)(password-decoded)) != NULL) {goto done;}
+        /* No proxy authorization: authzid must be empty or identical to authcid. */
+        if (*decoded != '\0' && strcmp(decoded, user) != 0) {
+            reply = "535 5.7.8 Authentication credentials invalid\r\n";
+            credentials = NS_TRUE;
+            goto done;
+        }
+        prefix = Tcl_NewStringObj(conn->config->authproc, -1);
+        Tcl_IncrRefCount(prefix);
+        if (Tcl_ListObjGetElements(conn->interp, prefix, &count, &words) == TCL_OK && count > 0) {
+            args = ns_malloc(((size_t)count + 3u) * sizeof(Tcl_Obj *));
+            for (j = 0; j < count; j++) {args[j] = words[j];}
+            args[count] = Tcl_NewWideIntObj((Tcl_WideInt)conn->id);
+            args[count+1] = Tcl_NewStringObj(user, -1);
+            args[count+2] = Tcl_NewByteArrayObj((unsigned char *)password,
+                                             (TCL_SIZE_T)(length - (size_t)(password-decoded)));
+            for (j = 0; j < count+3; j++) {Tcl_IncrRefCount(args[j]);}
+            status = Tcl_EvalObjv(conn->interp, count+3, args, TCL_EVAL_GLOBAL);
+            if (status == TCL_OK) {status = Tcl_GetBooleanFromObj(conn->interp, Tcl_GetObjResult(conn->interp), &accepted);}
+            for (j = 0; j < count+3; j++) {Tcl_DecrRefCount(args[j]);}
+            ns_free(args);
+        }
+        Tcl_DecrRefCount(prefix);
+        /* Never log Tcl errorInfo: callback arguments can contain credentials. */
+        Tcl_ResetResult(conn->interp);
+        Tcl_UnsetVar(conn->interp, "errorInfo", TCL_GLOBAL_ONLY);
+        Tcl_UnsetVar(conn->interp, "errorCode", TCL_GLOBAL_ONLY);
+        if (status != TCL_OK) {
+            Ns_Log(Error, "nssmtpd: incoming authentication verifier failed");
+            reply = "454 4.7.0 Authentication temporarily unavailable\r\n";
+        } else if (accepted) {
+            conn->authUser = ns_strdup(user);
+            reply = "235 2.7.0 Authentication successful\r\n";
+        } else {
+            reply = "535 5.7.8 Authentication credentials invalid\r\n";
+        }
+        credentials = NS_TRUE;
+    }
+done:
+    if (credentials && conn->authUser == NULL && ++conn->authFailures >= 3u) {
+        conn->flags |= SMTPD_ABORT;
+    }
+    if (decoded != NULL) {SmtpdErase(decoded, length); ns_free(decoded);}
+    if (encoded != NULL) {SmtpdErase(encoded, strlen(encoded)); ns_free(encoded);}
+    SmtpdErase(conn->line.string, (size_t)conn->line.length);
+    Tcl_DStringSetLength(&conn->line, 0);
+    Tcl_DStringSetLength(&conn->reply, 0);
+    conn->authExchange = NS_FALSE;
+    return SmtpdPuts(conn, reply);
+ioerror:
+    SmtpdErase(conn->line.string, (size_t)conn->line.length);
+    conn->authExchange = NS_FALSE;
+    return NS_ERROR;
+}
+
 static int SmtpdConnEval(smtpdConn *conn, const char *proc)
 {
     char name[256];
@@ -2401,7 +2569,7 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
     Tcl_ListObjAppendElement(conn->interp, input, Tcl_NewStringObj(recipient->addr, -1));
     if (SmtpdResolveAliases(conn->config, conn->interp, input,
                            conn->config->maxrcpt - conn->rcpt.count + 1,
-                           (conn->flags & SMTPD_LOCAL) != 0u,
+                           ((conn->flags & SMTPD_LOCAL) != 0u || conn->authUser != NULL),
                            &resolved) != TCL_OK) {
         Tcl_Obj *options = Tcl_GetReturnOptions(conn->interp, TCL_ERROR);
         Tcl_Obj *key = Tcl_NewStringObj("-errorcode", -1), *errorCode = NULL;
@@ -2553,6 +2721,8 @@ static void SmtpdConnFree(smtpdConn *conn)
     Ns_MutexUnlock(&conn->config->lock);
     SmtpdCloseProc(conn->sock);
     SmtpdConnReset(conn);
+    ns_free(conn->authUser);
+    conn->authUser = NULL;
     ns_free_const_local(conn->host);
     conn->host = NULL;
     ns_free(conn->helo);
@@ -2946,6 +3116,12 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             relay->interp = conn->interp;
         }
 
+#if NS_VERSION_NUM >= 50200
+        result = Ns_TLS_CtxClientCreateCfg(
+            relay->interp, conn->config->certificate, conn->config->key,
+            conn->config->cafile, conn->config->capath, NS_FALSE,
+            NULL, NULL, NULL, NULL, NULL, 0u, &ctx);
+#else
         result = Ns_TLS_CtxClientCreate(
             relay->interp,
             conn->config->certificate,
@@ -2953,6 +3129,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
             conn->config->capath,
             0 /*verify*/,
             &ctx);
+#endif
 
         if (likely(result == TCL_OK)) {
             /*
@@ -4376,6 +4553,10 @@ SmtpdLogInput(smtpdConn *conn, Ns_LogSeverity severity, const char *label,
     char excerpt[80 * 4 + 4], *p = excerpt;
     TCL_SIZE_T i, length = MIN(line->length, 80);
 
+    if (conn->authExchange || (line->length >= 4 && !strncasecmp(line->string, "AUTH", 4))) {
+        Ns_Log(severity, "nssmtpd: %lu: %s: AUTH [redacted]", conn->id, label);
+        return;
+    }
     for (i = 0; i < length; i++) {
         unsigned char c = (unsigned char)line->string[i];
 
@@ -5882,6 +6063,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdGetHdr,
         cmdGetHdrs,
         cmdGetBody,
+        cmdGetAuthUser,
         cmdGetHelo,
         cmdGetFrom,
         cmdGetFromData,
@@ -5924,6 +6106,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "gethdr",
         "gethdrs",
         "getbody",
+        "getauthuser",
         "gethelo",
         "getfrom",
         "getfromdata",
@@ -6856,6 +7039,14 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
 
     case cmdGetLine:
         Tcl_SetObjResult(interp, Tcl_NewStringObj(conn->line.string, conn->line.length));
+        break;
+
+    case cmdGetAuthUser:
+        if (objc != 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "id");
+            return TCL_ERROR;
+        }
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(conn->authUser != NULL ? conn->authUser : "", -1));
         break;
 
     case cmdGetHelo:

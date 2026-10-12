@@ -29,7 +29,7 @@ foreach section {ns/parameters ns/sendmail} {
 }
 ns_section ns/servers {
     ns_param test {Alias tests}
-    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {ns_param sink {STARTTLS test sink}}
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy auth}} {ns_param sink {STARTTLS test sink}}
 }
 ns_section ns/server/test {
     ns_param minthreads 2
@@ -73,12 +73,17 @@ ns_section ns/server/test/module/nssmtpd {
         ns_param recipientpolicyproc smtpd::greylist
         ns_param rejectunknownrecipients true
     }
-    if {$::env(ALIAS_TEST_MODE) eq "io"} {
+    if {$::env(ALIAS_TEST_MODE) in {io auth}} {
         ns_param certificate [file join $::env(ALIAS_TEST_HOME) cert.pem]
         ns_param key [file join $::env(ALIAS_TEST_HOME) key.pem]
         ns_param eventlogging true
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
         ns_param eventlogroll false
+    }
+    if {$::env(ALIAS_TEST_MODE) eq "auth"} {
+        ns_param authproc {incoming_auth_verify prefix}
+        ns_param authfile [file join $::env(ALIAS_TEST_HOME) configured-users]
+        ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
     }
     ns_param address 127.0.0.1
     ns_param port $::env(ALIAS_TEST_PORT)
@@ -86,7 +91,7 @@ ns_section ns/server/test/module/nssmtpd {
     ns_param writetimeout [expr {$::env(ALIAS_TEST_MODE) eq "io" ? "1.5s" : "3"}]
     ns_param maxrcpt 3
     ns_param relaydomains example.test
-    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {headers datapolicy events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
+    ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {auth headers datapolicy events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
     ns_param rcptproc [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff} ? "event_test_rcpt" : ([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
     if {[string match policy* $::env(ALIAS_TEST_MODE)]} {ns_param datapolicyproc header_test_policy}
     ns_param dataproc alias_test_data
@@ -124,7 +129,7 @@ ns_section ns/server/test/module/nssmtpd {
             ns_param recipientpolicyproc ""
         }
     }
-    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {
+    if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy auth}} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
         ns_param eventlogging true
         ns_param eventlogfile [file join $::env(ALIAS_TEST_HOME) events.log]
@@ -135,7 +140,7 @@ ns_section alias-test {
     ns_param source $root
 }
 
-if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy}} {
+if {$::env(ALIAS_TEST_MODE) in {proxy headers datapolicy auth}} {
     ns_section ns/server/sink/tcl {
         ns_param initfile [file join $nsroot bin init.tcl]
         ns_param initcmds [list source [file join $root tests alias-fixture.tcl]]

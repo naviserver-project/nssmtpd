@@ -94,6 +94,13 @@ proc io_find_log {pattern} {
     error "missing log entry: $pattern"
 }
 
+test smtp-auth-disabled {incoming authentication is disabled by default} -body {
+    set channel [io_open]
+    try {
+        io_command $channel {AUTH PLAIN c2VjcmV0}
+    } finally {close $channel}
+} -result {502 5.5.1 Authentication disabled}
+
 test smtp-incoming-boundary {maxline includes CRLF; boundary accepted and next command intact} -body {
     set channel [io_open]
     try {
@@ -179,7 +186,6 @@ test smtp-input-classification {rejected inputs are distinguished without exposi
     set results {}
     foreach {input expected} [list \
         {EXPN private-list} {kind=unsupported-smtp command=EXPN} \
-        {AUTH PLAIN secret-credential} {kind=unsupported-smtp command=AUTH} \
         {BDAT 100} {kind=unsupported-smtp command=BDAT} \
         {MAIL private-address} {kind=invalid-syntax command=MAIL} \
         {RCPT private-address} {kind=invalid-syntax command=RCPT} \
@@ -203,7 +209,7 @@ test smtp-input-classification {rejected inputs are distinguished without exposi
                               && [string first secret $message] < 0}]
     }
     set results
-} -result {1 1 1 1 1 1 1 1 1 1 1 1 1}
+} -result {1 1 1 1 1 1 1 1 1 1 1 1}
 
 test smtp-input-rejection-history {rejection count spans RSET; last stage and last rejection are independent} -body {
     nsv_set io-test logs {}
