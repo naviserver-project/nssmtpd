@@ -462,6 +462,9 @@ static Ns_TclTraceProc SmtpdInterpInit;
 static TCL_OBJCMDPROC_T SmtpdCmd;
 static void SmtpdThread(smtpdConn *conn);
 static TCL_SIZE_T SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port);
+static void SmtpdRelaySendLog(smtpdConn *conn, Ns_Time *startTimePtr,
+                             const char *host, unsigned short port,
+                             const char *reply, const char *result, size_t bytesSent);
 static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
                                Tcl_Obj *rcptObj, const char *dataVarName,
                                const char *host, unsigned short port);
@@ -521,7 +524,8 @@ static NS_INLINE bool Retry(int errorCode);
 static void SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
                          const char *sender, Tcl_Obj *rcptObj,
                          const char *host, unsigned short port,
-                         const char *status, const char *errorCode, size_t bytesSent)
+                         const char *status, const char *errorCode, size_t bytesSent,
+                         const char *source)
     NS_GNUC_NONNULL(1) NS_GNUC_NONNULL(2)
     NS_GNUC_NONNULL(3) NS_GNUC_NONNULL(4)
     NS_GNUC_NONNULL(5)
@@ -2999,7 +3003,9 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     int           vcount = 0;
     Ns_Conn      *nsconn = Ns_GetConn();
     Ns_ReturnCode rc = NS_OK;
+    Ns_Time       startTime;
 
+    Ns_GetTime(&startTime);
     Ns_Log(SmtpdDebug, "SmtpdRelayData");
 
     /*
@@ -3049,6 +3055,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         Ns_Log(Error, "nssmtpd: relay: %lu/%d: Unable to connect to %s:%d: %s",
                conn->id, getpid(), host, port, rc == NS_TIMEOUT ? "timeout" : strerror(errno));
         SmtpdPuts(conn, "421 Service not available\r\n");
+        SmtpdRelaySendLog(conn, &startTime, host, port, "421", "CONNECT_FAILURE", 0u);
         return -1;
     }
 
@@ -3065,6 +3072,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     if (!(relay = SmtpdConnCreate(conn->config, &sock))) {
         ns_sockclose(sock.sock);
         SmtpdPuts(conn, "421 Service not available\r\n");
+        SmtpdRelaySendLog(conn, &startTime, host, port, "421", "SETUP_FAILURE", 0u);
         return -1;
     }
 
@@ -3261,6 +3269,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         } while (relay->line.length > 0);
         if (size > conn->config->maxdata) {
             /* Close the unfinished upstream DATA; the caller returns 552. */
+            SmtpdRelaySendLog(conn, &startTime, host, port, "552", "SIZE_LIMIT", 0u);
             SmtpdConnFree(relay);
             return size;
         }
@@ -3271,6 +3280,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (!SmtpdDataPolicy(conn)) {
             Tcl_DStringFree(&headers);
             Tcl_DStringFree(&wire);
+            SmtpdRelaySendLog(conn, &startTime, host, port, conn->reply.string, "POLICY_REJECT", 0u);
             SmtpdConnFree(relay);
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 return -1;
@@ -3321,6 +3331,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     snprintf(conn->relayReply, sizeof(conn->relayReply), "%s", relay->line.string);
     Ns_StrTrimRight(conn->relayReply);
     conn->relayAccepted = NS_TRUE;
+    SmtpdRelaySendLog(conn, &startTime, host, port, conn->relayReply, "SUCCESS", (size_t)size);
     if (SmtpdWriteDString(conn, &relay->line) != NS_OK) {
         goto error;
     }
@@ -3336,6 +3347,10 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
      * Sending mail data failed
      */
     SmtpdLogIO(conn);
+    if (!conn->relayAccepted) {
+        SmtpdRelaySendLog(conn, &startTime, host, port,
+                         conn->lineTooLong ? "552" : "421", "CLIENT_IO_ERROR", 0u);
+    }
     if (conn->lineTooLong) {
         (void)SmtpdPuts(conn, "552 Data line too long\r\n");
     }
@@ -3353,11 +3368,13 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
     Ns_Log(Error, "nssmtpd: relay 421: %lu/%d: HOST: %s/%s, FLAGS: 0x%X, FROM: %s, %s: %s/%s",
            conn->id, getpid(), conn->host, Ns_ConnPeerAddr(nsconn),
            conn->flags, conn->from.addr, conn->line.string, conn->line.string, relay->line.string);
+    SmtpdRelaySendLog(conn, &startTime, host, port, "421", "IO_ERROR", 0u);
     SmtpdPuts(conn, "421 Service not available\r\n");
     SmtpdConnFree(relay);
     return -1;
 
   errorrelay:
+    SmtpdRelaySendLog(conn, &startTime, host, port, relay->line.string, "STATUS_ERROR", 0u);
     snprintf(conn->relayReply, sizeof(conn->relayReply), "%s", relay->line.string);
     Ns_StrTrimRight(conn->relayReply);
     /*
@@ -3691,7 +3708,8 @@ static void
 SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
              const char *sender, Tcl_Obj *rcptObj,
              const char *host, unsigned short port,
-             const char *status, const char *errorCode, size_t bytesSent)
+             const char *status, const char *errorCode, size_t bytesSent,
+             const char *source)
 {
     NS_NONNULL_ASSERT(config != NULL);
 
@@ -3704,7 +3722,7 @@ SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
         Ns_DiffTime(&now, startTimePtr, &diff);
         Tcl_DStringInit(&logString);
         Ns_DStringPrintf(&logString, "%s %s %s %s [%s]:%hu " NS_TIME_FMT
-                         " %" PRIdz " %s RCPT: %s\n",
+                         " %" PRIdz " %s RCPT: %s\tsource=%s\n",
                          Ns_LogTime(buf),
                          Ns_ThreadGetName(),
                          status,
@@ -3713,7 +3731,8 @@ SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
                          (int64_t)diff.sec, diff.usec,
                          bytesSent,
                          sender,
-                         Tcl_GetString(rcptObj)
+                         Tcl_GetString(rcptObj),
+                         source
                          );
 
         Ns_MutexLock(&config->sendlog.lock);
@@ -3723,6 +3742,52 @@ SmtpdSendLog(smtpdConfig *config, Ns_Time *startTimePtr,
 
         Tcl_DStringFree(&logString);
     }
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SmtpdRelaySendLog --
+ *
+ *      Record an upstream forwarding outcome in the send log. Preserve
+ *      the send-log fields and identify this path with source=relay.
+ *
+ * Results:
+ *      None.
+ *
+ * Side effects:
+ *      Appends one log record when send logging is enabled.
+ *
+ *----------------------------------------------------------------------
+ */
+static void
+SmtpdRelaySendLog(smtpdConn *conn, Ns_Time *startTimePtr,
+                 const char *host, unsigned short port,
+                 const char *reply, const char *result, size_t bytesSent)
+{
+    Tcl_Obj  *recipients;
+    smtpdRcpt *rcpt;
+    char      status[4] = "421";
+
+    if (!conn->config->sendlog.logging) {
+        return;
+    }
+    if (strlen(reply) >= 3u
+        && reply[0] >= '1' && reply[0] <= '5'
+        && reply[1] >= '0' && reply[1] <= '9'
+        && reply[2] >= '0' && reply[2] <= '9') {
+        memcpy(status, reply, 3u);
+    }
+    recipients = Tcl_NewListObj(0, NULL);
+    Tcl_IncrRefCount(recipients);
+    for (rcpt = conn->rcpt.list; rcpt != NULL; rcpt = rcpt->next) {
+        if ((rcpt->flags & SMTPD_VERIFIED) != 0u) {
+            Tcl_ListObjAppendElement(NULL, recipients, Tcl_NewStringObj(rcpt->addr, -1));
+        }
+    }
+    SmtpdSendLog(conn->config, startTimePtr, conn->from.addr, recipients,
+                 host, port, status, result, bytesSent, "relay");
+    Tcl_DecrRefCount(recipients);
 }
 
 static Ns_ReturnCode
@@ -3764,7 +3829,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Ns_GetTime(&startTime);
 
     if ((sock.sock = Ns_SockTimedConnect(host, port, &timeout)) == NS_INVALID_SOCKET) {
-        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "CONNECT_FAILURE", 0u);
+        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "CONNECT_FAILURE", 0u, "send");
         Tcl_AppendResult(interp, "nssmtpd: send: unable to connect to ", host, ": ",
                          strerror(errno), (char *)0L);
         return NS_ERROR;
@@ -3776,7 +3841,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     if (!(conn = SmtpdConnCreate(config, &sock))) {
         Tcl_AppendResult(interp, strerror(errno), (char *)0L);
         ns_sockclose(sock.sock);
-        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "SETUP_FAILURE", 0u);
+        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "SETUP_FAILURE", 0u, "send");
         return NS_ERROR;
     }
     /*
@@ -3790,7 +3855,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         Tcl_SetErrorCode(interp, "NSSMTPD", "READ",
                          rc == NS_TIMEOUT ? "TIMEOUT" : (rc == NS_OK ? "EOF" : "ERROR"), (char *)0L);
         SmtpdConnFree(conn);
-        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "GREET_FAILURE", 0u);
+        SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "GREET_FAILURE", 0u, "send");
         return NS_ERROR;
     }
     Ns_Log(SmtpdDebug,"SmtpdSend got greeting");
@@ -3940,7 +4005,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     }
     Ns_Log(Notice, "nssmtpd: send: from %s to %s via %s:%d %ld bytes",
            sender, Tcl_GetString(rcptObj), host, port, (long)dataLength);
-    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "SUCCESS", (size_t)dataLength);
+    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "SUCCESS", (size_t)dataLength, "send");
 
     SmtpdConnFree(conn);
     Tcl_DStringFree(&dataDString);
@@ -3957,7 +4022,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
                                              errorString, host, port, conn->writeError));
     }
     SmtpdConnFree(conn);
-    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "IO_ERROR", 0u);
+    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "IO_ERROR", 0u, "send");
     Tcl_DStringFree(&dataDString);
     return NS_ERROR;
 
@@ -3965,7 +4030,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
     Tcl_AppendResult(interp, "nssmtpd: send: unexpected status from ", host, ": ",
                      conn->line.string, (char *)0L);
     SmtpdConnFree(conn);
-    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "STATUS_ERROR", 0u);
+    SmtpdSendLog(config, &startTime, sender, rcptObj, host, port, finalStatus, "STATUS_ERROR", 0u, "send");
     Tcl_DStringFree(&dataDString);
     return NS_ERROR;
 }

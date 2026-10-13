@@ -294,6 +294,21 @@ test auth-parseargs-2 {end-of-options supports logins starting with a dash} -bod
     list [smtpd::authfile -- 0 -MacUser password] \
         [smtpd::authfileremoveuser -- -MacUser]
 } -result {1 1}
+test auth-send-log {authenticated forwarding is recorded in the send log} -body {
+    set path [ns_config ns/server/test/module/nssmtpd logfile]
+    set deadline [expr {[clock milliseconds] + 2000}]
+    set found false
+    while {[clock milliseconds] < $deadline} {
+        set f [open $path]
+        try {set content [read $f]} finally {close $f}
+        if {[regexp {250 SUCCESS [^\n]*\tsource=relay} $content]} {
+            set found true
+            break
+        }
+        after 10
+    }
+    set found
+} -returnCodes {ok error} -result true
 set failed $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failed"

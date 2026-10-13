@@ -409,8 +409,13 @@ logs can be selected. Malformed or unsupported records are counted and skipped.
 Never evaluate log records as Tcl code.
 
 Recipient counts are SMTP RCPT attempts, **not delivered messages**;
-greylisting deferrals are not spam classifications. Direct `ns_smtpd send`
-operations continue to use the existing send log. Message outcomes and
+greylisting deferrals are not spam classifications. The send log records both direct `ns_smtpd send` operations and incoming
+SMTP forwarding attempts. New records append a tab-separated `source=send`
+or `source=relay` attribute after the recipient list; older records have no
+source attribute. `SUCCESS` means acceptance by the upstream SMTP server,
+not final mailbox delivery. Relay failures and policy/size rejections are
+also recorded; failed attempts report zero sent bytes. Relay elapsed time
+covers the forwarding attempt, including time spent receiving client DATA. Message outcomes and
 connection/protocol events are not included in this first event-log version.
 
 ### Incoming SMTP authentication

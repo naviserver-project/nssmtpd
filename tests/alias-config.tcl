@@ -81,6 +81,9 @@ ns_section ns/server/test/module/nssmtpd {
         ns_param eventlogroll false
     }
     if {$::env(ALIAS_TEST_MODE) eq "auth"} {
+        ns_param logging true
+        ns_param logfile [file join $::env(ALIAS_TEST_HOME) send.log]
+        ns_param logroll false
         ns_param authproc {incoming_auth_verify prefix}
         ns_param authfile [file join $::env(ALIAS_TEST_HOME) configured-users]
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
