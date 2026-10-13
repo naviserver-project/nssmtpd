@@ -1,0 +1,35 @@
+direction: down
+classes: {
+  source: {style.fill: "#eef4fb"; style.stroke: "#4779ab"}
+  service: {style.fill: "#eaf5ee"; style.stroke: "#35805a"}
+}
+applications: {
+  label: "NaviServer application\nns_sendmail\nns/sendmail: smtphost, smtpport"
+  class: source
+}
+external: {
+  label: "External mail server / SMTP client\nDirect mail, port relay, or AUTH submission\nPublic SMTP port: 25"
+  class: source
+}
+publish: {
+  label: "Host / Docker port mapping\nExample: public 25 → container 2525\ncompose: ports"
+}
+listener: {
+  label: "NaviServer nssmtpd listener\nns/server/SERVER/module/nssmtpd\naddress, port (example: 2525)\ncertificate, key • STARTTLS\nauthproc, authfile • client login\nrelaydomains, localdomains • acceptance"
+  class: service
+}
+api: {
+  label: "Direct Tcl send\nns_smtpd send … ?server? ?port?\nNo incoming SMTP connection"
+  class: source
+}
+upstream: {
+  label: "Upstream outgoing mail server\nExample: Postfix / mail-relay:25\nOr authenticated relay:587\nResponsible for onward delivery"
+  class: service
+}
+recipient: {label: "Recipient mail server\nSMTP port: 25"; class: service}
+applications -> listener: "SMTP to configured smtphost:smtpport\nLoopback or reachable container address"
+external -> publish: "SMTP / STARTTLS"
+publish -> listener: "TCP forwarding"
+listener -> upstream: "relay = host:port\nor plain://USER:PWD@HOST:587"
+api -> upstream: "Explicit server/port or relay defaults"
+upstream -> recipient: "Onward SMTP delivery"

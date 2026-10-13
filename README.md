@@ -14,64 +14,66 @@ with the server directly via Tcl for e.g. sending mails and
 interacting with the server. A typical setup uses a local Postfix
 installation as the relay for further message delivery.
 
-The module supports sending and receiving emails, including
-STARTTLS, logging statistics with graphical display via nsstats, URIs
-for relay host specification including relay authentication.  The
-module features also built-in anti-spam and anti-virus capabilities
-which require work to interact with newer releases of the external
-packages.
-
-
-```
-    A NaviServer (Sender) → B (nssmptd, 127.0.0.1:smtpdport) → C (relay, localhost:25)
-```
-
-- **Compatibility:** Compiles with Tcl versions 8.5, 8.6, and 9.0.
-- **Note:** By default, anti-spam and anti-virus support are deactivated. They may require additional configuration or updates to work with current libraries.
-
----
-
+The module supports incoming SMTP, authenticated client submission over
+STARTTLS, forwarding to an upstream mail server, and direct Tcl sending.
+Optional features include envelope aliases, recipient policies, greylisting,
+SPF checks, authentication diagnostics, and send/event logs with nsstats views.
+Historical scanner integrations are described under [Legacy support](#legacy-support).
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Overview and mail paths](#overview)
 - [Requirements](#requirements)
-  - [Anti-Spam Support](#anti-spam-support)
-  - [Anti-Virus Support](#anti-virus-support)
 - [Configuration](#configuration)
   - [Basic Setup](#basic-setup)
   - [Enabling Logging](#enabling-logging)
+  - [SMTP Event Logging](#smtp-event-logging)
   - [Incoming SMTP Authentication](#incoming-smtp-authentication)
   - [Relay Authentication](#relay-authentication)
 - [API Overview](#api-overview)
 - [Usage Example](#usage-example)
-- [License](#license)
-
---- 
+- [Legacy Support](#legacy-support)
+- [Licensing](#licensing)
 
 ## Overview
 
-This module acts as an intermediary SMTP server. It accepts messages
-via NaviServer or directly through its API and then forwards them to a
-designated SMTP relay. This design enables integration with anti-spam
-and anti-virus tools, providing an additional layer of email security.
+![SMTP paths, ports, and configuration sections](docs/smtp-paths.svg)
 
-### Anti-SPAM Support
+Ports in the diagram are examples. `SERVER` denotes the configured virtual
+server name. Direct external mail and authenticated clients can share the
+same listener. nssmtpd forwards accepted mail to an upstream MTA; that MTA
+handles onward delivery. The direct Tcl send API bypasses the incoming listener.
 
-Install one of the following to enable anti-spam features:
+| Path or responsibility | Configuration |
+| --- | --- |
+| Application → nssmtpd via `ns_sendmail` | `ns/sendmail`: `smtphost`, `smtpport`; older NaviServer versions use `ns/parameters` |
+| Incoming nssmtpd listener | `ns/server/$server/module/nssmtpd`: `address`, `port` |
+| Host port → container port | Docker Compose `ports`, e.g. `25:2525`; use a reachable listener address in the container |
+| Incoming STARTTLS and client login | Same module section: `certificate`, `key`, `authproc`, `authfile` |
+| Accepted recipient domains and trusted peers | Same module section: `relaydomains`, `localdomains`; see alias and policy settings below |
+| nssmtpd → upstream outgoing server | Same module section: `relay`, e.g. `mail-relay:25` or `plain://USER:PWD@HOST:587` |
+| Direct `ns_smtpd send` | Optional `server` and `port` arguments override the configured relay defaults |
 
-- **SpamAssassin:** [http://www.spamassassin.org/](http://www.spamassassin.org/)
-- **DSPAM:** [http://www.nuclearelephant.com/projects/dspam/](http://www.nuclearelephant.com/projects/dspam/)  
-  Patched version: [Download DSPAM 3.1.0 (Vlad)](http://www.crystalballinc.com/vlad/dspam-3.1.0-vlad-src.tar.gz)
+For a local-only listener, `address 127.0.0.1` and `port 2525` are sufficient.
+For Docker-published incoming mail, bind a container-reachable address such as
+`0.0.0.0`; binding only to loopback does not expose the listener through the
+published port. `localhost` always refers to the current host or container,
+so a separate relay container needs its reachable hostname.
 
-### Anti-Virus Support
+The editable [D2 source](docs/smtp-paths.d2) is included alongside the rendered
+SVG. Regenerate it from the module directory with:
 
-Install one of the following to enable anti-virus features:
+```sh
+d2 --layout dagre docs/smtp-paths.d2 docs/smtp-paths.svg
+```
 
-- **ClamAV:** [http://www.clamav.net/](http://www.clamav.net/)
-- **Sophos SAVI:** [http://sophos.com](http://sophos.com)
+## Requirements
 
----
+The core module compiles with Tcl 8.5, 8.6, and 9.0. STARTTLS requires an
+OpenSSL-enabled build and a suitable certificate. Optional Tcl helpers have
+their own dependencies; the password-file helpers require Tcl 8.6 or newer
+and NaviServer crypto support, as documented below. An upstream SMTP server
+is needed for forwarding. External spam/virus scanners are not required.
 
 ## Configuration
 
@@ -97,7 +99,6 @@ ns_section ns/server/${server}/module/nssmtpd {
   ns_param relay        localhost:25
   ns_param relaydomains "localhost domain.com"
   ns_param localdomains "localhost domain.com"
-  ns_param spamd        localhost
   
   #
   # Tcl callback definitions
@@ -147,7 +148,7 @@ parameters to the `nssmtpd` section.
 ```tcl
 ns_section ns/server/${server}/module/nssmtpd {
   # ...
-  # For logging "ns_smtpd send ..." operations
+  # Log direct sends and incoming forwarding attempts
   ns_param logging    on           ;# default: off
   # ns_param logfile ${logroot}/smtpsend.log
   ns_param logrollfmt %Y-%m-%d     ;# rotation suffix for both send and event logs
@@ -1309,12 +1310,6 @@ server. Below is a summary of available commands:
   - `ns_smtpd parseemail ?-syntax header|smtp? ?--? /email/` *(Returns parsed address constituents as a dictionary)*
   - `ns_smtpd checkemail /email/` *(Returns the parsed address, or an empty string on invalid input)*
   - `ns_smtpd checkdomain /domain/`
-  - `ns_smtpd virusversion` &nbsp;&nbsp;&nbsp; *(Returns anti-virus tool version)*
-  - `ns_smtpd spamversion` &nbsp;&nbsp;&nbsp; *(Returns anti-spam tool version)*
-- **Spam and Virus Checks:**
-  - `ns_smtpd checkspam /message/ ?email?`
-  - `ns_smtpd trainspam 1|0 /email/ /message/ ?signature? ?mode? ?source?`
-  - `ns_smtpd checkvirus /data/`
 - **Session and Message Handling:**
   - `ns_smtpd sessions`
   - `ns_smtpd gethdr /name/`
@@ -1342,7 +1337,7 @@ using the API.
 
 ## Usage Example
 
-Once configured, the SMTPD module will act as an SMTP server, forwarding messages to the relay specified by the `relay` parameter. Additionally, you can interact with it via the `ns_smtpd` command to perform actions such as sending mail, checking spam/virus status, and managing session data.
+Once configured, the SMTPD module will act as an SMTP server, forwarding messages to the relay specified by the `relay` parameter. Additionally, you can interact with it via the `ns_smtpd` command to perform actions such as sending mail and managing session data.
 
 For example, to send an email using the API:
 
@@ -1362,6 +1357,27 @@ This command will deliver the message to the configured SMTP relay,
 applying potentially anti-spam or anti-virus checks along the way.
 
 ---
+
+## Legacy support
+
+The source retains integrations for **SpamAssassin/spamd**, **DSPAM**,
+**ClamAV**, and **Sophos SAVI**. These are historical interfaces, not working
+scanner integrations for current installations: external APIs have changed
+or the referenced libraries/services are unavailable. They are disabled by
+default and require maintenance and verification before use. Installing a
+current scanner alone does not restore these integrations.
+
+The associated legacy API includes:
+
+- `ns_smtpd spamversion` and `ns_smtpd virusversion`
+- `ns_smtpd checkspam /message/ ?email?`
+- `ns_smtpd trainspam 1|0 /email/ /message/ ?signature? ?mode? ?source?`
+- `ns_smtpd checkvirus /data/`
+
+The `spamd` parameter and optional DSPAM/ClamAV/SAVI build settings belong to
+these integrations. They are not part of the basic SMTP configuration above.
+Current Tcl policy callbacks can integrate separately maintained services
+without depending on these historical interfaces.
 
 ## Licensing
 
