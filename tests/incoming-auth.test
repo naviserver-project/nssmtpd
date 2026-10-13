@@ -208,13 +208,24 @@ test auth-manage-1 {add, update, and remove users while preserving other account
     set path [file join $::env(ALIAS_TEST_HOME) managed-users]
     set first [smtpd::authfileadduser -file $path First FirstPass]
     smtpd::authfileadduser -file $path Second SecondPass
-    smtpd::authfileadduser -file $path First NewPass
+    smtpd::authfilechangepassword -file $path First NewPass
     set old [smtpd::authfile -file $path 0 First FirstPass]
     set updated [smtpd::authfile -file $path 0 First NewPass]
     set removed [smtpd::authfileremoveuser -file $path First]
     list $first $old $updated $removed [smtpd::authfileremoveuser -file $path First] \
         [smtpd::authfile -file $path 0 Second SecondPass] [smtpd::authfile -file $path 0 First NewPass]
 } -result {First 0 1 1 0 1 0}
+test auth-password-change-1 {unknown accounts do not create a credential file} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) missing-password-users]
+    set failed [catch {smtpd::authfilechangepassword -file $path absent password} message]
+    list $failed $message [file exists $path]
+} -returnCodes {ok error} -result {1 {SMTP login does not exist} 0}
+test auth-password-change-2 {unknown account leaves existing users unchanged} -body {
+    set path [file join $::env(ALIAS_TEST_HOME) managed-users]
+    set before [smtpd::AuthFileRead $path]
+    set failed [catch {smtpd::authfilechangepassword -file $path absent password}]
+    list $failed [expr {$before eq [smtpd::AuthFileRead $path]}]
+} -returnCodes {ok error} -result {1 1}
 test auth-manage-2 {invalid login or empty password creates no file; missing remove is harmless} -body {
     set path [file join $::env(ALIAS_TEST_HOME) invalid-users]
     list [catch {smtpd::authfileadduser -file $path {user name} password}] \
@@ -268,7 +279,7 @@ test auth-config-3 {missing or empty configuration fails with a clear error} -bo
 } -result {1 {nssmtpd authfile parameter is not configured}}
 test auth-parseargs-1 {ns_parseargs rejects missing arguments, extra arguments, and unknown options} -body {
     set rejected {}
-    foreach command {authfile authfileadduser authfileremoveuser} {
+    foreach command {authfile authfileadduser authfilechangepassword authfileremoveuser} {
         foreach arguments [list {} {-unknown value unexpected extra} {-file}] {
             lappend rejected [catch [list smtpd::$command {*}$arguments]]
         }

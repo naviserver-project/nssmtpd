@@ -455,7 +455,7 @@ identity to enforce sender restrictions.
 #### Separate SMTP password file
 
 The provided `nssmtpd-credentials.tcl` includes `smtpd::authcredential`,
-`smtpd::authfile`, `smtpd::authfileadduser`, and
+`smtpd::authfile`, `smtpd::authfileadduser`, `smtpd::authfilechangepassword`, and
 `smtpd::authfileremoveuser`.
 Records use a random 16-byte salt and PBKDF2-HMAC-SHA256 with
 600,000 iterations. The file is a Tcl dictionary read as data, never sourced.
@@ -475,12 +475,16 @@ supplied separately in `$smtpPassword`:
 
 ```tcl
 smtpd::authfileadduser my-smtp-login $smtpPassword
+# To change only an existing account:
+smtpd::authfilechangepassword my-smtp-login $smtpPassword
 unset smtpPassword
 smtpd::authfileremoveuser my-smtp-login
 ```
 
 `authfileadduser ?-file filename? ?--? username password` creates the file if missing, adds
 the user, or replaces that user's password; it returns the login name.
+`authfilechangepassword ?-file filename? ?--? username password` replaces only an
+existing user's password and returns the login name; an unknown user is an error.
 `authfileremoveuser ?-file filename? ?--? username` returns 1 when removed, or 0 when absent.
 Both preserve other users. By default these procedures and `smtpd::authfile`
 use the `authfile` parameter in the current server's nssmtpd module section.
@@ -492,7 +496,9 @@ for the intended server. Setting `authfile` alone does not enable AUTH; configur
 `authproc smtpd::authfile` as well.
 
 Updates use a process-local mutex and atomically
-replace the file using a same-directory mode-0600 temporary file. Serialize
+replace the file using a same-directory mode-0600 temporary file, with
+`${filename}.tmp` as its template. This requires write permission on the parent
+directory, even when the existing password file is writable. Serialize
 administration across separate processes; the mutex does not coordinate different
 NaviServer instances. Malformed existing files are not overwritten. The parent
 directory must already exist and be writable by the administrative account.

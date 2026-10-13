@@ -61,7 +61,11 @@ proc smtpd::AuthFileWrite {filename data} {
     if {[string length $data] > 65536} {::error "SMTP credential file exceeds 65536 characters"}
     set temporary ""
     try {
-        set f [file tempfile temporary ${filename}.tmp]
+        try {
+            set f [file tempfile temporary ${filename}.tmp]
+        } on error {message options} {
+            return -options $options "cannot create temporary credential file beside '$filename': $message"
+        }
         try {puts -nonewline $f $data} finally {close $f}
         file rename -force $temporary $filename
         set temporary ""
@@ -75,7 +79,18 @@ proc smtpd::AuthFileWrite {filename data} {
 # coordinate their updates externally.
 proc smtpd::authfileadduser {args} {
     ns_parseargs {{-file ""} -- username password} $args
-    set filename [smtpd::AuthFilePath $file]
+    return [smtpd::AuthFileSetUser [smtpd::AuthFilePath $file] $username $password false]
+}
+
+# Change an existing user's password, without silently creating a new account.
+# Like adduser, return the login name and make the change effective immediately.
+proc smtpd::authfilechangepassword {args} {
+    ns_parseargs {{-file ""} -- username password} $args
+    return [smtpd::AuthFileSetUser [smtpd::AuthFilePath $file] $username $password true]
+}
+
+# Shared update path; existence checks and replacement use the same mutex.
+proc smtpd::AuthFileSetUser {filename username password existingOnly} {
     if {![regexp {^[!-~]+$} $username]} {::error "SMTP login must be nonempty printable ASCII without spaces"}
     if {$password eq ""} {::error "SMTP password must not be empty"}
     set credential [smtpd::authcredential $password]
@@ -85,6 +100,9 @@ proc smtpd::authfileadduser {args} {
             set data [smtpd::AuthFileRead $filename]
         } else {
             set data [dict create version 1 users {}]
+        }
+        if {$existingOnly && ![dict exists $data users $username]} {
+            ::error "SMTP login does not exist"
         }
         dict set data users $username $credential
         smtpd::AuthFileWrite $filename $data
