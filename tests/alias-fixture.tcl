@@ -5,7 +5,15 @@ source [file join [ns_config alias-test source] tests alias-sink.tcl]
 source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
 
 proc header_test_policy {context} {
+    nsv_set alias-test data-context $context
     if {[nsv_get alias-test data-rules rules]} {
+        return [smtpd::policychain $rules $context]
+    }
+    return {action accept}
+}
+
+proc header_test_recipient_policy {context} {
+    if {[nsv_get alias-test recipient-rules rules]} {
         return [smtpd::policychain $rules $context]
     }
     return {action accept}

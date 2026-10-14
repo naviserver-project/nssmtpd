@@ -472,7 +472,8 @@ proc smtpd::mail { id } {
 # Rules are trusted configuration scripts, evaluated with context and findings
 # in scope. Findings survive every outcome; only the configured rules decide.
 proc smtpd::policychain {rules context} {
-    set findings {}
+    set findings [expr {[dict exists $context findings] ? [dict get $context findings] : {}}]
+    dict size $findings
     set index 0
     foreach rule $rules {
         incr index
@@ -546,6 +547,25 @@ proc smtpd::checkdatapolicy {id} {
         set context [dict create id $id phase data peeraddr [ns_conn peeraddr] \
             sender [ns_smtpd getfrom $id] helo [ns_smtpd gethelo $id] \
             recipients [lmap rcpt [ns_smtpd getrcpt $id] {lindex $rcpt 0}]]
+        # Only accepted original recipients contribute. Keep their provenance
+        # and seed the DATA chain with the maximum of each greylisting counter.
+        set recipientFindings [ns_smtpd getrcptfindings $id]
+        set findings {}
+        dict for {recipient values} $recipientFindings {
+            foreach key {greylist-early-retries greylist-elapsed-seconds} {
+                if {[dict exists $values $key]} {
+                    set value [dict get $values $key]
+                    if {![string is wideinteger -strict $value] || $value < 0} {
+                        ::error "invalid recipient greylisting finding"
+                    }
+                    if {![dict exists $findings $key] || $value > [dict get $findings $key]} {
+                        dict set findings $key $value
+                    }
+                }
+            }
+        }
+        dict set context recipient-findings $recipientFindings
+        dict set context findings $findings
         set result [uplevel #0 [list {*}$prefix $context]]
         set action [dict get $result action]
         switch -- $action {
@@ -593,6 +613,7 @@ proc smtpd::checkpolicy {id} {
                          [dict create recipient [dict get $context recipient]]]
         switch -- $action {
             accept {
+                if {[dict exists $result findings]} {dict size [dict get $result findings]}
                 smtpd::logevent $id policy $details
                 return 1
             }
@@ -775,7 +796,9 @@ proc smtpd::greylist {context} {
 # Logging is observational: a logging failure must not change mail policy.
 # Custom callbacks can use this wrapper or ns_smtpd logevent directly.
 proc smtpd::logevent {id event details} {
-    if {![ns_config -bool ns/server/[ns_info server]/module/nssmtpd eventlogging false]} {return}
+    # RCPT policy metadata also carries transaction state into the DATA phase.
+    # The native handler stores it without writing when event logging is off.
+    if {$event ne "policy" && ![ns_config -bool ns/server/[ns_info server]/module/nssmtpd eventlogging false]} {return}
     try {
         ns_smtpd logevent $id $event $details
     } on error {message options} {

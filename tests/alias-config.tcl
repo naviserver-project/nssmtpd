@@ -95,7 +95,10 @@ ns_section ns/server/test/module/nssmtpd {
     ns_param maxrcpt 3
     ns_param relaydomains example.test
     ns_param localdomains [expr {$::env(ALIAS_TEST_MODE) in {auth headers datapolicy events eventsoff io untrusted policyexternal policyoff policyempty greyexternal greyoff greyempty} ? "" : "127.0.0.1"}]
-    ns_param rcptproc [expr {$::env(ALIAS_TEST_MODE) in {events eventsoff} ? "event_test_rcpt" : ([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
+    if {$::env(ALIAS_TEST_MODE) eq "datapolicy"} {
+        ns_param recipientpolicyproc header_test_recipient_policy
+    }
+    ns_param rcptproc [expr {$::env(ALIAS_TEST_MODE) eq "datapolicy" ? "smtpd::rcpt" : $::env(ALIAS_TEST_MODE) in {events eventsoff} ? "event_test_rcpt" : ([string match policy* $::env(ALIAS_TEST_MODE)] || [string match grey* $::env(ALIAS_TEST_MODE)]) ? "smtpd::rcpt" : "alias_test_rcpt"}]
     if {[string match policy* $::env(ALIAS_TEST_MODE)]} {ns_param datapolicyproc header_test_policy}
     ns_param dataproc alias_test_data
     if {$::env(ALIAS_TEST_MODE) in {events eventsoff enabled untrusted proxy greyexternal greytrusted greyoff greyempty}} {

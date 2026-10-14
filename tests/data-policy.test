@@ -11,12 +11,14 @@ proc header_messages {} {
     return $text
 }
 
-proc header_submit {message} {
+proc header_submit {message {recipients {one@example.test}} {beforeRcpt {}}} {
     set channel [socket 127.0.0.1 $::env(ALIAS_TEST_PORT)]
     fconfigure $channel -translation binary -buffering none
     try {
         gets $channel
-        foreach command {{EHLO test.example} {MAIL FROM:<sender@example.test>} {RCPT TO:<one@example.test>} DATA} {
+        set commands [concat {{EHLO test.example} {MAIL FROM:<sender@example.test>}} $beforeRcpt \
+            [lmap recipient $recipients {format {RCPT TO:<%s>} $recipient}] {DATA}]
+        foreach command $commands {
             puts -nonewline $channel "$command\r\n"
             while {[gets $channel reply] >= 0 && [string index $reply 3] eq "-"} {}
         }
@@ -44,6 +46,76 @@ foreach {flags expected} {{spf-fail true dkim-no-key true} 550 {spf-fail true} 2
         nsv_unset alias-test data-rules
     } -result {1 1}
 }
+
+foreach {early expected} {21 550 2 250} {
+    test datapolicy-greylist-combined-$early {accepted greylisting findings combine with SPF/DKIM even without event logging} -setup {
+        smtpd::greylistinit
+        set now [clock seconds]
+        set key {127.0.0.1 sender@example.test one@example.test}
+        nsv_set smtpd-greylist-entries $key [list [expr {$now-301}] [expr {$now+3600}] 0 $early]
+        nsv_set alias-test recipient-rules {{smtpd::greylist $context}}
+        nsv_set spf-policy-test results {fail}
+        nsv_set spf-policy-test calls 0
+        nsv_set alias-test data-rules {
+            {smtpd::spfpolicy $context findings}
+            {dict set findings dkim-no-key true; continue}
+            {expr {[dict exists $findings greylist-early-retries]
+                   && [dict get $findings greylist-early-retries] > 20
+                   && [dict exists $findings spf-fail] && [dict exists $findings dkim-no-key] ? "reject" : "continue"}}
+        }
+        set before [llength [header_messages]]
+    } -body {
+        set code [header_submit $original]
+        set context [nsv_get alias-test data-context]
+        list [expr {$code eq $expected}] \
+            [dict get $context findings greylist-early-retries] \
+            [dict get $context recipient-findings one@example.test greylist-early-retries] \
+            [expr {[llength [header_messages]] == $before + ($expected eq "250")}]
+    } -cleanup {
+        nsv_unset alias-test data-rules
+        nsv_unset alias-test recipient-rules
+        nsv_unset spf-policy-test
+        nsv_unset -nocomplain smtpd-greylist-entries $key
+    } -result [list 1 $early $early 1]
+}
+
+test datapolicy-multiple-recipients {maximum retry count is aggregated with per-recipient provenance} -setup {
+    nsv_set alias-test recipient-rules {
+        {return [dict create action accept findings [dict create greylist-early-retries \
+            [expr {[dict get $context recipient] eq "one@example.test" ? 2 : 23}]]]}
+    }
+} -body {
+    set code [header_submit $original {one@example.test two@example.test}]
+    set context [nsv_get alias-test data-context]
+    list $code [dict get $context findings greylist-early-retries] \
+        [dict size [dict get $context recipient-findings]]
+} -cleanup {nsv_unset alias-test recipient-rules} -result {250 23 2}
+
+test datapolicy-rejected-recipient {deferred recipients do not seed DATA findings} -setup {
+    nsv_set alias-test recipient-rules {
+        {return [dict create action [expr {[dict get $context recipient] eq "blocked@example.test" ? "defer" : "accept"}] \
+            findings [dict create greylist-early-retries \
+                [expr {[dict get $context recipient] eq "blocked@example.test" ? 999 : 2}]]]}
+    }
+} -body {
+    set code [header_submit $original {blocked@example.test one@example.test}]
+    set context [nsv_get alias-test data-context]
+    list $code [dict get $context findings greylist-early-retries] \
+        [dict exists $context recipient-findings blocked@example.test]
+} -cleanup {nsv_unset alias-test recipient-rules} -result {250 2 0}
+
+test datapolicy-reset {RSET clears findings before a new transaction on the same connection} -setup {
+    nsv_set alias-test recipient-rules {
+        {return [dict create action accept findings [dict create greylist-early-retries \
+            [expr {[dict get $context recipient] eq "old@example.test" ? 999 : 2}]]]}
+    }
+} -body {
+    set code [header_submit $original {one@example.test} \
+        {{RCPT TO:<old@example.test>} RSET {MAIL FROM:<sender@example.test>}}]
+    set context [nsv_get alias-test data-context]
+    list $code [dict get $context findings greylist-early-retries] \
+        [dict exists $context recipient-findings old@example.test]
+} -cleanup {nsv_unset alias-test recipient-rules} -result {250 2 0}
 
 test headers-policy-error {rule errors defer without forwarding to the relay} -setup {
     set before [llength [header_messages]]

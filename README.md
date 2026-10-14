@@ -1051,6 +1051,40 @@ is not cryptographic verification. A DATA rejection affects all recipients of
 the message. Neither configuring `spfproc` nor collecting findings implicitly
 rejects mail; the visible chain owns the decision.
 
+### Carrying greylisting findings into DATA policy
+
+Accepted original recipients retain their policy findings for the current
+SMTP transaction, independently of event logging and before alias addresses
+are replaced by their targets. `ns_smtpd getrcptfindings SESSION` returns a
+recipient-to-findings dictionary from the current SMTP callback session.
+The DATA callback context exposes it as `recipient-findings`.
+
+The context's `findings` dictionary contains the maximum of each available
+`greylist-early-retries` and `greylist-elapsed-seconds` value across accepted
+recipients. `smtpd::policychain` seeds its findings from this dictionary, so
+SPF/DKIM rules can add their results without discarding the retry counters.
+Absent counters remain absent, not zero. Rejected/deferred recipients do not
+contribute; RSET, a new MAIL transaction, completion and connection cleanup
+clear the retained findings. Authenticated/local policy bypasses are unchanged.
+
+For example, the final DATA rule can require excessive early retries **and**
+both authentication findings before rejecting:
+
+```tcl
+if {[dict exists $findings greylist-early-retries]
+    && [dict get $findings greylist-early-retries] > 20
+    && [dict exists $findings spf-fail]
+    && [dict exists $findings dkim-no-key]} {
+    return {action reject reason early-retries-spf-fail-and-dkim-no-key}
+}
+continue
+```
+
+The threshold is an example; this change does not install a rejection rule.
+With several accepted recipients, a message-wide rejection affects all of them;
+use `recipient-findings` when the rule needs recipient-specific interpretation.
+Deploy the native module and Tcl helpers together.
+
 ### Optional SPF-verified greylist exceptions
 
 Large mail providers can retry from different IP addresses, repeatedly creating
@@ -1319,6 +1353,7 @@ server. Below is a summary of available commands:
   - `ns_smtpd getfromdata`
   - `ns_smtpd setfrom /address/`
   - `ns_smtpd setfromdata /data/`
+  - `ns_smtpd getrcptfindings /session/` *(Accepted original recipient findings, current callback only)*
   - `ns_smtpd getrcpt ?address|index?`
   - `ns_smtpd getrcptdata ?address|index?`
   - `ns_smtpd addrcpt /address/ ?flags? ?data?`

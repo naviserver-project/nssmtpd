@@ -48,6 +48,28 @@ test recipient-known {known alias expands for all peer/policy configurations} -b
     policy_session known@example.test
 } -result {250 250 one@remote.test}
 
+testConstraint recipient_findings_external [expr {!$trusted}]
+test recipient-alias-findings {DATA receives findings keyed by the original alias, not its expanded target} -constraints recipient_findings_external -setup {
+    policy_map
+    set config [ns_configsection ns/server/test/module/nssmtpd]
+    set oldPolicy [ns_config ns/server/test/module/nssmtpd recipientpolicyproc ""]
+    ns_set update $config recipientpolicyproc [list smtpd::policychain {
+        {return {action accept findings {greylist-early-retries 21 greylist-elapsed-seconds 301}}}
+    }]
+    nsv_set alias-test data-rules {
+        {expr {[dict get $findings greylist-early-retries] > 20 ? "reject" : "continue"}}
+    }
+} -body {
+    set result [policy_session known@example.test]
+    set context [nsv_get alias-test data-context]
+    list [lindex $result 1] [dict get $context findings greylist-early-retries] \
+        [dict exists $context recipient-findings known@example.test] \
+        [dict exists $context recipient-findings one@remote.test] [dict get $context recipients]
+} -cleanup {
+    ns_set update $config recipientpolicyproc $oldPolicy
+    nsv_unset alias-test data-rules
+} -result {550 21 1 0 one@remote.test}
+
 test recipient-snapshot {validation and expansion share one file read} -body {
     policy_map
     nsv_set alias-test reads 0

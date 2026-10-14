@@ -266,6 +266,7 @@ typedef struct _smtpdConn {
     char relayReply[512];
     const char *eventReason;
     Tcl_Obj *policyDetails; /* Pending RCPT policy metadata, owned reference. */
+    Tcl_Obj *recipientFindings; /* Accepted original recipients -> findings, transaction-owned. */
     char *authUser; /* Connection identity; independent of LOCAL/IP trust. */
     unsigned int authFailures;
     bool authExchange, ehlo;
@@ -2308,6 +2309,11 @@ SmtpdConnReset(smtpdConn *conn)
         conn->policyDetails = NULL;
     }
 
+    if (conn->recipientFindings != NULL) {
+        Tcl_DecrRefCount(conn->recipientFindings);
+        conn->recipientFindings = NULL;
+    }
+
     // Default global flags
     conn->flags &= ~(SMTPD_GOTMAIL);
     ns_free(conn->from.addr), conn->from.addr = NULL;
@@ -3677,6 +3683,26 @@ SmtpdTLSFailure(smtpdConn *conn, const char *phase)
 static void
 SmtpdRecipientEvent(smtpdConn *conn, const char *recipient, int code, const char *reason)
 {
+    /* Keep accepted RCPT findings independently of event logging. Alias
+     * failures and callback overrides must not contaminate the DATA policy. */
+    if (code / 100 == 2 && conn->policyDetails != NULL) {
+        Tcl_Obj *findings = EventGet(conn->policyDetails, "findings");
+        TCL_SIZE_T count;
+
+        if (findings != NULL && Tcl_DictObjSize(NULL, findings, &count) == TCL_OK) {
+            if (conn->recipientFindings == NULL) {
+                conn->recipientFindings = Tcl_NewDictObj();
+                Tcl_IncrRefCount(conn->recipientFindings);
+            } else if (Tcl_IsShared(conn->recipientFindings)) {
+                Tcl_Obj *copy = Tcl_DuplicateObj(conn->recipientFindings);
+                Tcl_IncrRefCount(copy);
+                Tcl_DecrRefCount(conn->recipientFindings);
+                conn->recipientFindings = copy;
+            }
+            Tcl_DictObjPut(NULL, conn->recipientFindings,
+                           Tcl_NewStringObj(recipient, -1), findings);
+        }
+    }
     if (conn->config->eventlog.enabled) {
         const char *action = code / 100 == 2 ? "accept" : code / 100 == 4 ? "defer" : "reject";
         Tcl_Obj *details;
@@ -6135,6 +6161,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdSetFrom,
         cmdSetFromData,
         cmdGetRcpt,
+        cmdGetRcptFindings,
         cmdGetRcptData,
         cmdAddRcpt,
         cmdSetRcptData,
@@ -6178,6 +6205,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "setfrom",
         "setfromdata",
         "getrcpt",
+        "getrcptfindings",
         "getrcptdata",
         "addrcpt",
         "setrcptdata",
@@ -7020,6 +7048,20 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         }
         break;
     }
+    case cmdGetRcptFindings:
+        if (objc != 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "session");
+            return TCL_ERROR;
+        }
+        if (conn->interp != interp || Ns_GetConn() == NULL) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj(
+                "getrcptfindings requires the current SMTP callback session", -1));
+            return TCL_ERROR;
+        }
+        Tcl_SetObjResult(interp, conn->recipientFindings != NULL
+                         ? conn->recipientFindings : Tcl_NewDictObj());
+        break;
+
     case cmdHeaders: {
         Ns_Set *copy, *source = SmtpdHeaderSet(conn);
         size_t i;
