@@ -1479,3 +1479,21 @@ SMTP `readtimeout` and `writetimeout` accept NaviServer time values such as
 `500ms`, `1.5s`, or `1m`; both default to `60s`. Unitless values remain seconds.
 The optional `segvtimeout` uses the same syntax, retaining its default `-1`
 (no delay before termination).
+
+## Parameter documentation
+
+This repository owns `doc/tcl/config-parameters.tcl`; its committed generated
+reference is `doc/src/include/parameters.man`. The complete module manual is
+`doc/src/nssmtpd.man`. With the updated NaviServer development tools:
+
+```sh
+make regen-config-parameters-includes
+make check-doc
+make build-doc
+```
+
+HTML is written to `doc/html`, nroff to `doc/man`. Ordinary builds and installation
+use the committed fragment without running the documentation generator.
+`DOC_TOOLS=/path/to/naviserver/doc/tools` selects source-checkout tools.
+For combined documentation, run NaviServer's `make build-doc` with
+`EXTERNAL_MODULE_DOCS` listing the selected local module repository directories.

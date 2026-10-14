@@ -1,0 +1,38 @@
+[manpage_begin nssmtpd n 2.8]
+[moddesc {NaviServer External Modules}]
+[titledesc {SMTP reception, authenticated submission and upstream relay}]
+[description]
+The nssmtpd module supplies SMTP service and Tcl callbacks for receiving mail,
+resolving envelope recipients and forwarding through an upstream mail server.
+It also supplies outbound SMTP sending support. Keep an upstream MTA for persistent
+queueing and delivery retries. The module does not provide a general local mailbox store.
+
+[section INSTALLATION]
+Build and install the module with the shared NaviServer Makefile support, then load
+it in the chosen virtual server and configure its listener and Tcl callbacks.
+Use a dedicated submission listener and TLS/authentication as appropriate for the
+installation. Relay and local-recipient policies determine which destinations are
+accepted; do not expose unrestricted relaying.
+
+[section MAIL FLOW]
+Incoming SMTP sessions pass through recipient resolution and recipient policy.
+Accepted message data can be forwarded through the configured upstream relay.
+Alias expansion preserves the envelope semantics and does not rewrite message headers.
+Recipient-policy findings are available to DATA policies, including greylisting findings.
+SMTP event and send logs provide session and transaction context for administration.
+For ports, relay paths, policies and operational examples, see
+[uri https://github.com/naviserver-project/nssmtpd/blob/main/README.md {the repository guide}]
+and its mail-flow diagram. Older external scanner integrations are described as legacy support.
+
+[section CONFIGURATION]
+[include include/parameters.man]
+
+[section DOCUMENTATION]
+The repository-local [file doc/tcl/config-parameters.tcl] owns the parameter reference.
+[const {make regen-config-parameters-includes}] regenerates its committed fragment.
+[const {make check-doc}] checks freshness and validates this manual.
+[const {make build-doc}] produces standalone HTML and nroff documentation.
+The same fragment and manual can be staged into the combined NaviServer documentation
+without making ordinary NaviServer builds depend on this repository.
+[keywords SMTP mail relay aliases greylisting configuration]
+[manpage_end]
