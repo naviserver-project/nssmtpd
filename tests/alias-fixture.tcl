@@ -1,6 +1,7 @@
 # -*- Tcl -*-
 # Test-only callbacks. Loaded into every interpreter of the isolated server.
 source [file join [ns_config alias-test source] nssmtpd-procs.tcl]
+source [file join [ns_config alias-test source] nssmtpd-quarantine.tcl]
 source [file join [ns_config alias-test source] tests alias-sink.tcl]
 source [file join [ns_config alias-test source] nssmtpd-auth.tcl]
 
@@ -182,3 +183,10 @@ proc incoming_auth_verify {prefix id user password} {
 }
 
 source [file join [ns_config alias-test source] nssmtpd-credentials.tcl]
+
+# Keep the DATA-policy fixture transparent, then fail if release re-expands it.
+proc quarantine_test_resolver {args} {
+    ns_parseargs {-recipient {-rejectunknown false}} $args
+    if {[nsv_exists alias-test quarantine-forbid-alias]} {error "release must not expand aliases"}
+    return [list $recipient]
+}

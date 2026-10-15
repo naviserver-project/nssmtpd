@@ -1,0 +1,19 @@
+set nsroot $::env(ALIAS_TEST_NSROOT)
+set root $::env(ALIAS_TEST_ROOT)
+ns_section ns/parameters {
+    ns_param home $::env(ALIAS_TEST_HOME)
+    ns_param tcllibrary [file join $nsroot tcl]
+    ns_param pidfile [file join $::env(ALIAS_TEST_HOME) restart.pid]
+}
+ns_section ns/servers {ns_param test {Quarantine restart reader}}
+ns_section ns/server/test/modules {ns_param nssmtpd [file join $root nssmtpd.so]}
+ns_section ns/server/test/module/nssmtpd {
+    ns_param address 127.0.0.1
+    ns_param port 0
+    ns_param initproc {}
+    ns_param quarantineDirectory [file join $::env(ALIAS_TEST_HOME) quarantine]
+}
+ns_section ns/server/test/tcl {
+    ns_param initfile [file join $nsroot bin init.tcl]
+    ns_param initcmds [list source [file join $root nssmtpd-quarantine.tcl]]
+}

@@ -388,7 +388,37 @@ dict set ::ns_configdoc::data modules nssmtpd {
             datapolicyproc {
                 type list
                 default {}
-                desc {Optional Tcl command prefix receiving a context dictionary after DATA is parsed and before message forwarding or dataproc. Contains id, phase data, peeraddr, sender, helo and recipients (after alias expansion). Returns action accept, defer or reject with optional reason/message, like recipientpolicyproc; trusted local clients bypass it. Use smtpd::policychain to accumulate findings and express combined policies: smtpd::spfpolicy collects SPF without rejecting, smtpd::dkimkeypolicy collects key diagnostics and sets dkim-no-key only when every provided signature key is definitively absent. Unsigned messages, lookup errors, invalid tags and signature-limit exhaustion do not set that finding; keys are not cryptographically verified. Configuring this hook buffers relay DATA up to maxdata before forwarding, preserving original wire bytes. Rejection returns 550 5.7.1 for the whole message; errors defer with 451. Decisions are logged as message-policy with accumulated findings. Empty preserves existing streaming behavior}
+                desc {Optional Tcl command prefix receiving a context dictionary after DATA is parsed and before message forwarding or dataproc. Contains id, phase data, peeraddr, sender, helo and recipients (after alias expansion). Returns action accept, defer or reject with optional reason/message, like recipientpolicyproc; trusted local clients bypass it. Use smtpd::policychain to accumulate findings and express combined policies: smtpd::spfpolicy collects SPF without rejecting, smtpd::dkimkeypolicy collects key diagnostics and sets dkim-no-key only when every provided signature key is definitively absent. Unsigned messages, lookup errors, invalid tags and signature-limit exhaustion do not set that finding; keys are not cryptographically verified. Configuring this hook buffers relay DATA up to maxdata before forwarding, preserving original wire bytes. Rejection returns 550 5.7.1 for the whole message unless quarantinePolicyRejects converts it into a durable hold; errors defer with 451. Decisions are logged as message-policy with accumulated findings. Empty preserves existing streaming behavior}
+            }
+
+            quarantinePolicyRejects {
+                type boolean
+                default {false}
+                desc {Convert every DATA-policy reject into a durable quarantine hold. The policy chain remains unchanged. Return SMTP 250 only after message and metadata are synced; storage or capacity failures return 451. Does not affect recipient-policy rejections, deferrals or trusted-client bypasses. Requires an absolute private quarantineDirectory and the default smtpd::init, or an explicit smtpd::quarantineinit call from a custom initproc}
+            }
+
+            quarantineDirectory {
+                type string
+                default {}
+                desc {Absolute private persistent spool directory, one dedicated directory per virtual server and running NaviServer process. Created with mode 0700; files use 0600. Mount it on persistent storage in containers. Each opaque message directory contains message.eml and metadata.tcl (a data dictionary, never sourced). Temporary .pending-* directories are unpublished incomplete writes and require manual inspection after crashes. Use a local filesystem supporting atomic rename and file/directory fsync; unsupported sync fails closed with 451}
+            }
+
+            quarantineRetention {
+                type time
+                default {7d}
+                desc {Positive age limit for held and released entries. Expired entries are removed on admission, by hourly cleanup, or by smtpd::quarantine cleanup. Interrupted and uncertain deliveries are preserved for manual review even beyond this age. Expiration discards held mail without a bounce; choose retention to allow administrative inspection}
+            }
+
+            quarantineMaxBytes {
+                type memory
+                default {1GiB}
+                desc {Positive admission limit for stored message and metadata file bytes, including a reserve for metadata updates. Filesystem overhead, unpublished temporary directories and temporary replacement files are not included; provision extra disk space. No capacity-based eviction of unexpired messages. Capacity or disk exhaustion defers new rejected mail with SMTP 451}
+            }
+
+            quarantineMaxMessages {
+                type integer
+                default {10000}
+                desc {Positive maximum number of retained quarantine entries, including released messages kept for inspection. Capacity exhaustion defers new policy-rejected mail with 451; it never silently discards or forwards it}
             }
 
             dataproc {

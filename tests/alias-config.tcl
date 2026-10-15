@@ -52,6 +52,12 @@ ns_section ns/server/test/module/nssock {
     ns_param port 0
 }
 ns_section ns/server/test/module/nssmtpd {
+    if {$::env(ALIAS_TEST_MODE) eq "datapolicy"} {
+        ns_param aliasproc quarantine_test_resolver
+        ns_param quarantineDirectory [file join $::env(ALIAS_TEST_HOME) quarantine]
+        ns_param quarantinePolicyRejects false
+        ns_param quarantineMaxBytes 1GiB
+    }
     if {$::env(ALIAS_TEST_MODE) in {headers datapolicy}} {
         ns_param relay plain://127.0.0.1:$::env(ALIAS_TEST_RELAY)
         ns_param authdetailsproc header_test_auth

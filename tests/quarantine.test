@@ -1,0 +1,203 @@
+# Sourced by data-policy.test inside NaviServer, with a local SMTP sink.
+proc quarantine_test_enable {} {
+    ns_set update [ns_configsection ns/server/test/module/nssmtpd] quarantinePolicyRejects true
+    ns_eval -sync {smtpd::quarantineinit}
+    nsv_set alias-test data-rules {{return {action reject reason test-rejection findings {spf-fail true dkim-no-key true}}}}
+}
+proc quarantine_test_clear {} {
+    foreach entry [dict get [smtpd::quarantine list -limit 1000] entries] {
+        smtpd::quarantine delete [dict get $entry id]
+    }
+}
+proc quarantine_test_hold {{recipients {one@example.test}}} {
+    set before [smtpd::QuarantineIds]
+    if {[header_submit $::original $recipients] ne "250"} {error "quarantine was not accepted"}
+    foreach id [smtpd::QuarantineIds] {if {$id ni $before} {return $id}}
+    error "no stored message"
+}
+
+quarantine_test_enable
+
+test quarantine-store {reject becomes durable hold, message and findings inspectable, no upstream delivery} -setup {
+    set before [llength [header_messages]]
+} -body {
+    set id [quarantine_test_hold]
+    set metadata [smtpd::quarantine show $id]
+    set message [smtpd::quarantine message $id]
+    set expected [string map {"\r\n.." "\r\n."} $original]
+    list [dict get $metadata state] [dict get $metadata decision reason] \
+        [dict get $metadata decision findings spf-fail] \
+        [expr {[string range $message [string first "From:" $message] end] eq $expected}] \
+        [expr {[llength [header_messages]] == $before}] \
+        [expr {([file attributes [dict get $metadata messagePath] -permissions] & 0077) == 0}]
+} -result {held test-rejection true 1 1 1}
+
+test quarantine-release {manual release preserves wire bytes, bypasses aliases, records delivery, cannot repeat} -setup {
+    nsv_set alias-test quarantine-forbid-alias true
+} -body {
+    set result [smtpd::quarantine release $id]
+    set wire [lindex [header_messages] end 1]
+    list [dict get $result state] [dict get $result recipients one@example.test] \
+        [expr {[string range $wire [string first "From:" $wire] end] eq $original}] \
+        [catch {smtpd::quarantine release $id}]
+} -cleanup {nsv_unset alias-test quarantine-forbid-alias} -result {released delivered 1 1}
+
+test quarantine-paging {bounded list pages expose complete retained set} -body {
+    set second [quarantine_test_hold]
+    set a [smtpd::quarantine list -limit 1]
+    set b [smtpd::quarantine list -limit 1 -offset [dict get $a nextOffset]]
+    list [dict get $a total] [dict get $a more] [dict get $b more] \
+        [expr {[dict get [lindex [dict get $a entries] 0] id] ne [dict get [lindex [dict get $b entries] 0] id]}]
+} -result {2 1 0 1}
+
+test quarantine-binary {non-UTF-8 message bytes survive disk and release without conversion} -setup {
+    set saved $original
+    append original "binary: " [binary format H* e9ff80] "\r\n"
+} -body {
+    set binaryId [quarantine_test_hold]
+    smtpd::quarantine release $binaryId
+    set channel [open [file join $::env(ALIAS_TEST_HOME) sink-message.eml] rb]
+    try {set bytes [read $channel]} finally {close $channel}
+    set stored [smtpd::quarantine message $binaryId]
+    set expected [string map {"\r\n.." "\r\n."} $original]
+    list [expr {[binary encode hex [string range $bytes [string first "From:" $bytes] end]] eq [binary encode hex $expected]}] \
+        [expr {[binary encode hex [string range $stored [string first "From:" $stored] end]] eq [binary encode hex $expected]}]
+} -cleanup {set original $saved} -result {1 1}
+
+test quarantine-capacity {full spool defers and does not forward or lose existing entries} -setup {
+    set section [ns_configsection ns/server/test/module/nssmtpd]
+    ns_set update $section quarantineMaxBytes 1
+    set count [llength [smtpd::QuarantineIds]]
+    set before [llength [header_messages]]
+} -body {
+    list [header_submit $original] [expr {$count == [llength [smtpd::QuarantineIds]]}] \
+        [expr {$before == [llength [header_messages]]}]
+} -cleanup {ns_set update $section quarantineMaxBytes 1GiB} -result {451 1 1}
+
+test quarantine-storage-error {missing spool defers instead of acknowledging unstored mail} -setup {
+    set directory [dict get [smtpd::QuarantineConfig] directory]
+    file rename $directory ${directory}.saved
+    set f [open $directory w]
+    close $f
+} -body {
+    header_submit $original
+} -cleanup {
+    file delete $directory
+    file rename ${directory}.saved $directory
+} -result 451
+
+test quarantine-uncertain {failed send stays uncertain and needs explicit retry confirmation} -setup {
+    set uncertainId [quarantine_test_hold {one@example.test two@example.test}]
+    rename ns_smtpd quarantine_test_native
+    proc ns_smtpd {command args} {
+        if {$command eq "sendresolved" && [lindex $args 1] eq "two@example.test"} {error "simulated disconnect"}
+        uplevel 1 [list quarantine_test_native $command {*}$args]
+    }
+} -body {
+    set result [smtpd::quarantine release $uncertainId]
+    list [dict get $result state] [dict get $result recipients one@example.test] \
+        [dict get $result recipients two@example.test] \
+        [catch {smtpd::quarantine retry $uncertainId two@example.test}]
+} -cleanup {
+    rename ns_smtpd {}
+    rename quarantine_test_native ns_smtpd
+} -result {uncertain delivered uncertain 1}
+
+test quarantine-retry {retry delivers only the explicitly reset recipient} -body {
+    set before [llength [header_messages]]
+    smtpd::quarantine retry $uncertainId two@example.test -confirm
+    set result [smtpd::quarantine release $uncertainId]
+    list [dict get $result state] [expr {[llength [header_messages]] == $before+1}] \
+        [lindex [header_messages] end 0]
+} -result {released 1 two@example.test}
+
+test quarantine-active-release {concurrent release and recovery cannot unlock a live claim} -setup {
+    set activeId [quarantine_test_hold]
+    set metadata [smtpd::QuarantineRead $activeId]
+    dict set metadata state releasing
+    dict set metadata releaseInstance [list [pid] [ns_info boottime]]
+    smtpd::QuarantineSave $metadata test-claim
+} -body {
+    list [catch {smtpd::quarantine release $activeId}] [catch {smtpd::quarantine recover $activeId}] \
+        [catch {smtpd::quarantine delete $activeId}]
+} -cleanup {
+    dict set metadata state held
+    smtpd::QuarantineSave $metadata test-unclaim
+} -result {1 1 1}
+
+test quarantine-recover {prior-process sending marker becomes uncertain, never automatically resent} -setup {
+    dict set metadata state releasing
+    dict set metadata releaseInstance {0 0}
+    dict set metadata recipients one@example.test sending
+    smtpd::QuarantineSave $metadata test-interruption
+} -body {
+    set recovered [smtpd::quarantine recover $activeId]
+    list [dict get $recovered state] [dict get $recovered recipients one@example.test]
+} -result {uncertain uncertain}
+
+test quarantine-expiry {cleanup expires old holds but preserves uncertain deliveries} -setup {
+    set oldId [quarantine_test_hold]
+    set old [smtpd::QuarantineRead $oldId]
+    dict set old createdAt 1
+    smtpd::QuarantineSave $old test-expiry
+    set old [smtpd::QuarantineRead $activeId]
+    dict set old createdAt 1
+    smtpd::QuarantineSave $old test-expiry
+} -body {
+    set removed [smtpd::quarantine cleanup]
+    list [expr {$oldId in $removed}] [dict get [smtpd::quarantine show $activeId] state]
+} -result {1 uncertain}
+
+test quarantine-sync-failure {failed file sync never publishes data or leaves temporary files} -setup {
+    set target [file join $::env(ALIAS_TEST_HOME) sync-test]
+    rename ns_smtpd quarantine_test_native
+    proc ns_smtpd {command args} {
+        if {$command eq "filesync"} {error "simulated fsync failure"}
+        uplevel 1 [list quarantine_test_native $command {*}$args]
+    }
+} -body {
+    list [catch {smtpd::QuarantineWrite $target data true}] [file exists $target] \
+        [llength [glob -nocomplain ${target}.tmp-*]]
+} -cleanup {
+    rename ns_smtpd {}
+    rename quarantine_test_native ns_smtpd
+} -result {1 0 0}
+
+test quarantine-metadata-data {metadata values are read as data without evaluating substitutions} -setup {
+    set safeId [quarantine_test_hold]
+    set safe [smtpd::QuarantineRead $safeId]
+    dict set safe decision note {[error should-not-run] $unknown; error not-a-script}
+    smtpd::QuarantineSave $safe test-data
+} -body {
+    dict get [smtpd::quarantine show $safeId] decision note
+} -result {[error should-not-run] $unknown; error not-a-script}
+
+test quarantine-count-limit {message count capacity defers new policy rejects} -setup {
+    set section [ns_configsection ns/server/test/module/nssmtpd]
+    ns_set update $section quarantineMaxMessages [llength [smtpd::QuarantineIds]]
+} -body {
+    header_submit $original
+} -cleanup {ns_set update $section quarantineMaxMessages 10000} -result 451
+
+test quarantine-defer {enabling quarantine does not convert policy deferrals into acceptance} -setup {
+    set rules [nsv_get alias-test data-rules]
+    set before [llength [smtpd::QuarantineIds]]
+    nsv_set alias-test data-rules {{return {action defer reason temporary}}}
+} -body {
+    list [header_submit $original] [expr {[llength [smtpd::QuarantineIds]] == $before}]
+} -cleanup {nsv_set alias-test data-rules $rules} -result {451 1}
+
+test quarantine-path {IDs cannot traverse outside the configured spool} -body {
+    list [catch {smtpd::quarantine show ../elsewhere}] [catch {smtpd::quarantine message /etc/passwd}]
+} -result {1 1}
+
+test quarantine-restart {a new NaviServer process inspects the stored message and its findings} -body {
+    set output [exec [file join $::env(ALIAS_TEST_NSROOT) bin nsd] -c -d \
+        -t [file join $::env(ALIAS_TEST_ROOT) tests quarantine-restart.nscfg] \
+        [file join $::env(ALIAS_TEST_ROOT) tests quarantine-restart.tcl] $second 2>@1]
+    expr {[string first {QUARANTINE_RESTART_OK} $output] >= 0}
+} -returnCodes {ok error} -result 1
+
+quarantine_test_clear
+ns_set update [ns_configsection ns/server/test/module/nssmtpd] quarantinePolicyRejects false
+nsv_unset alias-test data-rules

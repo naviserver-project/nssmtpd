@@ -24,6 +24,42 @@ For ports, relay paths, policies and operational examples, see
 [uri https://github.com/naviserver-project/nssmtpd/blob/main/README.md {the repository guide}]
 and its mail-flow diagram. Older external scanner integrations are described as legacy support.
 
+[section QUARANTINE]
+Enable [const quarantinePolicyRejects] to hold all DATA-policy rejections for manual
+inspection. Configure an absolute persistent [const quarantineDirectory], with
+[const quarantineRetention], [const quarantineMaxBytes] and [const quarantineMaxMessages].
+The default initializer creates a private spool; custom initializers must call
+[cmd smtpd::quarantineinit]. Each entry contains a binary message.eml and a UTF-8
+metadata.tcl dictionary, read as data rather than sourced.
+
+A durable hold returns SMTP 250 without forwarding. Storage/capacity failures
+return 451. Recipient-policy rejections and DATA deferrals are unaffected.
+The directory must have one owning process and support atomic rename and fsync.
+Use a separate persistent directory for every virtual server.
+
+[cmd {smtpd::quarantine status}] reports limits and retained states.
+[cmd {smtpd::quarantine list}] accepts -limit and -offset and returns entries,
+nextOffset and more. [cmd {smtpd::quarantine show}] takes an ID and returns metadata
+and the message path; [cmd {smtpd::quarantine message}] returns the bytes.
+[cmd {smtpd::quarantine release}] sends the recorded recipients without re-expanding
+aliases or reapplying the incoming policy. Delivered recipients are not resent.
+[cmd {smtpd::quarantine delete}] removes an inactive entry.
+[cmd {smtpd::quarantine cleanup}] expires old held/released entries; cleanup also
+runs hourly and on admission. Expiry discards held mail without a bounce.
+
+Failed deliveries remain uncertain and are excluded from expiry. After checking
+upstream logs, [cmd {smtpd::quarantine retry}] takes an ID, recipient and -confirm
+to permit a retry, which may duplicate upstream acceptance. Interrupted releases
+remain locked until a later process runs [cmd {smtpd::quarantine recover}] with the
+ID. Never automatically retry an uncertain SMTP outcome. Unpublished .pending-*
+directories require manual inspection after crashes. Capacity limits are admission
+limits rather than filesystem quotas; allow space for temporary files and metadata.
+
+The low-level [cmd {ns_smtpd getmessage}] returns unstuffed binary message data;
+[cmd {ns_smtpd sendresolved}] accepts sender, a one-recipient list and a binary data
+variable and bypasses aliases. [cmd {ns_smtpd filesync}] syncs a file or directory.
+See the repository guide for nscp examples and recovery procedures.
+
 [section CONFIGURATION]
 [include include/parameters.man]
 

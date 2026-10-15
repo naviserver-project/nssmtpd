@@ -348,6 +348,7 @@ proc smtpd::ExpandFileAlias {format map domains recipient path budgetVar} {
 
 proc smtpd::init {} {
 
+    smtpd::quarantineinit
     set path "ns/server/[ns_info server]/module/nssmtpd"
     ns_smtpd relay set {*}[ns_config $path relaydomains "localhost"]
     ns_log notice "smtpd::init: Relay Domains: [ns_smtpd relay get]"
@@ -577,6 +578,13 @@ proc smtpd::checkdatapolicy {id} {
         if {[dict exists $result message]} {set message [dict get $result message]}
         if {[string length $message] > 400 || ![regexp {^[\x20-\x7e]+$} $message]} {
             ::error "datapolicyproc returned an invalid message"
+        }
+        if {$action eq "reject" && [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]} {
+            set held [smtpd::QuarantineStore $id $context $result]
+            smtpd::logevent $id message-policy [dict merge $result [dict create \
+                action quarantine policy-action reject quarantine-id $held code 250]]
+            ns_smtpd setreply $id "250 2.0.0 Message held for review: $held\r\n"
+            return 0
         }
         smtpd::logevent $id message-policy [dict merge {reason message-policy} $result [dict create code $code recipients [dict get $context recipients]]]
         if {$action eq "accept"} {return 1}

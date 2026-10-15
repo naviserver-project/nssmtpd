@@ -468,7 +468,7 @@ static void SmtpdRelaySendLog(smtpdConn *conn, Ns_Time *startTimePtr,
                              const char *reply, const char *result, size_t bytesSent);
 static Ns_ReturnCode SmtpdSend(smtpdConfig *server, Tcl_Interp *interp, const char *sender,
                                Tcl_Obj *rcptObj, const char *dataVarName,
-                               const char *host, unsigned short port);
+                               const char *host, unsigned short port, bool resolved);
 static smtpdConn *SmtpdConnCreate(smtpdConfig *server, Ns_Sock *sock);
 static void SmtpdConnReset(smtpdConn *conn);
 static void SmtpdTransactionEnd(smtpdConn *conn, const char *outcome);
@@ -2118,7 +2118,7 @@ static void SmtpdThread(smtpdConn *conn)
                 if (rcpt != NULL
                     && (size = SmtpdRelayData(conn, rcpt->relay.host, rcpt->relay.port)) < 0) {
                     if (size == -2) {
-                        SmtpdTransactionEnd(conn, "message-policy-rejected");
+                        SmtpdTransactionEnd(conn, conn->reply.string[0] == '2' ? "message-quarantined" : "message-policy-rejected");
                         SmtpdConnReset(conn);
                         continue;
                     }
@@ -2161,7 +2161,7 @@ static void SmtpdThread(smtpdConn *conn)
                 SmtpdConnParseData(conn);
             }
             if (!SmtpdDataPolicy(conn)) {
-                SmtpdTransactionEnd(conn, "message-policy-rejected");
+                SmtpdTransactionEnd(conn, conn->reply.string[0] == '2' ? "message-quarantined" : "message-policy-rejected");
                 if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                     goto error;
                 }
@@ -3286,7 +3286,7 @@ SmtpdRelayData(smtpdConn *conn, const char *host, unsigned short port)
         if (!SmtpdDataPolicy(conn)) {
             Tcl_DStringFree(&headers);
             Tcl_DStringFree(&wire);
-            SmtpdRelaySendLog(conn, &startTime, host, port, conn->reply.string, "POLICY_REJECT", 0u);
+            SmtpdRelaySendLog(conn, &startTime, host, port, conn->reply.string, conn->reply.string[0] == '2' ? "QUARANTINE" : "POLICY_REJECT", 0u);
             SmtpdConnFree(relay);
             if (SmtpdWriteDString(conn, &conn->reply) != NS_OK) {
                 return -1;
@@ -3819,7 +3819,7 @@ SmtpdRelaySendLog(smtpdConn *conn, Ns_Time *startTimePtr,
 static Ns_ReturnCode
 SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
           Tcl_Obj *rcptObj, const char *dataVarName, const char *host,
-          unsigned short port)
+          unsigned short port, bool resolved)
 {
     char         *ptr, *dataString;
     char          finalStatus[4];
@@ -3964,7 +3964,23 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
      */
     dataString = ptr = Tcl_GetStringFromObj(data, &dataLength);
 
-    while ((ptr = strstr(ptr, "\n."))) {
+    if (resolved) {
+        TCL_SIZE_T i;
+        const unsigned char *bytes = Tcl_GetByteArrayFromObj(data, &dataLength);
+
+        /* Stored .eml data is unstuffed binary, including non-UTF-8 octets.
+         * Apply SMTP transparency without string conversion or strlen(). */
+        for (i = 0; i < dataLength; i++) {
+            if (bytes[i] == '.' && (i == 0 || bytes[i-1] == '\n')) {
+                Tcl_DStringAppend(&dataDString, ".", 1);
+            }
+            Tcl_DStringAppend(&dataDString, (const char *)&bytes[i], 1);
+        }
+        dataString = dataDString.string;
+        dataLength = dataDString.length;
+    }
+
+    while (!resolved && (ptr = strstr(ptr, "\n."))) {
         long offset;
 
         ptr += 2;
@@ -3979,7 +3995,7 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         dataString += offset;
         ptr = dataString;
     }
-    if (dataDString.length > 0) {
+    if (!resolved && dataDString.length > 0) {
         /*
          * Only when we have found a line starting with a dot, we are using
          * the Tcl_DString. Append the final chunk in such cases.
@@ -4007,7 +4023,11 @@ SmtpdSend(smtpdConfig *config, Tcl_Interp *interp, const char *sender,
         errorString = "send DATA";
         goto ioerror;
     }
-    if (SmtpdWriteData(conn, "\r\n.\r\n", 5) != NS_OK) {
+    if (SmtpdWriteData(conn,
+                      resolved && dataLength >= 2 && dataString[dataLength-2] == '\r'
+                      && dataString[dataLength-1] == '\n' ? ".\r\n" : "\r\n.\r\n",
+                      resolved && dataLength >= 2 && dataString[dataLength-2] == '\r'
+                      && dataString[dataLength-1] == '\n' ? 3 : 5) != NS_OK) {
         errorString = "send DATA terminate";
         goto ioerror;
     }
@@ -6134,6 +6154,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdInfo,
         cmdFlag,
         cmdSend,
+        cmdSendResolved,
+        cmdFileSync,
         cmdResolve,
         cmdRelay,
         cmdLocal,
@@ -6154,6 +6176,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         cmdGetHdr,
         cmdGetHdrs,
         cmdGetBody,
+        cmdGetMessage,
         cmdGetAuthUser,
         cmdGetHelo,
         cmdGetFrom,
@@ -6178,6 +6201,8 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "info",
         "flag",
         "send",
+        "sendresolved",
+        "filesync",
         "resolve",
         "relay",
         "local",
@@ -6198,6 +6223,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         "gethdr",
         "gethdrs",
         "getbody",
+        "getmessage",
         "getauthuser",
         "gethelo",
         "getfrom",
@@ -6686,11 +6712,38 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             break;
         }
 
+    case cmdFileSync: {
+            int fd, status, savedErrno;
+            const char *path;
+
+            if (objc != 3) {
+                Tcl_WrongNumArgs(interp, 2, objv, "path");
+                return TCL_ERROR;
+            }
+            path = Tcl_GetString(objv[2]);
+            fd = ns_open(path, O_RDONLY, 0);
+            if (fd < 0) {
+                Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: open for sync '%s': %s", path, strerror(errno)));
+                return TCL_ERROR;
+            }
+            do {
+                status = fsync(fd);
+            } while (status < 0 && errno == EINTR);
+            savedErrno = errno;
+            ns_close(fd);
+            if (status < 0) {
+                Tcl_SetObjResult(interp, Tcl_ObjPrintf("nssmtpd: sync '%s': %s", path, strerror(savedErrno)));
+                return TCL_ERROR;
+            }
+            break;
+        }
+
+    case cmdSendResolved:
     case cmdSend:{
             unsigned short port = 0u;
             char          *host = NULL;
             bool           allocatedHost = NS_FALSE;
-            bool           aliases = config->aliasproc != NULL && *config->aliasproc != '\0';
+            bool           aliases = cmd == cmdSend && config->aliasproc != NULL && *config->aliasproc != '\0';
             TCL_SIZE_T     recipientCount = 0;
             Tcl_Obj       *recipients;
             Ns_ReturnCode  result;
@@ -6699,7 +6752,17 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
                 Tcl_WrongNumArgs(interp, 1, objv, "sender_email rcpt_email data_varname ?server? ?port?");
                 return TCL_ERROR;
             }
-            if (SmtpdResolveAliases(config, interp, objv[3], config->maxrcpt, true, &recipients) != TCL_OK) {
+            /* Administrative quarantine release uses the saved, resolved
+             * envelope. Never expand these addresses through today's aliases. */
+            if (cmd == cmdSendResolved) {
+                if (objc != 5 || Tcl_ListObjLength(interp, objv[3], &recipientCount) != TCL_OK
+                    || recipientCount != 1) {
+                    Tcl_SetObjResult(interp, Tcl_NewStringObj("sendresolved requires sender, one saved recipient and data variable", -1));
+                    return TCL_ERROR;
+                }
+                recipients = Tcl_DuplicateObj(objv[3]);
+                Tcl_IncrRefCount(recipients);
+            } else if (SmtpdResolveAliases(config, interp, objv[3], config->maxrcpt, true, &recipients) != TCL_OK) {
                 return TCL_ERROR;
             }
             if (aliases) {
@@ -6739,7 +6802,7 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
             }
             Tcl_ResetResult(interp);
             result = SmtpdSend(config, interp, Tcl_GetString(objv[2]), recipients,
-                               Tcl_GetString(objv[4]), host, port);
+                               Tcl_GetString(objv[4]), host, port, cmd == cmdSendResolved);
             Tcl_DecrRefCount(recipients);
             if (allocatedHost) {
                 ns_free(host);
@@ -7115,6 +7178,25 @@ static int SmtpdCmd(ClientData arg, Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj
         Tcl_SetObjResult(interp, list);
         break;
     }
+
+    case cmdGetMessage: {
+            Tcl_DString message;
+            TCL_SIZE_T i;
+
+            /* Return an RFC message as bytes, removing SMTP dot stuffing. */
+            Tcl_DStringInit(&message);
+            for (i = 0; i < conn->body.data.length; i++) {
+                if (conn->body.data.string[i] == '.' && i+1 < conn->body.data.length
+                    && conn->body.data.string[i+1] == '.'
+                    && (i == 0 || conn->body.data.string[i-1] == '\n')) {
+                    i++;
+                }
+                Tcl_DStringAppend(&message, &conn->body.data.string[i], 1);
+            }
+            Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((const unsigned char *)message.string, message.length));
+            Tcl_DStringFree(&message);
+            break;
+        }
 
     case cmdGetBody:{
             Tcl_Obj *obj = Tcl_NewListObj(0, 0);

@@ -67,6 +67,8 @@ proc alias_sink_rcpt {id} {ns_smtpd setflag $id 0 VERIFIED}
 proc alias_sink_data {id} {
     set recipients {}
     foreach recipient [ns_smtpd getrcpt $id] {lappend recipients [lindex $recipient 0]}
+    set raw [open [file join $::env(ALIAS_TEST_HOME) sink-message.eml] wb]
+    try {puts -nonewline $raw [ns_smtpd getmessage $id]} finally {close $raw}
     set channel [open [file join $::env(ALIAS_TEST_HOME) sink-messages.list] a]
     fconfigure $channel -translation lf -encoding utf-8
     try {

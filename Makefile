@@ -42,7 +42,7 @@ endif
 #CFLAGS   += -DUSE_CLAMAV
 #MODLIBS  += -lclamav
 
-TCL       = nssmtpd-procs.tcl nssmtpd-spf.tcl nssmtpd-auth.tcl nssmtpd-credentials.tcl
+TCL       = nssmtpd-quarantine.tcl nssmtpd-procs.tcl nssmtpd-spf.tcl nssmtpd-auth.tcl nssmtpd-credentials.tcl
 
 include  $(NAVISERVER)/include/Makefile.module
 

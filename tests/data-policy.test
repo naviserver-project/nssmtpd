@@ -131,6 +131,7 @@ test datapolicy-pass-bytes {accepted original DATA is preserved without diagnost
     set wire [lindex [header_messages] end 1]
     list $code [expr {[string range $wire [string first "From:" $wire] end] eq $original}]
 } -result {250 1}
+source [file join $::env(ALIAS_TEST_ROOT) tests quarantine.test]
 set failures $::tcltest::numTests(Failed)
 cleanupTests
 puts "ALIAS_TEST_FAILURES=$failures"
