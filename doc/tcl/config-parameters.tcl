@@ -1,6 +1,8 @@
 # Module-owned configuration documentation; generated fragments use this source.
 namespace eval ::ns_configdoc {}
 dict set ::ns_configdoc::data modules nssmtpd {
+
+
             :title {nssmtpd}
             :scope server
             :desc {
@@ -588,3 +590,23 @@ dict set ::ns_configdoc::data modules nssmtpd {
                 desc {OpenSSL cipher list for TLS 1.2 and older STARTTLS connections}
             }
         }
+
+# MCP settings have their own section; SMTP listener settings remain above.
+dict set ::ns_configdoc::data sections {ns/server/*/module/nssmtpd/mcp} {
+    :title {Nssmtpd MCP diagnostics}
+    :desc {Configure these settings in ns/server/$server/module/nssmtpd/mcp. Requires the nsmcp provider interface. No mail sending, configuration mutation or quarantine release tool is exposed.}
+    :example {
+        ns_section ns/server/$server/module/nssmtpd/mcp {
+            ns_param enabled true
+            ns_param logReadBytes 1MiB
+        }
+    }
+    enabled {
+        type boolean default false
+        desc {Enable the read-only smtp_logs MCP tool for this virtual server. An explicit false disables it.}
+    }
+    logReadBytes {
+        type memory default 1MiB
+        desc {Maximum current-file tail read by smtp_logs, between 1 byte and 16MiB. Rotated logs are not scanned. Explicit empty or invalid values are errors.}
+    }
+}

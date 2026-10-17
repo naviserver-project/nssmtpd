@@ -42,9 +42,21 @@ endif
 #CFLAGS   += -DUSE_CLAMAV
 #MODLIBS  += -lclamav
 
-TCL       = nssmtpd-quarantine.tcl nssmtpd-procs.tcl nssmtpd-spf.tcl nssmtpd-auth.tcl nssmtpd-credentials.tcl
+TCL       = nssmtpd-mcp.tcl nssmtpd-nsstats.tcl nssmtpd-quarantine.tcl nssmtpd-procs.tcl nssmtpd-spf.tcl nssmtpd-auth.tcl nssmtpd-credentials.tcl
+
+INSTALL += install-admin-pages install-mcp-tools install-mcp-example
 
 include  $(NAVISERVER)/include/Makefile.module
+
+.PHONY: install-admin-pages test-admin
+install-admin-pages:
+	$(MKDIR) "$(DESTDIR)$(INSTTCL)/$(MODNAME)/lib"
+	$(INSTALL_DATA) lib/nsstats-sent.adp lib/nsstats-events.adp lib/nsstats.tcl "$(DESTDIR)$(INSTTCL)/$(MODNAME)/lib/"
+
+test-admin:
+	$(NS_TCLSH) tests/admin/smtp-events.test
+	$(NS_TCLSH) tests/admin/smtp-quarantine.test
+	$(NS_TCLSH) tests/admin/registry.test
 
 NS_LD_LIBRARY_PATH = LD_LIBRARY_PATH="./:$$LD_LIBRARY_PATH"
 NSD                = $(NAVISERVER)/bin/nsd
@@ -69,3 +81,29 @@ lldbtest: all $(PEM_FILE)
 
 tidy:
 	clang-tidy-mp-16 *.c -- $(CFLAGS)
+
+.PHONY: install-mcp-tools
+install-mcp-tools:
+	$(MKDIR) "$(DESTDIR)$(INSTTCL)/$(MODNAME)/mcp"
+	$(INSTALL_DATA) mcp/smtp-tools.tcl "$(DESTDIR)$(INSTTCL)/$(MODNAME)/mcp/"
+
+.PHONY: test-mcp
+test-mcp:
+	NSMCP_NAVISERVER="$(NAVISERVER)" $(NSD) -c -d $(NSDARGS) -t "$(CURDIR)/tests/mcp/config.tcl" "$(CURDIR)/tests/mcp/run.tcl"
+
+.PHONY: install-mcp-example
+install-mcp-example:
+	$(MKDIR) "$(DESTDIR)$(INSTTCL)/$(MODNAME)/examples"
+	$(INSTALL_DATA) examples/mcp-config.tcl "$(DESTDIR)$(INSTTCL)/$(MODNAME)/examples/"
+
+# The MCP subsection is documented independently from the SMTP module settings.
+.PHONY: mcp-parameters-include regen-mcp-parameters-include check-mcp-parameters
+config-parameters-includes: mcp-parameters-include
+mcp-parameters-include:
+	@test -r doc/src/include/mcp-parameters.man || { echo "run make regen-config-parameters-includes"; exit 1; }
+regen-config-parameters-includes: regen-mcp-parameters-include
+regen-mcp-parameters-include:
+	$(TCLSH_PROG) "$(DOC_TOOLS)/gen-config-parameters.tcl" --config "$(MODULE_CONFIG_PARAMETERS)" --section 'ns/server/*/module/nssmtpd/mcp' --output doc/src/include/mcp-parameters.man
+check-config-parameters build-doc: check-mcp-parameters
+check-mcp-parameters:
+	$(TCLSH_PROG) "$(DOC_TOOLS)/gen-config-parameters.tcl" --config "$(MODULE_CONFIG_PARAMETERS)" --section 'ns/server/*/module/nssmtpd/mcp' --output doc/src/include/mcp-parameters.man --check

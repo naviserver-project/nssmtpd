@@ -1597,3 +1597,65 @@ message bytes; `ns_smtpd sendresolved SENDER RECIPIENT_LIST DATA_VARIABLE` sends
 binary RFC data to exactly one saved recipient without alias expansion;
 `ns_smtpd filesync PATH` syncs a closed file or directory. Normal application
 sending should continue to use `ns_smtpd send`.
+
+### Nsstats administration pages
+
+`make install` installs `lib/nsstats-sent.adp`, `lib/nsstats-events.adp`
+and their shared `lib/nsstats.tcl` beneath the module Tcl directory.
+During startup, `nssmtpd-nsstats.tcl` publishes both pages in the server-scoped
+`nsstats:plugins` registry under provider `nssmtpd`. An nsstats version with
+page-registry support displays them in **Logs**, retaining the existing
+`?@page=log.smtpsent` and `?@page=log.smtpevents` URLs. Restart after first
+installation to publish the registry entries; subsequent page changes deploy
+with nssmtpd. Nsstats is optional and need not be loaded during registration.
+
+The sent-log page includes quarantine inspection, escaped message previews,
+`.eml` downloads and confirmed manual release. These use the host's admin
+access checks and admin-bound POST token. Direct download/error responses
+produce no additional page markup. Recovery, uncertain-delivery retries and
+deletion remain nscp operations. The event page provides SMTP diagnostics,
+recipient decisions and greylisting charts. Shared file selection and chart
+helpers come from nsstats; SMTP parsing, rendering and styles live here.
+
+Run the standalone rendering, permissions and registry tests with
+`make test-admin`. No SMTP listener or nsstats checkout is needed. The native ADP inclusion
+and empty direct-response checks in `tests/admin/adp.test` run inside NaviServer.
+
+### MCP diagnostic tools
+
+Nssmtpd installs `mcp/smtp-tools.tcl` and announces its provider through the
+server-scoped `nsmcp:providers` registry from `nssmtpd-mcp.tcl`. This needs no
+nsmcp dependency at SMTP startup. With the updated nsmcp installed, configure
+the dedicated MCP subsection:
+
+```tcl
+ns_section ns/server/$server/module/nssmtpd/mcp {
+    ns_param enabled true
+    ns_param logReadBytes 1MiB
+}
+```
+
+The installed `examples/mcp-config.tcl` provides this block. Defaults are disabled
+and a 1MiB read budget (maximum 16MiB). Explicit false disables the provider;
+empty or invalid values are errors. Endpoint and credential settings remain in
+nsmcp. Install both updated modules and restart after migration.
+
+The existing **smtp_logs** tool and arguments are unchanged. It reads configured
+event or send logs, including delivery outcomes, policy findings and quarantine
+event identifiers when recorded; it does not send mail, change settings or
+release quarantined messages. Log access requires `diagnostics.logs.read`;
+explicit peer disclosure additionally requires `diagnostics.logs.peers.read`.
+Paths come from the authenticated server's loaded module configuration, never
+from callers. Redaction, bounded reads, current-file coverage and per-server
+runtime tool switches remain in effect. No message bodies are exposed.
+
+Run the native regression suite using a NaviServer installation containing the
+updated nsmcp (`NSMCP_MODULE_LIBRARY` can override its Tcl library directory):
+
+```sh
+make test-mcp NAVISERVER=/usr/local/ns
+```
+
+It checks event/send parsing, authorization, peer masking, scope, bounded reads,
+provider metadata and rejection of release/path arguments. No SMTP listener,
+model backend or external checkout is required.

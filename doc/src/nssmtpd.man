@@ -14,6 +14,27 @@ Use a dedicated submission listener and TLS/authentication as appropriate for th
 installation. Relay and local-recipient policies determine which destinations are
 accepted; do not expose unrestricted relaying.
 
+[section {NSSTATS ADMINISTRATION}]
+The module installs reusable SMTP sent/event ADP pages and publishes their
+existing log.smtpsent and log.smtpevents page identifiers in the server-scoped
+nsstats:plugins registry during startup. Nsstats remains optional. Install a
+registry-capable nsstats and restart after initial installation. Subsequent SMTP
+page updates deploy with this module. Sent-log quarantine inspection and manual
+release retain nsstats authorization, POST token and confirmation checks;
+downloads and direct errors bypass the HTML wrapper.
+
+[section {MCP DIAGNOSTICS}]
+The module installs its read-only smtp_logs implementation and advertises it
+through nsmcp:providers. The updated nsmcp discovers it independently of startup
+order when enabled is true in ns/server/$server/module/nssmtpd/mcp.
+Configure logReadBytes in that subsection as well. Endpoint credentials stay
+in nsmcp. The installed examples/mcp-config.tcl illustrates the settings.
+The existing tool name,
+arguments, logReadBytes budget and diagnostics.logs.read permission remain
+unchanged; peer disclosure additionally requires diagnostics.logs.peers.read.
+Tools read configured event/send logs, not arbitrary paths or message bodies.
+No quarantine release or other mutation tool is provided.
+
 [section MAIL FLOW]
 Incoming SMTP sessions pass through recipient resolution and recipient policy.
 Accepted message data can be forwarded through the configured upstream relay.
@@ -62,6 +83,7 @@ See the repository guide for nscp examples and recovery procedures.
 
 [section CONFIGURATION]
 [include include/parameters.man]
+[include include/mcp-parameters.man]
 
 [section DOCUMENTATION]
 The repository-local [file doc/tcl/config-parameters.tcl] owns the parameter reference.
