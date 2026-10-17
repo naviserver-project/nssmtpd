@@ -1,0 +1,37 @@
+[comment {This file is generated. Do not edit manually.}]
+
+[subsection {Nssmtpd MCP diagnostics}]
+
+Configure these settings in ns/server/$server/module/nssmtpd/mcp. Requires the nsmcp provider interface. No mail sending, configuration mutation or quarantine release tool is exposed.
+
+
+[example_begin]
+ ns_section ns/server/$server/module/nssmtpd/mcp {
+     ns_param enabled true
+     ns_param logReadBytes 1MiB
+ }
+[example_end]
+
+[list_begin definitions]
+
+[def "Parameter name: [emph "enabled"]"]
+Enable the read-only smtp_logs MCP tool for this virtual server. An explicit false disables it.
+
+
+
+[list_begin itemized]
+[item] Type: [const "boolean"]
+[item] Default: [const "false"]
+[list_end]
+
+[def "Parameter name: [emph "logReadBytes"]"]
+Maximum current-file tail read by smtp_logs, between 1 byte and 16MiB. Rotated logs are not scanned. Explicit empty or invalid values are errors.
+
+
+
+[list_begin itemized]
+[item] Type: [const "memory"]
+[item] Default: [const "1MiB"]
+[list_end]
+
+[list_end]

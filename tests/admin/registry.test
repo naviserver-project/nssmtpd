@@ -1,0 +1,41 @@
+package require tcltest 2.2
+namespace import ::tcltest::*
+set moduleRoot [file normalize [file join [file dirname [info script]] .. ..]]
+proc ns_info args {return test}
+proc nsv_set {array key value} {set ::registered [list $array $key $value]}
+source [file join $moduleRoot nssmtpd-nsstats.tcl]
+test smtp-registry {startup publishes both existing URLs without loading nsstats} -body {
+    lassign $::registered array provider pages
+    list $array $provider [dict keys $pages] [info commands ::_ns_stats.header]
+} -result {nsstats:plugins nssmtpd {log.smtpsent log.smtpevents} {}}
+test smtp-registry-files {descriptors point to installed-relative reusable files} -body {
+    set result {}
+    dict for {id entry} [lindex $::registered 2] {
+        lappend result [list [dict get $entry group] [dict get $entry scope] \
+            [dict get $entry requires] [file isfile [dict get $entry adp]]]
+    }
+    set result
+} -result {{logs source ::ns_smtpd 1} {logs source ::ns_smtpd 1}}
+test smtp-adp-direct {ADP templates have no literal output around their script} -body {
+    set result {}
+    foreach file {nsstats-sent.adp nsstats-events.adp} {
+        set f [open [file join $moduleRoot lib $file]]
+        set content [read $f]; close $f
+        lappend result [expr {[string range $content 0 1] eq "<%" && [string range $content end-1 end] eq "%>"}]
+    }
+    set result
+} -result {1 1}
+test smtp-mcp-announcement {announcing MCP support requires neither nsmcp nor NX} -body {
+    source [file join $moduleRoot nssmtpd-mcp.tcl]
+    lassign $::registered array provider descriptor
+    list $array $provider [file isfile [dict get $descriptor file]] \
+        [dict get $descriptor enabledParameter] [info commands ::nx::Class]
+} -result {nsmcp:providers nssmtpd 1 enabled {}}
+test smtp-mcp-parameter-documentation {only the new subsection keys are documented} -body {
+    source [file join $moduleRoot doc tcl config-parameters.tcl]
+    set section [dict get $::ns_configdoc::data sections {ns/server/*/module/nssmtpd/mcp}]
+    list [dict exists $section enabled] [dict exists $section logReadBytes] \
+        [dict exists $::ns_configdoc::data modules nssmtpd enableSmtpTools] \
+        [dict exists $::ns_configdoc::data modules nssmtpd smtpLogReadBytes]
+} -result {1 1 0 0}
+cleanupTests

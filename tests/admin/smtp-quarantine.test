@@ -1,0 +1,163 @@
+# Pure rendering/dispatch tests: extract page helpers without running nsstats.
+package require tcltest 2.2
+namespace import ::tcltest::*
+::tcltest::configure -tmpdir [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]
+set f [open [file join [file dirname [info script]] .. .. lib nsstats.tcl]]
+try {set source [read $f]} finally {close $f}
+set definition {}
+foreach line [split $source \n] {
+    if {$definition ne {} || [regexp {^proc ::_ns_stats\.(smtp\.quarantine[^ ]*|log\.smtpsent) } $line]} {
+        append definition $line \n
+        if {[info complete $definition]} {eval $definition; set definition {}}
+    }
+}
+proc ns_quotehtml {value} {string map {& &amp; < &lt; > &gt; {"} &quot; ' &#39;} $value}
+proc ns_urlencode {value} {return $value}
+proc ns_info what {return demo}
+proc ns_queryget {key default} {
+    if {[dict exists $::query $key]} {return [dict get $::query $key]}
+    return $default
+}
+proc ns_conn {kind args} {
+    switch -- $kind {method {return $::method} url {return /admin/nsstats.tcl} default {return outputheaders}}
+}
+proc ns_set {command args} {dict set ::headers [lindex $args 1] [lindex $args 2]}
+proc ns_return {code type body} {set ::response [list $code $type $body]}
+proc ns_returnfile {code type path} {set ::response [list $code $type $path]}
+proc ::_ns_stats.header args {set ::headerCalled 1; return {}}
+proc ::_ns_stats.footer {} {return {}}
+proc ::_ns_stats.hr {value} {return $value}
+proc ::_ns_stats.identity {} {return $::identity}
+proc ::_ns_stats.log.mkchart args {return DELIVERY-LOG}
+proc nsv_exists {array key} {return [dict exists $::store $key]}
+proc nsv_get {array key} {return [dict get $::store $key]}
+proc nsv_set {array key value} {dict set ::store $key $value; return $value}
+namespace eval ns_crypto {}
+proc ns_crypto::randombytes args {return generated-token}
+namespace eval smtpd {}
+set eml [makeFile "From: sender@example.org\nSubject: example\n\n<script>window.bad=1</script>\n" quarantine.eml]
+set goodId [string repeat a 32]
+proc fixture {} {
+    set ::method GET
+    set ::query {smtpView quarantine}
+    set ::response {}
+    set ::headers {}
+    set ::calls {}
+    set ::identity admin-one
+    set ::store {smtp-quarantine:admin-one expected-token}
+    set ::releaseError {}
+    set ::metadata [dict create schemaVersion 1 id $::goodId state held createdAt 1792000000 bytes 100 \
+        context {sender {<sender@example.org>}} recipients {target@example.org pending} \
+        decision {reason {<policy-rejection>} findings {spf-fail true dkim-no-key true}} \
+        messagePath $::eml audit {}]
+    proc ::smtpd::quarantine {command args} {
+        lappend ::calls [list $command {*}$args]
+        switch -- $command {
+            status {return {enabled true directory /private/spool retention 604800 maxBytes 1073741824 maxMessages 10000 messages 1 states {held 1} bytes 100}}
+            show {return $::metadata}
+            list {return [dict create entries [list [dict create id $::goodId sender {<sender@example.org>} \
+                createdAt 1792000000 recipients {target@example.org pending} decision {reason {<policy-rejection>}} state held]] total 26 more true nextOffset 25]}
+            release {
+                if {$::releaseError ne {}} {error $::releaseError}
+                return {state released}
+            }
+            default {error "unexpected quarantine operation $command"}
+        }
+    }
+}
+proc cleanup {} {if {[info commands ::smtpd::quarantine] ne {}} {rename ::smtpd::quarantine {}}}
+
+test quarantine-old-module {older installations retain the original SMTP sent log} -body {
+    ::_ns_stats.log.smtpsent
+} -result DELIVERY-LOG
+
+test quarantine-log-tabs {support adds two delivery views without reading the spool on the log view} -setup fixture -body {
+    set query {smtpView sent}
+    set html [::_ns_stats.log.smtpsent]
+    list [string match {*Delivery log*Quarantine*DELIVERY-LOG} $html] $calls
+} -cleanup cleanup -result {1 {}}
+
+test quarantine-list {listing uses compact tables, escaped fields and paging within the existing page} -setup fixture -body {
+    set html [::_ns_stats.log.smtpsent]
+    list [string match {*data data-table w3-table w3-hoverable*} $html] \
+        [string match {*&lt;sender@example.org&gt;*} $html] \
+        [string match {*&lt;policy-rejection&gt;*} $html] \
+        [string match {*smtpView=quarantine&amp;offset=25*Next*} $html] \
+        [dict get $headers Cache-Control] [expr {[lsearch -glob $calls {release *}] == -1}]
+} -cleanup cleanup -result {1 1 1 1 no-store 1}
+
+test quarantine-inspect {preview is escaped source, has download and confirmed release form} -setup fixture -body {
+    dict set query id $goodId
+    set html [::_ns_stats.log.smtpsent]
+    list [string match {*&lt;script&gt;window.bad=1&lt;/script&gt;*} $html] \
+        [string match {*<script>*} $html] \
+        [string match {*name='smtpQuarantineToken' value='expected-token'*} $html] \
+        [string match {*name='smtpQuarantineConfirm' value='1' required*} $html] \
+        [string match {*download=1*Download message.eml*} $html] \
+        [string match {*Policy findings*spf-fail*true*} $html]
+} -cleanup cleanup -result {1 0 1 1 1 1}
+
+test quarantine-preview-bound {large message previews do not read the full attachment} -setup fixture -body {
+    set f [open $eml w]
+    puts -nonewline $f [string repeat x 100000]
+    close $f
+    set html [::_ns_stats.smtp.quarantine.detail $metadata]
+    expr {[string length $html] < 75000 && [string first {up to 64KiB} $html] >= 0}
+} -cleanup cleanup -result 1
+
+test quarantine-download {download is an attachment with no-store and nosniff} -setup fixture -body {
+    dict set query id $goodId
+    dict set query download 1
+    ::_ns_stats.log.smtpsent
+    list [lrange $response 0 1] [dict get $headers Content-Disposition] \
+        [dict get $headers X-Content-Type-Options] [dict get $headers Cache-Control] \
+        [expr {[lsearch -glob $calls {release *}] == -1}]
+} -cleanup cleanup -result [list {200 message/rfc822} "attachment; filename=\"quarantine-$goodId.eml\"" nosniff no-store 1]
+
+foreach scenario {get missing-token wrong-admin unconfirmed invalid-id bad-action} {
+    test quarantine-deny-$scenario {release requires POST, admin-bound token, valid ID and confirmation} -setup {
+        fixture
+        set method POST
+        set query [dict create smtpView quarantine smtpQuarantineAction release smtpQuarantineToken expected-token smtpQuarantineConfirm 1 id $goodId]
+    } -body {
+        switch -- $scenario {
+            get {set method GET; set expected 405}
+            missing-token {dict unset query smtpQuarantineToken; set expected 403}
+            wrong-admin {set identity admin-two; set expected 403}
+            unconfirmed {dict unset query smtpQuarantineConfirm; set expected 400}
+            invalid-id {dict set query id ../etc/passwd; set expected 400}
+            bad-action {dict set query smtpQuarantineAction delete; set expected 400}
+        }
+        ::_ns_stats.log.smtpsent
+        list [expr {[lindex $response 0] == $expected}] $calls
+    } -cleanup cleanup -result {1 {}}
+}
+
+test quarantine-release-post {confirmed release dispatches once and redirects to GET inspection without leaking token} -setup fixture -body {
+    set method POST
+    set query [dict create smtpView quarantine smtpQuarantineAction release smtpQuarantineToken expected-token smtpQuarantineConfirm 1 id $goodId]
+    ::_ns_stats.log.smtpsent
+    list [lindex $response 0] $calls [string match {*smtpView=quarantine*released=1} [dict get $headers Location]] \
+        [expr {[string first expected-token [dict get $headers Location]] == -1}]
+} -cleanup cleanup -result [list 303 [list [list release $goodId]] 1 1]
+
+test quarantine-release-error {failed release returns an inspectable error and does not retry} -setup fixture -body {
+    set method POST
+    set query [dict create smtpView quarantine smtpQuarantineAction release smtpQuarantineToken expected-token smtpQuarantineConfirm 1 id $goodId]
+    set releaseError {storage failed}
+    ::_ns_stats.log.smtpsent
+    list [lindex $response 0] [llength $calls] [string match {*Inspect the entry before retrying*} [lindex $response 2]]
+} -cleanup cleanup -result {409 1 1}
+
+foreach state {released releasing uncertain} {
+    test quarantine-no-release-$state {non-pending outcomes never offer another release} -setup fixture -body {
+        dict set metadata state $state
+        dict set metadata recipients target@example.org [expr {$state eq "released" ? "delivered" : $state}]
+        set html [::_ns_stats.smtp.quarantine.detail $metadata]
+        string match {*<form*} $html
+    } -cleanup cleanup -result 0
+}
+
+
+removeFile $eml
+cleanupTests

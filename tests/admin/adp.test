@@ -1,0 +1,28 @@
+package require tcltest 2.2
+namespace import ::tcltest::*
+set adminLib [file normalize [file join [file dirname [info script]] .. .. lib]]
+if {![llength [info commands ns_adp_parse]]} {error "Run this integration test inside NaviServer"}
+proc ::_ns_stats.log.mkchart args {return DELIVERY-LOG}
+proc ::_ns_stats.identity {} {return test-admin}
+rename ns_conn saved_ns_conn
+rename ns_queryget saved_ns_queryget
+rename ns_return saved_ns_return
+proc ns_conn {key args} {switch $key {method {return $::method} outputheaders {return $::headers} default {return /nsstats.tcl}}}
+proc ns_queryget {key default} {if {[dict exists $::query $key]} {return [dict get $::query $key]}; return $default}
+proc ns_return {code args} {set ::response $code}
+namespace eval smtpd {}
+proc smtpd::quarantine args {error {unexpected call}}
+set headers [ns_set create]; set method GET; set query {}; set response {}
+test smtp-native-render {ADP renders module content in a namespaced caller} -body {
+    namespace eval template {ns_adp_parse -file [file join $::adminLib nsstats-sent.adp]}
+} -match glob -result {*<style>*Delivery log*DELIVERY-LOG*}
+test smtp-native-direct {POST errors emit no ADP markup} -body {
+    set ::method POST; set ::query {smtpView quarantine}
+    set html [ns_adp_parse -file [file join $::adminLib nsstats-sent.adp]]
+    list [string length $html] $::response
+} -result {0 403}
+rename ns_conn {}; rename saved_ns_conn ns_conn
+rename ns_queryget {}; rename saved_ns_queryget ns_queryget
+rename ns_return {}; rename saved_ns_return ns_return
+ns_set free $headers
+cleanupTests

@@ -1,0 +1,289 @@
+# Standalone: tclsh tests/smtp-events.test. Load chart entry points and helpers.
+package require tcltest 2.2
+namespace import ::tcltest::*
+::tcltest::configure -tmpdir [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]
+set path [file join [file dirname [info script]] .. .. lib nsstats.tcl]
+set f [open $path]
+try {set source [read $f]} finally {close $f}
+source [file join [file dirname [info script]] shared-log-fixture.tcl]
+set definition ""
+foreach line [split $source \n] {
+    if {$definition ne "" || [regexp {^proc ::_ns_stats\.log\.(smtpevents[^ ]*|chart\.parse-smtpevents|mkchart|fileform|httpclient|smtpsent) } $line]} {
+        append definition $line \n
+        if {[info complete $definition]} {eval $definition; set definition ""}
+    }
+}
+proc field {value} {
+    if {$value eq ""} {return -}
+    return [string map [list \\ {\x5c} " " {\x20} \n {\x0a} \r {\x0d} \t {\x09}] $value]
+}
+proc sample {event details {time 1790687400000}} {
+    set fields [dict merge {code - recipient {} action {} reason {} targets {}} $details]
+    set date [clock format [expr {$time / 1000}] -gmt 1 -format {[%d/%b/%Y:%H:%M:%S +0000]}]
+    set line "$date -nssmtpd:12- [dict get $fields code] $event \[127.0.0.1\] 1-2-3 1 test sender@example.test"
+    foreach key {recipient action reason targets} {
+        set value [dict get $fields $key]
+        if {$key eq "targets"} {set value [join $value ,]}
+        append line " [field $value]"
+    }
+    dict for {key value} $details {
+        if {$key ni {code recipient action reason targets}} {append line " $key=[field $value]"}
+    }
+    return $line
+}
+set logfile [makeFile "" events.log]
+set accessLine {[29/Sep/2026:15:10:00 +0200] -nssmtpd:12- 451 recipient [2001:db8::1] 1-2-3 1 test sender@example.test webmaster@example.test defer new a@remote.test,b@remote.test}
+proc write_events {rows} {
+    global logfile
+    set f [open $logfile w]
+    try {foreach row $rows {puts $f $row}} finally {close $f}
+}
+test event-parse {targets and metadata parsed without evaluation} -body {
+    set record [::_ns_stats.log.chart.parse-smtpevents [sample alias \
+        [dict create action expand recipient {[error]@example.test} targets {a@remote.test b@remote.test}]]]
+    list [dict get $record recipient] [dict get $record targets]
+} -result {{[error]@example.test} {a@remote.test b@remote.test}}
+test event-malformed {unsupported and malformed entries are skipped} -body {
+    write_events [list broken [sample recipient {code 999}] [sample recipient {action accept reason ok}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile ""]
+    list [dict get $report total] [dict get $report invalid]
+} -result {1 2}
+test event-metadata {custom details cannot override timestamp, session or event} -body {
+    set row [::_ns_stats.log.chart.parse-smtpevents [sample custom {timestamp bad session forged event recipient}]]
+    list [dict get $row timestamp] [dict get $row session] [dict get $row event]
+} -result {1790687400000 1-2-3 custom}
+test event-counts {RCPT, greylisting and alias events have separate denominators} -body {
+    write_events [list [sample recipient {action defer reason recipient-policy recipient webmaster@example.test}] \
+                      [sample greylist {action defer reason new recipient webmaster@example.test}] \
+                      [sample alias {action expand reason alias recipient webmaster@example.test targets a@remote.test}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile webmaster]
+    list [dict get $report total] [dict get $report buckets]
+} -result {3 {{recipient defer 1790687400000} 1 {greylist new 1790687400000} 1}}
+test event-filter {literal case-insensitive filtering by original alias} -body {
+    list [dict get [::_ns_stats.log.smtpevents.read $logfile WEBMASTER] total] \
+        [dict get [::_ns_stats.log.smtpevents.read $logfile {[error evil]}] total]
+} -result {3 0}
+test event-consolidated {one recipient event counts once in both relevant charts} -body {
+    write_events [list [sample recipient {action defer reason greylist-new code 451}] \
+                      [sample recipient {action accept reason greylist-retry code 250}] \
+                      [sample recipient {action accept reason local-bypass code 250}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile ""]
+    list [dict get $report total] [dict get $report buckets]
+} -result {3 {{recipient defer 1790687400000} 1 {greylist new 1790687400000} 1 {recipient accept 1790687400000} 2 {greylist retry 1790687400000} 1}}
+test event-row-limit {table retains 200 records while charts count all} -body {
+    write_events [lrepeat 205 [sample recipient {action accept reason ok}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile ""]
+    list [dict get $report total] [llength [dict get $report rows]]
+} -result {205 200}
+test event-series {chart uses UTC epoch milliseconds and integer counts} -body {
+    ::_ns_stats.log.smtpevents.series [dict create {recipient accept 1790687400000} 2] recipient accept
+} -result {{name:'accept',data:[[1790687400000,2]]}}
+
+test event-access-fields {access-log fields and comma-separated targets parse correctly} -body {
+    set row [::_ns_stats.log.chart.parse-smtpevents $accessLine]
+    list [dict get $row event] [dict get $row code] [dict get $row peer] \
+        [dict get $row recipient] [dict get $row targets] [dict get $row timestamp]
+} -result {recipient 451 2001:db8::1 webmaster@example.test {a@remote.test b@remote.test} 1790687400000}
+test event-access-zone {timestamp respects the logged UTC offset} -body {
+    set utc [string map {{15:10:00 +0200} {13:10:00 +0000}} $accessLine]
+    expr {[dict get [::_ns_stats.log.chart.parse-smtpevents $utc] timestamp]
+          == [dict get [::_ns_stats.log.chart.parse-smtpevents $accessLine] timestamp]}
+} -result 1
+test event-access-escaping {escaped bytes stay literal without Tcl substitution} -body {
+    set line [string map [list { new } { line1\x0aline2\x20[error]\x5c$x }] $accessLine]
+    dict get [::_ns_stats.log.chart.parse-smtpevents $line] reason
+} -result {line1\x0aline2\x20[error]\x5c$x}
+test event-access-extensions {trailing metadata is ignored by the chart parser} -body {
+    set row [::_ns_stats.log.chart.parse-smtpevents "$accessLine tag=Grüße\\x20world event=forged"]
+    list [dict exists $row tag] [dict get $row event]
+} -result {0 recipient}
+test event-access-missing {dash denotes absent SMTP code and targets} -body {
+    set line [string map {{451 recipient} {- greylist} a@remote.test,b@remote.test -} $accessLine]
+    set row [::_ns_stats.log.chart.parse-smtpevents $line]
+    list [dict get $row code] [dict get $row targets]
+} -result {{} {}}
+test event-access-invalid {incomplete records and invalid SMTP codes are rejected} -body {
+    set rejected 0
+    foreach line [list [join [lrange [split $accessLine] 0 12]] [string map {451 999} $accessLine]] {
+        try {::_ns_stats.log.chart.parse-smtpevents $line} on error {} {incr rejected}
+    }
+    set rejected
+} -result 2
+# Minimal page harness: no running server required.
+proc ns_quotehtml {value} {string map {& &amp; < &lt; > &gt; \" &quot; ' &#39;} $value}
+proc ns_info {what} {return test}
+proc ns_config {args} {return $::logfile}
+proc ns_queryget {key default} {
+    if {[dict exists $::query $key]} {return [dict get $::query $key]}
+    return $default
+}
+proc ::_ns_stats.header {title} {return "<h1>$title</h1>"}
+proc ::_ns_stats.footer {} {return {<footer>nsstats</footer>}}
+proc ::_ns_stats.log.logfiles {args} {return $::logfiles}
+set logfiles [list $logfile]
+set query {}
+test event-page-escaping {HTML, filter attributes and script-looking values are escaped} -body {
+    set payload {<script>alert("x")</script>}
+    write_events [list [sample recipient [dict create action accept reason $payload recipient $payload]]]
+    set query [dict create filter $payload]
+    set html [::_ns_stats.log.smtpevents]
+    list [expr {[string first $payload $html] < 0}] \
+        [expr {[string first {&lt;script&gt;} $html] >= 0}] \
+        [expr {[string first {Highcharts.chart} $html] >= 0}]
+} -result {1 1 1}
+test event-policy-details {policy findings and expanded recipients are decoded and safely rendered} -body {
+    set query {}
+    write_events [list [sample message-policy [dict create action accept reason policy-chain-end \
+        recipients {one@example.test two@example.test} \
+        findings {greylist-early-retries 31 greylist-elapsed-seconds 508 note {<script>}}]]]
+    set html [::_ns_stats.log.smtpevents]
+    list [string match {*Expanded recipients*one@example.test, two@example.test*} $html] \
+        [string match {*greylist-early-retries*</dt><dd>31*} $html] \
+        [string match {*greylist-elapsed-seconds*</dt><dd>508*} $html] \
+        [expr {[string first {<script></dd>} $html] < 0}] \
+        [string match {*&lt;script&gt;*} $html]
+} -result {1 1 1 1 1}
+
+test event-new-auth-fields {algorithm and destination host diagnostics are retained} -body {
+    set row [::_ns_stats.log.chart.parse-smtpevents [sample authentication \
+        {dkim-1-algorithm rsa-sha1 dkim-1-algorithm-status obsolete dkim-obsolete-algorithm true link-destination-hosts {one.example two.example} link-destination-limit exceeded}]]
+    dict get $row metadata
+} -result {dkim-1-algorithm rsa-sha1 dkim-1-algorithm-status obsolete dkim-obsolete-algorithm true link-destination-hosts {one.example two.example} link-destination-limit exceeded}
+
+test event-page-path {unlisted paths cannot be selected by query} -body {
+    set query {logfile /etc/passwd}
+    string match {*No matching log file available*} [::_ns_stats.log.smtpevents]
+} -result 1
+test event-page-wrapper {mkchart supplies shared assets, header and footer once} -body {
+    set query {}
+    set html [::_ns_stats.log.smtpevents]
+    list [regexp -all {<h1>} $html] [regexp -all {<footer>} $html] \
+        [string match {*highcharts.js*} $::extraHeadEntries] \
+        [string match {*name="filter"*} $html]
+} -result {1 1 1 1}
+
+proc ::_ns_stats.log.chart {args} {
+    set ::chartArguments $args
+    return {<p>request chart</p>}
+}
+test mkchart-legacy {existing SMTP and HTTP pages retain their default renderer} -body {
+    set query {}
+    set results {}
+    foreach page {::_ns_stats.log.smtpsent ::_ns_stats.log.httpclient} {
+        set html [$page]
+        lappend results [lrange $::chartArguments 1 end] [string match {*request chart*} $html]
+    }
+    set results
+} -result {{module/nssmtpd logfile {SMTP Sent Log}} 1 {httpclient logfile {HTTP Client Log}} 1}
+test mkchart-rotation {legacy basename selection and full paths dispatch the selected rotation} -body {
+    set rotation ${logfile}.000
+    set logfiles [list $logfile $rotation]
+    set results {}
+    foreach selected [list [file tail $rotation] $rotation] {
+        set query [dict create logfile $selected]
+        ::_ns_stats.log.smtpsent
+        lappend results [expr {[lindex $::chartArguments 0] eq $rotation}]
+    }
+    set results
+} -cleanup {set logfiles [list $logfile]} -result {1 1}
+test mkchart-path {shared dispatcher rejects traversal before invoking the renderer} -body {
+    set query {logfile ../events.log}
+    set chartArguments untouched
+    set html [::_ns_stats.log.smtpsent]
+    list $chartArguments [string match {*No matching log file available*} $html]
+} -result {untouched 1}
+test mkchart-empty {empty log discovery still returns a complete page} -body {
+    set query {}
+    set logfiles {}
+    set html [::_ns_stats.log.smtpevents]
+    list [string match {*No matching log file available*} $html] \
+        [regexp -all {<h1>} $html] [regexp -all {<footer>} $html]
+} -cleanup {set logfiles [list $logfile]} -result {1 1 1}
+test mkchart-filter {shared selector preserves filter values with attribute escaping} -body {
+    set html [::_ns_stats.log.fileform [list $logfile] $logfile log.smtpevents \
+                  [dict create filter {" autofocus="true}]]
+    list [string match {*value="&quot; autofocus=&quot;true"*} $html] \
+        [string match {*name="@page" value="log.smtpevents"*} $html]
+} -result {1 1}
+test mkchart-fallback {missing current file falls back to a discovered rotation} -body {
+    set query {}
+    set logfiles [list ${logfile}.000]
+    ::_ns_stats.log.smtpsent
+    expr {[lindex $chartArguments 0] eq "${logfile}.000"}
+} -cleanup {set logfiles [list $logfile]} -result 1
+proc failing_chart {args} {error {<unavailable>}}
+test mkchart-read-error {renderer failure is escaped inside the shared page wrapper} -body {
+    set query {}
+    set html [::_ns_stats.log.mkchart module/nssmtpd eventlogfile {SMTP Events} failing_chart]
+    list [string match {*Cannot read log: &lt;unavailable&gt;*} $html] \
+        [regexp -all {<h1>} $html] [regexp -all {<footer>} $html]
+} -result {1 1 1}
+test event-transaction-details {end records join filtered aliases without rows or extra counts} -body {
+    write_events [list \
+        [sample alias {action expand recipient webmaster@example.test targets a@remote.test}] \
+        [sample transaction {action end reason relay-accepted last-command DATA message-bytes 42 relay-accepted true relay-reply {250 queued <test>}}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile webmaster]
+    set row [lindex [dict get $report rows] 0]
+    list [dict get $report total] [llength [dict get $report rows]] \
+        [dict get $row outcome reason] [dict get $row outcome metadata relay-reply]
+} -result {1 1 relay-accepted {250 queued <test>}}
+
+test event-transaction-isolation {transaction IDs isolate outcomes within a session} -body {
+    set end [sample transaction {action end reason reset}]
+    set end [string map {{1-2-3 1 test} {1-2-3 2 test}} $end]
+    write_events [list [sample recipient {action accept recipient webmaster@example.test}] $end]
+    set row [lindex [dict get [::_ns_stats.log.smtpevents.read $logfile ""] rows] 0]
+    dict exists $row outcome
+} -result 0
+
+test event-transaction-html {outcomes are disclosed and relay replies are HTML escaped} -body {
+    set query {}
+    write_events [list [sample alias {action expand recipient webmaster@example.test}] \
+        [sample transaction {action end reason relay-accepted relay-reply {250 <script>[error]</script>}}]]
+    set html [::_ns_stats.log.smtpevents]
+    list [string match {*Transaction outcome*relay-accepted*} $html] \
+        [string match {*250 &lt;script&gt;\[error\]&lt;/script&gt;*} $html] \
+        [regexp -all {<summary>Details</summary>} $html]
+} -result {1 1 1}
+
+test event-auth-details {authentication joins existing rows without changing counts or outcomes} -body {
+    write_events [list \
+        [sample recipient {action accept recipient webmaster@example.test}] \
+        [sample authentication {action observed spf-result none dkim-1-key no-key dkim-1-domain example.test dkim-1-verification not-performed}] \
+        [sample transaction {action end reason relay-accepted}]]
+    set report [::_ns_stats.log.smtpevents.read $logfile webmaster]
+    set row [lindex [dict get $report rows] 0]
+    list [dict get $report total] [dict get $row authentication metadata spf-result] \
+        [dict get $row authentication metadata dkim-1-key] [dict get $row outcome reason]
+} -result {1 none no-key relay-accepted}
+
+test event-auth-isolation {authentication cannot join a different transaction} -body {
+    set auth [string map {{1-2-3 1 test} {1-2-3 2 test}} [sample authentication {spf-result none}]]
+    write_events [list [sample recipient {action accept recipient webmaster@example.test}] $auth]
+    dict exists [lindex [dict get [::_ns_stats.log.smtpevents.read $logfile ""] rows] 0] authentication
+} -result 0
+
+test event-auth-html {diagnostics appear only in escaped details without extra rows} -body {
+    set query {}
+    write_events [list [sample recipient {action accept recipient webmaster@example.test}] \
+        [sample authentication {spf-result none dkim-1-key no-key dkim-1-domain {<script>[error]</script>}}]]
+    set html [::_ns_stats.log.smtpevents]
+    list [string match {*spf-result*</dt><dd>none*dkim-1-key*</dt><dd>no-key*} $html] \
+        [string match {*&lt;script&gt;\[error\]&lt;/script&gt;*} $html] \
+        [regexp -all {<summary>Details</summary>} $html]
+} -result {1 1 1}
+
+test event-link-details {link evidence remains escaped in Details, with no extra rows} -body {
+    set query {}
+    write_events [list [sample recipient {action accept recipient webmaster@example.test}] \
+        [sample authentication {link-status inspected link-host-mismatch {example.test evil.test} link-embedded-redirect {evil.test <bad>}}]]
+    set html [::_ns_stats.log.smtpevents]
+    list [string match {*link-host-mismatch*</dt><dd>example.test evil.test*} $html] \
+        [string match {*evil.test &lt;bad&gt;*} $html] \
+        [regexp -all {<summary>Details</summary>} $html]
+} -result {1 1 1}
+
+removeFile events.log
+set failed $::tcltest::numTests(Failed)
+cleanupTests
+exit [expr {$failed > 0}]
