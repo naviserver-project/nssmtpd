@@ -54,6 +54,7 @@ install-admin-pages:
 	$(INSTALL_DATA) lib/nsstats-sent.adp lib/nsstats-events.adp lib/nsstats.tcl "$(DESTDIR)$(INSTTCL)/$(MODNAME)/lib/"
 
 test-admin:
+	$(NS_TCLSH) tests/admin/data-findings.test
 	$(NS_TCLSH) tests/admin/smtp-events.test
 	$(NS_TCLSH) tests/admin/smtp-quarantine.test
 	$(NS_TCLSH) tests/admin/registry.test

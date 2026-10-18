@@ -45,6 +45,7 @@ proc fixture {} {
     set ::calls {}
     set ::identity admin-one
     set ::store {smtp-quarantine:admin-one expected-token}
+    set ::enabled true
     set ::releaseError {}
     set ::metadata [dict create schemaVersion 1 id $::goodId state held createdAt 1792000000 bytes 100 \
         context {sender {<sender@example.org>}} recipients {target@example.org pending} \
@@ -53,7 +54,7 @@ proc fixture {} {
     proc ::smtpd::quarantine {command args} {
         lappend ::calls [list $command {*}$args]
         switch -- $command {
-            status {return {enabled true directory /private/spool retention 604800 maxBytes 1073741824 maxMessages 10000 messages 1 states {held 1} bytes 100}}
+            status {return [dict merge {directory /private/spool retention 604800 maxBytes 1073741824 maxMessages 10000 messages 1 states {held 1} bytes 100} [dict create enabled $::enabled]]}
             show {return $::metadata}
             list {return [dict create entries [list [dict create id $::goodId sender {<sender@example.org>} \
                 createdAt 1792000000 recipients {target@example.org pending} decision {reason {<policy-rejection>}} state held]] total 26 more true nextOffset 25]}
@@ -76,6 +77,15 @@ test quarantine-log-tabs {support adds two delivery views without reading the sp
     set html [::_ns_stats.log.smtpsent]
     list [string match {*Delivery log*Quarantine*DELIVERY-LOG} $html] $calls
 } -cleanup cleanup -result {1 {}}
+
+test quarantine-enabled-boolean {configuration flag is labeled as an action and rendered true/false} -setup fixture -body {
+    set results {}
+    foreach enabled {1 0 true false} expected {true false true false} {
+        set html [::_ns_stats.log.smtpsent]
+        lappend results [regexp [format {Quarantine mail rejections</td>.*?<td[^>]*>%s</td>} $expected] $html]
+    }
+    set results
+} -cleanup cleanup -result {1 1 1 1}
 
 test quarantine-list {listing uses compact tables, escaped fields and paging within the existing page} -setup fixture -body {
     set html [::_ns_stats.log.smtpsent]

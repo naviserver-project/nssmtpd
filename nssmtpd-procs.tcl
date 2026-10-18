@@ -579,6 +579,8 @@ proc smtpd::checkdatapolicy {id} {
         if {[string length $message] > 400 || ![regexp {^[\x20-\x7e]+$} $message]} {
             ::error "datapolicyproc returned an invalid message"
         }
+        # Log original-recipient provenance for DATA findings, including held mail.
+        dict set result recipient-findings $recipientFindings
         if {$action eq "reject" && [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]} {
             set held [smtpd::QuarantineStore $id $context $result]
             smtpd::logevent $id message-policy [dict merge $result [dict create \

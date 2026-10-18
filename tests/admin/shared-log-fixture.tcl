@@ -32,6 +32,7 @@ proc ::_ns_stats.log.mkchart {section param title {renderer ::_ns_stats.log.char
             try {
                 set HTML [{*}$renderer $logfile $section $param $title]
             } on error {message options} {
+                ns_log error "nsstats: cannot render $section $param log $logfile: [dict get $options -errorinfo]"
                 set HTML "<p>Cannot read log: [ns_quotehtml $message]</p>"
             }
         }

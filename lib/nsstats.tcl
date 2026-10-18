@@ -144,8 +144,12 @@ proc ::_ns_stats.smtp.quarantine.page {} {
         return "$html[::_ns_stats.footer]"
     }
     set rows {}
-    foreach {key label} {enabled {Quarantine policy rejections} directory {Persistent directory} messages {Retained messages} states {Message states} maxMessages {Message limit}} {
-        if {[dict exists $status $key]} {lappend rows [list $label [dict get $status $key]]}
+    foreach {key label} {enabled {Quarantine mail rejections} directory {Persistent directory} messages {Retained messages} states {Message states} maxMessages {Message limit}} {
+        if {[dict exists $status $key]} {
+            set value [dict get $status $key]
+            if {$key eq "enabled"} {set value [expr {$value ? "true" : "false"}]}
+            lappend rows [list $label $value]
+        }
     }
     foreach {key label} {bytes {Stored file bytes} maxBytes {Admission byte limit}} {
         if {[dict exists $status $key]} {lappend rows [list $label "[::_ns_stats.hr [dict get $status $key]]B"]}
@@ -282,7 +286,7 @@ proc ::_ns_stats.log.chart.parse-smtpevents {line} {
     set metadata {}
     foreach field [lrange $fields 14 end] {
         if {[regexp {^([a-z0-9-]+)=(.*)$} $field -> key value]
-            && ($key in {last-command message-bytes relay-accepted relay-reply recipients findings policy-rule
+            && ($key in {last-command message-bytes relay-accepted relay-reply recipients findings recipient-findings policy-rule greylist-early-retries greylist-elapsed-seconds
                          link-status link-limit link-host-mismatch link-embedded-redirect link-destination-hosts link-destination-limit dkim-obsolete-algorithm spf-result spf-peer spf-helo spf-errorcode dkim-signatures dkim-status dkim-limit}
                 || [regexp {^dkim-[1-8]-(domain|selector|key|verification|algorithm|algorithm-status)$} $key])} {
             # Decode the writer's byte escapes without evaluating log content.
@@ -319,6 +323,21 @@ proc ::_ns_stats.log.smtpevents.read {path filter} {
             } on error {message options} {
                 incr invalid
                 continue
+            }
+            if {[dict get $record event] eq "message-policy"} {
+                # DATA decisions apply to this transaction, including rows whose
+                # original recipient matched a filter but the DATA row did not.
+                set joined {}
+                foreach row $rows {
+                    if {[dict get $row server] eq [dict get $record server]
+                        && [dict get $row session] eq [dict get $record session]
+                        && [dict get $row transaction] eq [dict get $record transaction]} {
+                        dict set row dataPolicy $record
+                    }
+                    lappend joined $row
+                }
+                set rows $joined
+                # Keep the policy event itself and existing event totals.
             }
             if {[dict get $record event] in {transaction authentication}} {
                 # Fold transaction-wide details into retained rows before
@@ -453,6 +472,39 @@ proc ::_ns_stats.log.smtpevents.chart {path section param title} {
         }
         if {[dict exists $row metadata recipients] && ![catch {llength [dict get $row metadata recipients]}]} {
             append html "<dt>Expanded recipients</dt><dd>[ns_quotehtml [join [dict get $row metadata recipients] {, }]]</dd>"
+        }
+        foreach key {greylist-early-retries greylist-elapsed-seconds} {
+            if {[dict exists $row metadata $key]} {
+                append html "<dt>[ns_quotehtml $key]</dt><dd>[ns_quotehtml [dict get $row metadata $key]]</dd>"
+            }
+        }
+        set policy {}
+        if {[dict exists $row dataPolicy]} {set policy [dict get $row dataPolicy]}
+        if {[dict get $row event] eq "message-policy"} {set policy $row}
+        if {$policy ne ""} {
+            append html "<dt>DATA policy</dt><dd>[ns_quotehtml [dict get $policy action]]: [ns_quotehtml [dict get $policy reason]]</dd>"
+            if {[dict exists $policy metadata findings]} {
+                set findings [dict get $policy metadata findings]
+                if {![catch {dict size $findings}]} {
+                    append html {<dt>DATA policy findings</dt><dd>Transaction findings; greylisting counters are maxima across accepted original recipients.</dd>}
+                    dict for {key value} $findings {
+                        append html "<dt>[ns_quotehtml $key]</dt><dd>[ns_quotehtml $value]</dd>"
+                    }
+                }
+            }
+            if {[dict exists $policy metadata recipient-findings]
+                && ![catch {dict size [dict get $policy metadata recipient-findings]}]} {
+                dict for {recipient findings} [dict get $policy metadata recipient-findings] {
+                    append html "<dt>Original recipient</dt><dd>[ns_quotehtml $recipient]</dd>"
+                    if {![catch {dict size $findings}]} {
+                        dict for {key value} $findings {
+                            append html "<dt>[ns_quotehtml $key]</dt><dd>[ns_quotehtml $value]</dd>"
+                        }
+                    }
+                }
+            } else {
+                append html {<dt>Recipient provenance</dt><dd>Not recorded in this log entry.</dd>}
+            }
         }
         if {[dict exists $row metadata findings]} {
             set findings [dict get $row metadata findings]

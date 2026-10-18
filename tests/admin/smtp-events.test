@@ -211,13 +211,15 @@ test mkchart-fallback {missing current file falls back to a discovered rotation}
     ::_ns_stats.log.smtpsent
     expr {[lindex $chartArguments 0] eq "${logfile}.000"}
 } -cleanup {set logfiles [list $logfile]} -result 1
+proc ns_log {severity args} {set ::lastLog [list $severity [join $args]]}
 proc failing_chart {args} {error {<unavailable>}}
 test mkchart-read-error {renderer failure is escaped inside the shared page wrapper} -body {
     set query {}
     set html [::_ns_stats.log.mkchart module/nssmtpd eventlogfile {SMTP Events} failing_chart]
     list [string match {*Cannot read log: &lt;unavailable&gt;*} $html] \
-        [regexp -all {<h1>} $html] [regexp -all {<footer>} $html]
-} -result {1 1 1}
+        [regexp -all {<h1>} $html] [regexp -all {<footer>} $html] \
+        [lindex $::lastLog 0] [string match {*failing_chart*} [lindex $::lastLog 1]]
+} -result {1 1 1 error 1}
 test event-transaction-details {end records join filtered aliases without rows or extra counts} -body {
     write_events [list \
         [sample alias {action expand recipient webmaster@example.test targets a@remote.test}] \
@@ -282,6 +284,53 @@ test event-link-details {link evidence remains escaped in Details, with no extra
         [string match {*evil.test &lt;bad&gt;*} $html] \
         [regexp -all {<summary>Details</summary>} $html]
 } -result {1 1 1}
+
+test event-greylist-metadata {standalone greylisting diagnostics are retained} -body {
+    set row [::_ns_stats.log.chart.parse-smtpevents [sample recipient \
+        {action accept reason greylist-retry greylist-early-retries 30 greylist-elapsed-seconds 510}]]
+    list [dict get $row metadata greylist-early-retries] [dict get $row metadata greylist-elapsed-seconds]
+} -result {30 510}
+
+test event-data-policy-join {filtered aliases receive DATA findings with original recipient provenance} -body {
+    set provenance {webmaster@example.test {greylist-early-retries 30} other@example.test {greylist-early-retries 2}}
+    write_events [list [sample alias {action expand recipient webmaster@example.test targets a@remote.test}] \
+        [sample message-policy [dict create action accept reason policy-chain-end \
+            findings {greylist-early-retries 30 spf-result pass} recipient-findings $provenance]]]
+    set report [::_ns_stats.log.smtpevents.read $logfile webmaster]
+    set row [lindex [dict get $report rows] 0]
+    list [dict get $report total] [llength [dict get $report rows]] \
+        [dict get $row dataPolicy metadata findings] [dict get $row dataPolicy metadata recipient-findings]
+} -result {1 1 {greylist-early-retries 30 spf-result pass} {webmaster@example.test {greylist-early-retries 30} other@example.test {greylist-early-retries 2}}}
+
+test event-data-policy-counts {joining does not remove or duplicate DATA event counts} -body {
+    set report [::_ns_stats.log.smtpevents.read $logfile {}]
+    list [dict get $report total] [dict get $report counts {message-policy accept policy-chain-end}]
+} -result {2 1}
+
+test event-data-policy-isolation {DATA joins require identical server session and transaction} -body {
+    set results {}
+    foreach replacement {{1-2-3 2 test} {another-session 1 test} {1-2-3 1 other-server}} {
+        set policy [string map [list {1-2-3 1 test} $replacement] [sample message-policy {action accept findings {greylist-early-retries 99}}]]
+        write_events [list [sample alias {recipient webmaster@example.test}] $policy]
+        lappend results [dict exists [lindex [dict get [::_ns_stats.log.smtpevents.read $logfile webmaster] rows] 0] dataPolicy]
+    }
+    set results
+} -result {0 0 0}
+
+test event-data-policy-html {findings and recipient provenance are escaped and historical absence is explicit} -body {
+    set query {filter webmaster}
+    write_events [list [sample alias {recipient webmaster@example.test}] \
+        [sample message-policy {action accept reason policy-chain-end findings {greylist-early-retries 30} \
+            recipient-findings {webmaster@example.test {greylist-early-retries 30} {<other@example.test>} {custom {<unsafe>}}}}]]
+    set html [::_ns_stats.log.smtpevents]
+    set result [list [string match {*DATA policy findings*greylist-early-retries*30*} $html] \
+        [string match {*Original recipient*webmaster@example.test*} $html] \
+        [string match {*&lt;other@example.test&gt;*&lt;unsafe&gt;*} $html]]
+    write_events [list [sample alias {recipient webmaster@example.test}] \
+        [sample message-policy {action accept findings {greylist-early-retries 30}}]]
+    lappend result [string match {*Recipient provenance*Not recorded*} [::_ns_stats.log.smtpevents]]
+    set result
+} -result {1 1 1 1}
 
 removeFile events.log
 set failed $::tcltest::numTests(Failed)

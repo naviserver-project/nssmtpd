@@ -1,0 +1,43 @@
+package require tcltest 2.2
+namespace import ::tcltest::*
+namespace eval smtpd {}
+set f [open [file join [file dirname [info script]] .. .. nssmtpd-procs.tcl]]
+set source [read $f]; close $f
+set definition {}
+foreach line [split $source \n] {
+    if {$definition ne {} || [string match {proc smtpd::checkdatapolicy *} $line]} {
+        append definition $line \n
+        if {[info complete $definition]} {eval $definition; set definition {}}
+    }
+}
+proc ns_info {args} {return test}
+proc ns_conn {args} {return 127.0.0.1}
+proc ns_config {args} {
+    if {[lindex $args 0] eq "-bool"} {return $::quarantine}
+    return policy
+}
+proc ns_smtpd {op args} {
+    switch $op {
+        getflag {return 0} flag {return 1} getauthuser {return {}}
+        getfrom {return sender@example.test} gethelo {return test}
+        getrcpt {return {{alias@example.test}}}
+        getrcptfindings {return {alias@example.test {greylist-early-retries 30 greylist-elapsed-seconds 510}}}
+        setreply {return {}}
+        default {error "unexpected $op"}
+    }
+}
+proc policy {context} {return [dict create action $::action reason test findings [dict get $context findings]]}
+proc smtpd::logevent {id event details} {set ::event $details}
+proc smtpd::QuarantineStore {args} {return held-id}
+proc ns_log {args} {error "unexpected diagnostic: $args"}
+test data-findings-log {accepted, rejected and held DATA events preserve recipient provenance} -body {
+    set result {}
+    foreach action {accept reject reject} quarantine {0 0 1} {
+        smtpd::checkdatapolicy test-id
+        lappend result [dict get $event action] \
+            [dict get $event findings greylist-early-retries] \
+            [dict get $event recipient-findings alias@example.test greylist-early-retries]
+    }
+    set result
+} -result {accept 30 30 reject 30 30 quarantine 30 30}
+cleanupTests
