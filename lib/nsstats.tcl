@@ -289,15 +289,9 @@ proc ::_ns_stats.log.chart.parse-smtpevents {line} {
             && ($key in {last-command message-bytes relay-accepted relay-reply recipients findings recipient-findings policy-rule greylist-early-retries greylist-elapsed-seconds
                          link-status link-limit link-host-mismatch link-embedded-redirect link-destination-hosts link-destination-limit dkim-obsolete-algorithm spf-result spf-peer spf-helo spf-errorcode dkim-signatures dkim-status dkim-limit}
                 || [regexp {^dkim-[1-8]-(domain|selector|key|verification|algorithm|algorithm-status)$} $key])} {
-            # Decode the writer's byte escapes without evaluating log content.
-            set decoded ""
-            while {[regexp -indices {\\x[0-9a-fA-F]{2}} $value match]} {
-                lassign $match first last
-                append decoded [string range $value 0 $first-1] \
-                    [format %c [scan [string range $value $first+2 $last] %x]]
-                set value [string range $value $last+1 end]
-            }
-            dict set metadata $key $decoded$value
+            # EventField escapes original backslashes; decode once without
+            # evaluating commands or variables from log content.
+            dict set metadata $key [subst -nocommands -novariables $value]
         }
     }
     return [dict create timestamp $timestamp thread $thread server $server \

@@ -13,59 +13,115 @@ nx::Class create ::smtpd::mcp::SmtpLogTool -superclass ::nsmcp::Tool {
     :property peerRedactor:required
     :property {maxReadBytes:integer 1048576}
     :property {maxLineBytes:integer 16384}
-    :property {description {Read recent nssmtpd sendlog or eventlog records from the current server's configured SMTP module. Defaults to eventlog, the last 60 minutes, and at most 20 newest matching records. Reads at most 1 MiB from the current file; does not scan rotated files or certify full-window coverage when earlier bytes remain unread. Reports malformed, oversized and unfinished lines separately. Filters use exact event/session/status matches; contains is a literal substring in the redacted record. Returns SMTP envelope addresses and diagnostic metadata, never message bodies. Peer addresses are masked unless includePeerAddresses is true and diagnostics.logs.peers.read is granted. Event records belonging to another virtual server are excluded; sendlog has no per-record server field, so its scope is the configured source. Does not send mail or change SMTP settings.}}
-    :property {inputSchema {{} object {type string object properties object {
-        log object {type string string enum array {0 string event 1 string send} default string event}
-        module object {type string string default string nssmtpd description string {Configured nssmtpd module name in the current virtual server.}}
-        lastMinutes object {type string integer minimum number 1 maximum number 1440 default number 60}
-        limit object {type string integer minimum number 1 maximum number 100 default number 20}
-        session object {type string string description string {Exact eventlog session identifier; not available in sendlog.}}
-        event object {type string string description string {Exact eventlog event name.}}
-        status object {type string string description string {Exact SMTP status code, for example 451 or 550.}}
-        contains object {type string string description string {Literal substring in the redacted record.}}
-        includePeerAddresses object {type string boolean default boolean false}
-    } additionalProperties boolean false}}}
+    :property {description
+        {
+            Read recent nssmtpd sendlog or eventlog records from the
+            current server's configured SMTP module. Defaults to eventlog,
+            the last 60 minutes, and at most 20 newest matching
+            records. Reads at most 1 MiB from the current file; does not
+            scan rotated files or certify full-window coverage when
+            earlier bytes remain unread. Reports malformed, oversized and
+            unfinished lines separately. Filters use exact
+            event/session/status matches; contains is a literal substring
+            in the redacted record. Returns SMTP envelope addresses and
+            diagnostic metadata, never message bodies. Peer addresses are
+            masked unless includePeerAddresses is true and
+            diagnostics.logs.peers.read is granted. Event records
+            belonging to another virtual server are excluded; sendlog has
+            no per-record server field, so its scope is the configured
+            source. Does not send mail or change SMTP settings.
+        }
+    }
+
+    :property {inputSchema {
+        {
+            "type": "object",
+            "properties": {
+                "log": {
+                    "type": "string",
+                    "enum": ["event", "send"],
+                    "default": "event"
+                },
+                "module": {
+                    "type": "string",
+                    "default": "nssmtpd",
+                    "description": "Configured nssmtpd module name in the current virtual server."
+                },
+                "lastMinutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "default": 60
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 20
+                },
+                "session": {
+                    "type": "string",
+                    "description": "Exact eventlog session identifier; not available in sendlog."
+                },
+                "event": {
+                    "type": "string",
+                    "description": "Exact eventlog event name."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Exact SMTP status code, for example 451 or 550."
+                },
+                "contains": {
+                    "type": "string",
+                    "description": "Literal substring in the redacted record."
+                },
+                "includePeerAddresses": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
+        }
+    }}
 
     :method init {} {
+        next
         if {${:maxReadBytes} < 1 || ${:maxReadBytes} > 16777216 || ${:maxLineBytes} < 1} {
             error "SMTP log read budget must be 1..16 MiB and line budget positive"
         }
     }
 
-    :method options {arguments} {
-        if {[lindex $arguments 1] ne "object"} {error "Expected arguments object"}
-        set options {log event module nssmtpd lastMinutes 60 limit 20 includePeerAddresses false}
-        foreach {key type value} [lindex $arguments 2] {
-            switch -- $key {
-                log {
-                    if {$type ne "string" || $value ni {event send}} {error "log must be event or send"}
-                }
-                module {
-                    if {$type ne "string" || ![regexp {^[A-Za-z0-9_.-]+$} $value]} {error "Invalid SMTP module name"}
-                }
-                lastMinutes - limit {
-                    set maximum [expr {$key eq "limit" ? 100 : 1440}]
-                    if {$type ne "number" || ![string is integer -strict $value] || $value < 1 || $value > $maximum} {
-                        error "$key must be an integer between 1 and $maximum"
-                    }
-                }
-                session - event - status - contains {
-                    if {$type ne "string" || [string length $value] > 256 || [regexp {[\x00\r\n]} $value]} {error "Invalid $key filter"}
-                }
-                includePeerAddresses {
-                    if {$type ne "boolean"} {error "includePeerAddresses must be boolean"}
-                }
-                default {error "Unknown argument: $key"}
+    :method options {
+        {-log event}
+        {-module nssmtpd}
+        {-lastMinutes:integer 60}
+        {-limit:integer 20}
+        -session
+        -event
+        -status
+        -contains
+        {-includePeerAddresses:boolean false}
+    } {
+        if {$log ni {event send}} {error "log must be event or send"}
+        if {![regexp {^[A-Za-z0-9_.-]+$} $module]} {error "Invalid SMTP module name"}
+        if {$lastMinutes < 1 || $lastMinutes > 1440} {error "lastMinutes must be between 1 and 1440"}
+        if {$limit < 1 || $limit > 100} {error "limit must be between 1 and 100"}
+        set options [dict create log $log module $module lastMinutes $lastMinutes limit $limit \
+            includePeerAddresses $includePeerAddresses]
+        foreach key {session event status contains} {
+            if {[info exists $key]} {
+                set value [set $key]
+                if {[string length $value] > 256 || [regexp {[\x00\r\n]} $value]} {error "Invalid $key filter"}
+                dict set options $key $value
             }
-            dict set options $key $value
         }
-        if {[dict get $options log] eq "send" && ([dict exists $options event] || [dict exists $options session])} {
+        if {$log eq "send" && ([info exists event] || [info exists session])} {
             error "event and session filters require eventlog"
         }
         return $options
     }
     :public method validate {arguments} {
-        if {[catch {:options $arguments} message]} {
+        if {[catch {:options {*}[:jsonArguments $arguments]} message]} {
             return -code error -errorcode {NSMCP RPC -32602} $message
         }
     }
@@ -92,15 +148,9 @@ nx::Class create ::smtpd::mcp::SmtpLogTool -superclass ::nsmcp::Tool {
     }
 
     :method decode {value} {
-        # Event writer escapes bytes as \\xHH. Decode without evaluating Tcl.
-        set decoded ""
-        while {[regexp -indices {\\x[0-9a-fA-F]{2}} $value match]} {
-            lassign $match first last
-            append decoded [string range $value 0 $first-1] \
-                [format %c [scan [string range $value $first+2 $last] %x]]
-            set value [string range $value $last+1 end]
-        }
-        return $decoded$value
+        # EventField escapes every original backslash. Substitution is one-pass:
+        # decoded backslashes are not processed again; log data is never Tcl code.
+        return [subst -nocommands -novariables $value]
     }
 
     :method parse {kind line} {
@@ -202,7 +252,7 @@ nx::Class create ::smtpd::mcp::SmtpLogTool -superclass ::nsmcp::Tool {
     }
 
     :public method execute {context arguments} {
-        set options [:options $arguments]
+        set options [:options {*}[:jsonArguments $arguments]]
         set peers [dict get $options includePeerAddresses]
         if {$peers} {${:authorizer} require $context diagnostics.logs.peers.read}
         set server [$context server]

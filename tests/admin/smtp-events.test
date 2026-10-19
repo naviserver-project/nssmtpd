@@ -38,6 +38,33 @@ proc write_events {rows} {
     set f [open $logfile w]
     try {foreach row $rows {puts $f $row}} finally {close $f}
 }
+source [file join [file dirname [info script]] .. smtp-codec-support.tcl]
+test event-decode-roundtrip {admin metadata round trips the event encoder byte escapes} -body {
+    set result {}
+    foreach value [smtp_decode_values] {
+        set line "[sample custom {}] relay-reply=[smtp_encode_field $value]"
+        set record [::_ns_stats.log.chart.parse-smtpevents $line]
+        lappend result [expr {[dict get $record metadata relay-reply] eq $value}]
+    }
+    set result
+} -result {1 1 1 1 1 1 1}
+
+test event-decode-literal-backslashes {admin reader decodes once without interpreting resulting escapes} -body {
+    set results {}
+    foreach encoded {{\x5cn} {\x5cx20} {\x5cu0041}} {
+        set record [::_ns_stats.log.chart.parse-smtpevents "[sample custom {}] relay-reply=$encoded"]
+        lappend results [dict get $record metadata relay-reply]
+    }
+    set results
+} -result {{\n} {\x20} {\u0041}}
+
+test event-decode-no-evaluation {admin parser preserves literal Tcl commands and variables} -body {
+    set ::smtpDecodeProbe unchanged
+    set value {$::smtpDecodeProbe [set ::smtpDecodeProbe changed] [error unexpected]}
+    set record [::_ns_stats.log.chart.parse-smtpevents "[sample custom {}] findings=[smtp_encode_field $value]"]
+    list [expr {[dict get $record metadata findings] eq $value}] $::smtpDecodeProbe
+} -cleanup {unset ::smtpDecodeProbe} -result {1 unchanged}
+
 test event-parse {targets and metadata parsed without evaluation} -body {
     set record [::_ns_stats.log.chart.parse-smtpevents [sample alias \
         [dict create action expand recipient {[error]@example.test} targets {a@remote.test b@remote.test}]]]
