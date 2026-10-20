@@ -198,6 +198,34 @@ test quarantine-restart {a new NaviServer process inspects the stored message an
     expr {[string first {QUARANTINE_RESTART_OK} $output] >= 0}
 } -returnCodes {ok error} -result 1
 
+source [file join $::env(ALIAS_TEST_ROOT) tests link-policy-fixture.tcl]
+
+test quarantine-link-policy {shipped policy holds known spam links and preserves the matching finding without relaying} -setup {
+    set savedRules [nsv_get alias-test data-rules]
+    nsv_set alias-test data-rules [link_policy_example_rules]
+    set beforeIds [smtpd::QuarantineIds]
+    set beforeRelay [llength [header_messages]]
+} -body {
+    set reply [header_submit [link_policy_message voir-mon-doc-1.jimdosite.com]]
+    set newIds {}
+    foreach entry [smtpd::QuarantineIds] {if {$entry ni $beforeIds} {lappend newIds $entry}}
+    set metadata [smtpd::quarantine show [lindex $newIds 0]]
+    list $reply [llength $newIds] [dict get $metadata state] \
+        [dict get $metadata decision reason] [dict get $metadata decision findings blocked-link-host] \
+        [expr {[llength [header_messages]] == $beforeRelay}]
+} -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 held known-spam-link-host voir-mon-doc-1.jimdosite.com 1}
+
+test quarantine-link-policy-allowed {unrelated link host continues through the full policy and relay} -setup {
+    set savedRules [nsv_get alias-test data-rules]
+    nsv_set alias-test data-rules [link_policy_example_rules]
+    set beforeIds [smtpd::QuarantineIds]
+    set beforeRelay [llength [header_messages]]
+} -body {
+    list [header_submit [link_policy_message statsmail.eu]] \
+        [expr {[smtpd::QuarantineIds] eq $beforeIds}] \
+        [expr {[llength [header_messages]] == $beforeRelay + 1}]
+} -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 1}
+
 quarantine_test_clear
 ns_set update [ns_configsection ns/server/test/module/nssmtpd] quarantinePolicyRejects false
 nsv_unset alias-test data-rules

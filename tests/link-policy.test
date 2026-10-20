@@ -1,0 +1,68 @@
+# Public DATA link collector and the exact-host configuration example.
+source [file join $::env(ALIAS_TEST_ROOT) tests link-policy-fixture.tcl]
+rename ns_smtpd link_policy_native_ns_smtpd
+proc ns_smtpd {operation id} {
+    if {$operation ne "getbody"} {error "unexpected operation $operation"}
+    incr ::linkPolicyReads
+    return [list $::linkPolicyBody]
+}
+set linkPolicyReads 0
+set linkPolicyBody [link_policy_message statsmail.eu]
+
+test link-policy-phase {non-DATA invocation fails before accessing the message} -body {
+    set observations {}
+    list [catch {smtpd::linkpolicy {phase rcpt id 1} observations} message] $message $linkPolicyReads
+} -result {1 {Link policy requires the DATA phase} 0}
+
+test link-policy-findings {collector preserves authentication and recipient findings and message bytes} -constraints html_parser -body {
+    set observations {spf-result pass greylist-early-retries 2 recipient-findings {one@example.test {greylist-early-retries 2}}}
+    set originalBody $linkPolicyBody
+    list [smtpd::linkpolicy {phase data id 1} observations] \
+        [dict get $observations spf-result] [dict get $observations greylist-early-retries] \
+        [dict get $observations recipient-findings] [dict get $observations link-destination-hosts] \
+        [expr {$originalBody eq $linkPolicyBody}]
+} -result {continue pass 2 {one@example.test {greylist-early-retries 2}} statsmail.eu 1}
+
+test link-policy-size {inspection limit is a finding rather than a rejection} -body {
+    set linkPolicyBody [string repeat x 262145]
+    set observations {}
+    list [smtpd::linkpolicy {phase data id 1} observations] [dict get $observations link-status]
+} -result {continue message-size-limit}
+
+test link-policy-example {confirmed spam hosts match exactly after normalization; unrelated hosts remain allowed} -constraints html_parser -body {
+    set actions {}
+    set rules [lrange [link_policy_example_rules] 2 end]
+    foreach host {
+        statsmail.eu
+        accuse-de-reception-de-courrier-recommande-3.jimdosite.com
+        voir-mon-doc-1.jimdosite.com
+        ACCUSE-DE-RECEPTION-DE-COURRIER-RECOMMANDE-3.JIMDOSITE.COM.
+        unrelated.jimdosite.com
+        voir-mon-doc-1.jimdosite.com.example.test
+    } {
+        set linkPolicyBody [link_policy_message $host]
+        set decision [smtpd::policychain $rules {phase data id 1 findings {spf-result pass}}]
+        lappend actions [dict get $decision action]
+    }
+    set actions
+} -result {accept reject reject reject accept accept}
+
+test link-policy-collector-order {all three collectors precede the decision rules in the shipped example} -body {
+    lrange [link_policy_example_rules] 0 2
+} -result {{smtpd::spfpolicy $context findings} {smtpd::dkimkeypolicy $context findings} {smtpd::linkpolicy $context findings}}
+
+test link-policy-existing-rules {early rejection decisions retain link findings collected before the rules} -constraints html_parser -body {
+    set results {}
+    set linkPolicyBody [link_policy_message statsmail.eu]
+    foreach seed {{spf-fail true dkim-no-key true} {greylist-early-retries 10}} {
+        set decision [smtpd::policychain [lrange [link_policy_example_rules] 2 end] \
+            [dict create phase data id 1 findings $seed]]
+        lappend results [list [dict get $decision reason] \
+            [dict get $decision findings link-destination-hosts]]
+    }
+    set results
+} -result {{spf-fail-and-dkim-no-key statsmail.eu} {excessive-greylist-early-retries statsmail.eu}}
+
+rename ns_smtpd {}
+rename link_policy_native_ns_smtpd ns_smtpd
+unset linkPolicyBody linkPolicyReads

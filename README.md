@@ -1031,6 +1031,51 @@ ns_param datapolicyproc {
 }
 ```
 
+Place the SPF, DKIM-key and link collectors together before the decision rules
+so their findings remain available even when an early rule rejects the message.
+
+`smtpd::linkpolicy context findingsVar` is a public DATA-only collector, used
+like `spfpolicy` and `dkimkeypolicy`. It merges the existing bounded MIME/HTML
+link diagnostics into the caller's findings and returns `continue`; it never
+rejects a message, resolves/fetches a link, or modifies message bytes. SPF, DKIM
+and recipient findings are preserved. `link-status` and the limit fields report
+unavailable dependencies, skipped data, parsing errors and incomplete inspection.
+An absent destination list is not proof that a message is safe.
+
+For example, append these rules after the authentication/retry decisions:
+
+```tcl
+{smtpd::linkpolicy $context findings}
+{
+    if {[dict exists $findings link-destination-hosts]} {
+        foreach host [dict get $findings link-destination-hosts] {
+            if {$host in {
+                accuse-de-reception-de-courrier-recommande-3.jimdosite.com
+                voir-mon-doc-1.jimdosite.com
+            }} {
+                dict set findings blocked-link-host $host
+                return {action reject reason known-spam-link-host}
+            }
+        }
+    }
+    continue
+}
+```
+
+These are exact, normalized hostnames observed in operator-confirmed spam;
+the example does not block every `jimdosite.com` site or all unsigned mail.
+It does not identify the entire campaign. See
+[examples/datapolicy-config.tcl](examples/datapolicy-config.tcl) for a complete
+configuration retaining the SPF-fail/missing-DKIM-key rule and the ten-early-retry
+threshold, plus persistent quarantine. With `quarantinePolicyRejects true` and
+a configured persistent directory, `reject` becomes a durable hold. Without
+that setting it is an SMTP rejection. The matching `blocked-link-host` remains
+in the DATA policy findings for inspection and manual release.
+
+Link diagnostics displayed by `authdetailsproc` are independent of policy
+collection; call `linkpolicy` explicitly when a DATA rule uses them. Inspection
+limits are the same in both paths. No cryptographic DKIM verification is added.
+
 Greylist decisions include `greylist-early-retries` and
 `greylist-elapsed-seconds` in their findings. The count covers early RCPT
 attempts for the same peer/sender/original-recipient tuple, not necessarily

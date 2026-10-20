@@ -44,7 +44,7 @@ endif
 
 TCL       = nssmtpd-mcp.tcl nssmtpd-nsstats.tcl nssmtpd-quarantine.tcl nssmtpd-procs.tcl nssmtpd-spf.tcl nssmtpd-auth.tcl nssmtpd-credentials.tcl
 
-INSTALL += install-admin-pages install-mcp-tools install-mcp-example
+INSTALL += install-admin-pages install-mcp-tools install-mcp-example install-policy-example
 
 include  $(NAVISERVER)/include/Makefile.module
 
@@ -108,3 +108,8 @@ regen-mcp-parameters-include:
 check-config-parameters build-doc: check-mcp-parameters
 check-mcp-parameters:
 	$(TCLSH_PROG) "$(DOC_TOOLS)/gen-config-parameters.tcl" --config "$(MODULE_CONFIG_PARAMETERS)" --section 'ns/server/*/module/nssmtpd/mcp' --output doc/src/include/mcp-parameters.man --check
+
+.PHONY: install-policy-example
+install-policy-example:
+	$(MKDIR) "$(DESTDIR)$(INSTTCL)/$(MODNAME)/examples"
+	$(INSTALL_DATA) examples/datapolicy-config.tcl "$(DESTDIR)$(INSTTCL)/$(MODNAME)/examples/"

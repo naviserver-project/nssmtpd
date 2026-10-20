@@ -151,6 +151,24 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
     return continue
 }
 
+# Collect bounded MIME/HTML link diagnostics without a delivery decision.
+#
+# @param context DATA-policy dictionary containing phase=data and SMTP session id.
+# @param findingsVar Caller variable receiving merged link diagnostics; existing
+#        SPF, DKIM and recipient findings are preserved.
+# @return continue. Missing parsers, skipped messages and inspection limits are
+#         reported in link-status/limit findings, not as rejection decisions.
+#
+proc smtpd::linkpolicy {context findingsVar} {
+    upvar 1 $findingsVar findings
+    if {[dict get $context phase] ne "data"} {
+        ::error "Link policy requires the DATA phase"
+    }
+    set details [AuthLinkDetails [lindex [ns_smtpd getbody [dict get $context id]] 0]]
+    set findings [dict merge $findings $details]
+    return continue
+}
+
 # Extract hostnames only; never resolve, fetch, or log recipient-bearing URLs.
 proc smtpd::AuthLinkHost {url} {
     try {
