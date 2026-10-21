@@ -42,6 +42,19 @@ foreach script {{dict set findings before true; error broken} {dict set findings
     } -result {defer policy-rule-error 1}
 }
 
+test chain-unbraced-rule {missing braces around a rule is an operational error and defers safely} -setup {
+    rename ns_log chain_saved_ns_log
+    proc ns_log {severity message} {set ::chainLog [list $severity $message]}
+} -body {
+    set result [smtpd::policychain {if {1} {return reject} continue} $chainContext]
+    list [dict get $result action] [dict get $result reason] [dict get $result policy-rule] \
+        [lindex $chainLog 0] [string match {*no expression after "if" argument*} [lindex $chainLog 1]]
+} -cleanup {
+    rename ns_log {}
+    rename chain_saved_ns_log ns_log
+    unset -nocomplain chainLog
+} -result {defer policy-rule-error 1 Error 1}
+
 # Local variables:
 #    mode: tcl
 #    tcl-indent-level: 4

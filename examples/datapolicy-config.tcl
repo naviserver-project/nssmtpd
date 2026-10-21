@@ -7,9 +7,7 @@ ns_section ns/server/$server/module/nssmtpd {
     ns_param quarantineDirectory [file join [ns_info home] data smtp-quarantine $server]
     ns_param datapolicyproc {
         smtpd::policychain {
-            {smtpd::spfpolicy $context findings}
-            {smtpd::dkimkeypolicy $context findings}
-            {smtpd::linkpolicy $context findings}
+            {smtpd::collectfindings $context findings}
             {
                 if {[dict exists $findings spf-fail]
                     && [dict exists $findings dkim-no-key]} {

@@ -56,6 +56,13 @@ proc event_test_auth {id} {
     ns_smtpd logevent $id authentication {action observed reason authentication-diagnostics spf-result none dkim-1-key no-key dkim-1-verification not-performed}
 }
 
+proc alias_log_filter {severity timestamp message} {
+    if {[string match {*context: smtpd alias resolution*} $message]
+        || [string match {nssmtpd:*RCPT * rejected:*} $message]} {
+        nsv_lappend alias-test resolution-logs [list $severity $message]
+    }
+}
+
 proc io_log_filter {severity timestamp message} {
     if {[string match {nssmtpd:*} $message]} {
         nsv_lappend io-test logs [list $severity $message]

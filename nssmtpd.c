@@ -2584,6 +2584,7 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
         Tcl_Obj *options = Tcl_GetReturnOptions(conn->interp, TCL_ERROR);
         Tcl_Obj *key = Tcl_NewStringObj("-errorcode", -1), *errorCode = NULL;
         const char *reply = "451 Alias resolution failed\r\n";
+        bool unexpected = NS_TRUE;
         conn->eventReason = "alias-error";
 
         Tcl_IncrRefCount(options);
@@ -2595,12 +2596,21 @@ SmtpdResolveRcpt(smtpdConn *conn, smtpdRcpt *recipient)
             if (strcmp(code, "NSSMTPD ALIAS UNKNOWN") == 0) {
                 reply = "550 Unknown recipient\r\n";
                 conn->eventReason = "unknown-recipient";
+                unexpected = NS_FALSE;
             } else if (strcmp(code, "NSSMTPD ALIAS LIMIT") == 0) {
                 reply = "452 Too many recipients after alias expansion\r\n";
                 conn->eventReason = "alias-limit";
+                unexpected = NS_FALSE;
             }
         }
-        (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd alias resolution)");
+        /* Recipient rejection is a normal SMTP outcome, not a resolver failure. */
+        if (unexpected) {
+            (void) Ns_TclLogErrorInfo(conn->interp, "\n(context: smtpd alias resolution)");
+        } else {
+            Ns_Log(Notice, "nssmtpd: %ld: peer %s: RCPT %s rejected: %s",
+                   conn->id, Ns_ConnPeerAddr(Ns_GetConn()), recipient->addr,
+                   conn->eventReason);
+        }
         Tcl_DStringSetLength(&conn->reply, 0);
         Tcl_DStringAppend(&conn->reply, reply, -1);
         SmtpdRcptFree(conn, NULL, 0, 0u);

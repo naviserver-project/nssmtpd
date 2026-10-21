@@ -508,7 +508,7 @@ proc smtpd::policychain {rules context} {
             set action [dict get $decision action]
             if {$action ni {continue accept defer reject}} {::error "invalid policy action"}
         } on error {message options} {
-            ns_log Warning "smtpd policy chain: rule $index failed: $message"
+            ns_log Error "smtpd policy chain: rule $index failed: $message"
             if {[catch {dict size $findings}]} {set findings {}}
             return [dict create action defer reason policy-rule-error \
                 policy-rule $index findings $findings]

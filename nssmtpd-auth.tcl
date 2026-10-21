@@ -151,6 +151,25 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
     return continue
 }
 
+# Collect the standard DATA-policy observations before making delivery decisions.
+#
+# @param context DATA-policy context containing id, phase, peeraddr, sender and helo.
+# @param findingsVar Caller variable receiving SPF, DKIM-key and link findings;
+#        existing recipient/greylisting findings are preserved.
+# @return continue. Individual collectors remain available for custom policies.
+#         DKIM key presence does not verify a signature; links are not fetched.
+#
+proc smtpd::collectfindings {context findingsVar} {
+    upvar 1 $findingsVar findings
+    if {[dict get $context phase] ne "data"} {
+        ::error "Findings collection requires the DATA phase"
+    }
+    smtpd::spfpolicy $context findings
+    smtpd::dkimkeypolicy $context findings
+    smtpd::linkpolicy $context findings
+    return continue
+}
+
 # Collect bounded MIME/HTML link diagnostics without a delivery decision.
 #
 # @param context DATA-policy dictionary containing phase=data and SMTP session id.

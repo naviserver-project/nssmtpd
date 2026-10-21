@@ -164,6 +164,31 @@ test alias-on-7 {incoming error codes and recipient rollback} -constraints confi
     set replies
 } -result {1 1 1 1 1 1 1 1 1 1 1 1}
 
+test alias-rejection-severity {normal recipient rejections log Notice while resolver failures remain Error} -constraints config_aliasproc_set -setup {
+    nsv_set alias-test resolution-logs {}
+    set filter [ns_logctl register alias_log_filter]
+} -body {
+    set outcomes {}
+    foreach recipient {missing many broken} {
+        set socket [smtp_open]
+        lappend outcomes [string range [smtp_command $socket "RCPT TO:<$recipient@example.test>"] 0 2]
+        smtp_close $socket
+    }
+    set deadline [expr {[clock milliseconds] + 2000}]
+    while {[llength [nsv_get alias-test resolution-logs]] < 3 && [clock milliseconds] < $deadline} {
+        after 10
+    }
+    set logs [nsv_get alias-test resolution-logs]
+    set severities {}
+    foreach entry $logs {lappend severities [string tolower [lindex $entry 0]]}
+    list $outcomes $severities \
+        [string match {*RCPT missing@example.test rejected: unknown-recipient} [lindex $logs 0 1]] \
+        [string match {*RCPT many@example.test rejected: alias-limit} [lindex $logs 1 1]] \
+        [string match {*backend unavailable*context: smtpd alias resolution*} [lindex $logs 2 1]]
+} -cleanup {
+    ns_logctl unregister $filter
+} -result {{550 452 451} {notice notice error} 1 1 1}
+
 test alias-helper-contract {invalid helper results reject only the current RCPT} -constraints config_aliasproc_set -body {
     set results {}
     foreach recipient {helper-empty helper-malformed} {

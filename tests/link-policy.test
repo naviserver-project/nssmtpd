@@ -31,7 +31,7 @@ test link-policy-size {inspection limit is a finding rather than a rejection} -b
 
 test link-policy-example {confirmed spam hosts match exactly after normalization; unrelated hosts remain allowed} -constraints html_parser -body {
     set actions {}
-    set rules [lrange [link_policy_example_rules] 2 end]
+    set rules [linsert [lrange [link_policy_example_rules] 1 end] 0 {smtpd::linkpolicy $context findings}]
     foreach host {
         statsmail.eu
         accuse-de-reception-de-courrier-recommande-3.jimdosite.com
@@ -47,21 +47,53 @@ test link-policy-example {confirmed spam hosts match exactly after normalization
     set actions
 } -result {accept reject reject reject accept accept}
 
-test link-policy-collector-order {all three collectors precede the decision rules in the shipped example} -body {
-    lrange [link_policy_example_rules] 0 2
-} -result {{smtpd::spfpolicy $context findings} {smtpd::dkimkeypolicy $context findings} {smtpd::linkpolicy $context findings}}
+test link-policy-collector-order {one standard collector precedes decision rules in the shipped example} -body {
+    lindex [link_policy_example_rules] 0
+} -result {smtpd::collectfindings $context findings}
 
 test link-policy-existing-rules {early rejection decisions retain link findings collected before the rules} -constraints html_parser -body {
     set results {}
     set linkPolicyBody [link_policy_message statsmail.eu]
     foreach seed {{spf-fail true dkim-no-key true} {greylist-early-retries 10}} {
-        set decision [smtpd::policychain [lrange [link_policy_example_rules] 2 end] \
+        set decision [smtpd::policychain [linsert [lrange [link_policy_example_rules] 1 end] 0 {smtpd::linkpolicy $context findings}] \
             [dict create phase data id 1 findings $seed]]
         lappend results [list [dict get $decision reason] \
             [dict get $decision findings link-destination-hosts]]
     }
     set results
 } -result {{spf-fail-and-dkim-no-key statsmail.eu} {excessive-greylist-early-retries statsmail.eu}}
+
+test collect-findings {single call runs all collectors in order and preserves recipient findings through caller scope} -setup {
+    set collectorCalls {}
+    foreach collector {spfpolicy dkimkeypolicy linkpolicy} {
+        rename smtpd::$collector smtpd::saved_$collector
+        proc smtpd::$collector {context findingsVar} {
+            upvar 1 $findingsVar findings
+            set name [namespace tail [lindex [info level 0] 0]]
+            lappend ::collectorCalls $name
+            dict set findings $name observed
+            return continue
+        }
+    }
+} -body {
+    set observations {greylist-early-retries 2 recipient-findings {one@example.test {greylist-early-retries 2}}}
+    set result [smtpd::collectfindings {phase data id 1} observations]
+    list $result $collectorCalls [dict get $observations greylist-early-retries] \
+        [dict get $observations recipient-findings] \
+        [dict get $observations spfpolicy] [dict get $observations dkimkeypolicy] [dict get $observations linkpolicy]
+} -cleanup {
+    foreach collector {spfpolicy dkimkeypolicy linkpolicy} {
+        rename smtpd::$collector {}
+        rename smtpd::saved_$collector smtpd::$collector
+    }
+    unset collectorCalls
+} -result {continue {spfpolicy dkimkeypolicy linkpolicy} 2 {one@example.test {greylist-early-retries 2}} observed observed observed}
+
+test collect-findings-phase {non-DATA context cannot initiate collection} -body {
+    set observations {}
+    catch {smtpd::collectfindings {phase rcpt id 1} observations} message
+    set message
+} -result {Findings collection requires the DATA phase}
 
 rename ns_smtpd {}
 rename link_policy_native_ns_smtpd ns_smtpd

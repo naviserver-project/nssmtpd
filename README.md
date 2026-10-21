@@ -1031,8 +1031,12 @@ ns_param datapolicyproc {
 }
 ```
 
-Place the SPF, DKIM-key and link collectors together before the decision rules
-so their findings remain available even when an early rule rejects the message.
+Use `{smtpd::collectfindings $context findings}` as the first DATA-chain rule.
+This public helper collects SPF, DKIM-key and link findings in order, preserving
+existing recipient/greylisting findings before any decision can reject the mail.
+The individual collectors remain available for custom policies. Each decision
+script must be enclosed in its own braces: the chain is a Tcl list of scripts,
+not one script. Rule execution errors are logged at Error and defer delivery.
 
 `smtpd::linkpolicy context findingsVar` is a public DATA-only collector, used
 like `spfpolicy` and `dkimkeypolicy`. It merges the existing bounded MIME/HTML
@@ -1042,10 +1046,10 @@ and recipient findings are preserved. `link-status` and the limit fields report
 unavailable dependencies, skipped data, parsing errors and incomplete inspection.
 An absent destination list is not proof that a message is safe.
 
-For example, append these rules after the authentication/retry decisions:
+For example, after collecting findings, append this rule after the
+authentication/retry decisions:
 
 ```tcl
-{smtpd::linkpolicy $context findings}
 {
     if {[dict exists $findings link-destination-hosts]} {
         foreach host [dict get $findings link-destination-hosts] {
@@ -1073,7 +1077,7 @@ that setting it is an SMTP rejection. The matching `blocked-link-host` remains
 in the DATA policy findings for inspection and manual release.
 
 Link diagnostics displayed by `authdetailsproc` are independent of policy
-collection; call `linkpolicy` explicitly when a DATA rule uses them. Inspection
+collection; use `collectfindings` (or `linkpolicy` alone) when a DATA rule uses them. Inspection
 limits are the same in both paths. No cryptographic DKIM verification is added.
 
 Greylist decisions include `greylist-early-retries` and
