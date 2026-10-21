@@ -1,0 +1,137 @@
+# Standard-policy decisions use seeded observations, without DNS or SMTP reads.
+source [file join $::env(ALIAS_TEST_ROOT) tests link-policy-fixture.tcl]
+rename smtpd::collectfindings smtpd::standard_test_collectfindings
+proc smtpd::collectfindings {context findingsVar} {
+    upvar 1 $findingsVar findings
+    incr ::standardCollectorCalls
+    if {[dict get $context phase] ne "data"} {::error "Findings collection requires the DATA phase"}
+    dict set findings collected true
+    return continue
+}
+set standardCollectorCalls 0
+
+proc standard_test_decision {findings} {
+    return [{*}[link_policy_example_prefix] [dict create phase data id 1 findings $findings]]
+}
+
+test standard-example {shipped example selects the public helper and validates without collecting} -body {
+    set prefix [link_policy_example_prefix]
+    set settings [smtpd::StandardPolicyOptions [lrange $prefix 1 end]]
+    list [lindex $prefix 0] [dict get $settings rejectSpfFailWithoutDkimKey] \
+        [dict get $settings maxGreylistEarlyRetries] [llength [dict get $settings blockedLinkHosts]] \
+        $standardCollectorCalls
+} -result {smtpd::standardpolicy 1 10 2 0}
+
+test standard-reasons {authentication, retry and link checks preserve rejection reasons and precedence} -body {
+    set results {}
+    foreach findings {
+        {spf-fail true dkim-no-key true greylist-early-retries 10 link-destination-hosts voir-mon-doc-1.jimdosite.com}
+        {spf-fail true greylist-early-retries 10 link-destination-hosts voir-mon-doc-1.jimdosite.com}
+        {spf-result pass greylist-early-retries 9 link-destination-hosts voir-mon-doc-1.jimdosite.com}
+        {spf-result pass greylist-early-retries 9 link-destination-hosts statsmail.eu}
+    } {
+        set result [standard_test_decision $findings]
+        lappend results [list [dict get $result action] [dict get $result reason]]
+    }
+    list $results $standardCollectorCalls
+} -result {{{reject spf-fail-and-dkim-no-key} {reject excessive-greylist-early-retries} {reject known-spam-link-host} {accept policy-chain-end}} 4}
+
+test standard-findings {all seeded observations and recipient provenance survive an early rejection} -body {
+    set seed {spf-fail true dkim-no-key true greylist-early-retries 3 recipient-findings {one@example.test {greylist-early-retries 3}} link-destination-hosts statsmail.eu}
+    set result [standard_test_decision $seed]
+    set expected [dict merge $seed {collected true}]
+    list [expr {[dict get $result findings] eq $expected}] [dict get $result reason]
+} -result {1 spf-fail-and-dkim-no-key}
+
+test standard-threshold {threshold is inclusive and greater values also reject} -body {
+    set actions {}
+    foreach count {0 9 10 11} {
+        lappend actions [dict get [standard_test_decision [dict create greylist-early-retries $count]] action]
+    }
+    set actions
+} -result {accept accept reject reject}
+
+test standard-hosts {only configured exact hosts reject and matched host is retained} -body {
+    set results {}
+    foreach host {
+        statsmail.eu
+        accuse-de-reception-de-courrier-recommande-3.jimdosite.com
+        voir-mon-doc-1.jimdosite.com
+        sibling.jimdosite.com
+        voir-mon-doc-1.jimdosite.com.example.test
+    } {
+        set result [standard_test_decision [dict create link-destination-hosts $host]]
+        lappend results [list [dict get $result action] \
+            [expr {[dict exists $result findings blocked-link-host] ? [dict get $result findings blocked-link-host] : {}}]]
+    }
+    set results
+} -result {{accept {}} {reject accuse-de-reception-de-courrier-recommande-3.jimdosite.com} {reject voir-mon-doc-1.jimdosite.com} {accept {}} {accept {}}}
+
+test standard-normalization {configured host case and trailing dot normalize and duplicates collapse} -body {
+    set settings [smtpd::StandardPolicyOptions {-blockedLinkHosts {EXAMPLE.TEST. example.test}}]
+    set result [smtpd::standardpolicy -blockedLinkHosts {EXAMPLE.TEST.} \
+        {phase data findings {link-destination-hosts example.test}}]
+    list [dict get $settings blockedLinkHosts] [dict get $result findings blocked-link-host]
+} -result {example.test example.test}
+
+test standard-defaults {checks default disabled, even when authentication and retry findings exist} -body {
+    set result [smtpd::standardpolicy {phase data findings {spf-fail true dkim-no-key true greylist-early-retries 100}}]
+    list [dict get $result action] [dict get $result findings collected]
+} -result {accept true}
+
+test standard-disabled {explicit false and empty options disable each check} -body {
+    dict get [smtpd::standardpolicy -rejectSpfFailWithoutDkimKey false \
+        -maxGreylistEarlyRetries {} -blockedLinkHosts {} \
+        {phase data findings {spf-fail true dkim-no-key true greylist-early-retries 100 link-destination-hosts example.test}}] action
+} -result accept
+
+test standard-phase {non-DATA invocation is rejected} -body {
+    catch {smtpd::standardpolicy {phase rcpt}} message
+    set message
+} -result {Findings collection requires the DATA phase}
+
+# Exercise the startup entry point: invalid configuration must fail before
+# quarantine setup, message inspection or network-capable collectors run.
+test standard-startup-invalid {default init catches malformed options before processing messages} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set before $standardCollectorCalls
+} -body {
+    set failures {}
+    foreach options {
+        {-unknown true}
+        {-rejectSpfFailWithoutDkimKey}
+        {-rejectSpfFailWithoutDkimKey perhaps}
+        {-rejectSpfFailWithoutDkimKey true -rejectSpfFailWithoutDkimKey false}
+        {-maxGreylistEarlyRetries 0}
+        {-maxGreylistEarlyRetries -1}
+        {-maxGreylistEarlyRetries 1.5}
+        {-blockedLinkHosts {https://example.test}}
+        {-blockedLinkHosts {*.example.test}}
+        {-blockedLinkHosts {a..example.test}}
+        {-blockedLinkHosts {-bad.example.test}}
+    } {
+        ns_set update $section datapolicyproc [linsert $options 0 smtpd::standardpolicy]
+        lappend failures [catch {smtpd::init}]
+    }
+    ns_set update $section datapolicyproc "smtpd::standardpolicy \{"
+    lappend failures [catch {smtpd::init}]
+    list $failures [expr {$before == $standardCollectorCalls}]
+} -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{1 1 1 1 1 1 1 1 1 1 1 1} 1}
+
+test standard-startup-valid {startup accepts both qualified names and leaves custom callbacks unexecuted} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set before $standardCollectorCalls
+} -body {
+    set results {}
+    foreach prefix [list [link_policy_example_prefix] {::smtpd::standardpolicy -maxGreylistEarlyRetries 10} {error must-not-execute} {}] {
+        ns_set update $section datapolicyproc $prefix
+        lappend results [catch {smtpd::policyinit}]
+    }
+    list $results [expr {$before == $standardCollectorCalls}]
+} -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{0 0 0 0} 1}
+
+rename smtpd::collectfindings {}
+rename smtpd::standard_test_collectfindings smtpd::collectfindings
+unset standardCollectorCalls
