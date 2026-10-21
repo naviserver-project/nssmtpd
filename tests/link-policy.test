@@ -29,40 +29,6 @@ test link-policy-size {inspection limit is a finding rather than a rejection} -b
     list [smtpd::linkpolicy {phase data id 1} observations] [dict get $observations link-status]
 } -result {continue message-size-limit}
 
-test link-policy-example {confirmed spam hosts match exactly after normalization; unrelated hosts remain allowed} -constraints html_parser -body {
-    set actions {}
-    set rules [linsert [lrange [link_policy_example_rules] 1 end] 0 {smtpd::linkpolicy $context findings}]
-    foreach host {
-        statsmail.eu
-        accuse-de-reception-de-courrier-recommande-3.jimdosite.com
-        voir-mon-doc-1.jimdosite.com
-        ACCUSE-DE-RECEPTION-DE-COURRIER-RECOMMANDE-3.JIMDOSITE.COM.
-        unrelated.jimdosite.com
-        voir-mon-doc-1.jimdosite.com.example.test
-    } {
-        set linkPolicyBody [link_policy_message $host]
-        set decision [smtpd::policychain $rules {phase data id 1 findings {spf-result pass}}]
-        lappend actions [dict get $decision action]
-    }
-    set actions
-} -result {accept reject reject reject accept accept}
-
-test link-policy-collector-order {one standard collector precedes decision rules in the shipped example} -body {
-    lindex [link_policy_example_rules] 0
-} -result {smtpd::collectfindings $context findings}
-
-test link-policy-existing-rules {early rejection decisions retain link findings collected before the rules} -constraints html_parser -body {
-    set results {}
-    set linkPolicyBody [link_policy_message statsmail.eu]
-    foreach seed {{spf-fail true dkim-no-key true} {greylist-early-retries 10}} {
-        set decision [smtpd::policychain [linsert [lrange [link_policy_example_rules] 1 end] 0 {smtpd::linkpolicy $context findings}] \
-            [dict create phase data id 1 findings $seed]]
-        lappend results [list [dict get $decision reason] \
-            [dict get $decision findings link-destination-hosts]]
-    }
-    set results
-} -result {{spf-fail-and-dkim-no-key statsmail.eu} {excessive-greylist-early-retries statsmail.eu}}
-
 test collect-findings {single call runs all collectors in order and preserves recipient findings through caller scope} -setup {
     set collectorCalls {}
     foreach collector {spfpolicy dkimkeypolicy linkpolicy} {

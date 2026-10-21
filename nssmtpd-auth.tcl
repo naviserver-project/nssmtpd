@@ -151,6 +151,99 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
     return continue
 }
 
+# Parse the standard policy command prefix without inspecting mail or doing DNS.
+proc smtpd::StandardPolicyOptions {options} {
+    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {}}
+    if {[llength $options] % 2} {::error "standardpolicy options require name/value pairs"}
+    set seen {}
+    foreach {option value} $options {
+        set name [string range $option 1 end]
+        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts}} {
+            ::error "unknown standardpolicy option: $option"
+        }
+        if {$option in $seen} {::error "duplicate standardpolicy option: $option"}
+        lappend seen $option
+        switch -- $name {
+            rejectSpfFailWithoutDkimKey {
+                if {![string is boolean -strict $value]} {::error "$option requires a boolean"}
+                set value [expr {!!$value}]
+            }
+            maxGreylistEarlyRetries {
+                if {$value ne "" && (![string is wideinteger -strict $value] || $value <= 0)} {
+                    ::error "$option requires a positive integer or an empty value to disable"
+                }
+            }
+            blockedLinkHosts {
+                set hosts {}
+                foreach host $value {
+                    set host [string trimright [string tolower $host] .]
+                    if {[string length $host] > 253 || $host eq ""} {::error "invalid blocked link host: $host"}
+                    foreach label [split $host .] {
+                        if {![regexp {^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$} $label]} {
+                            ::error "invalid blocked link host: $host (use an exact hostname, not a URL or pattern)"
+                        }
+                    }
+                    if {$host ni $hosts} {lappend hosts $host}
+                }
+                set value $hosts
+            }
+        }
+        dict set settings $name $value
+    }
+    return $settings
+}
+
+# Validate a configured direct standardpolicy prefix at startup. Custom initproc
+# implementations must call this helper too. Custom callbacks remain untouched.
+proc smtpd::policyinit {} {
+    set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc ""]
+    if {$prefix eq ""} {return}
+    if {[lindex $prefix 0] in {smtpd::standardpolicy ::smtpd::standardpolicy}} {
+        StandardPolicyOptions [lrange $prefix 1 end]
+    }
+}
+
+# Apply the standard DATA checks after collecting all observations once.
+#
+# @param args Named options followed by the DATA context dictionary. Options:
+#        -rejectSpfFailWithoutDkimKey boolean (default false),
+#        -maxGreylistEarlyRetries positive integer or {} (default {}, disabled),
+#        -blockedLinkHosts list of exact hostnames (default {}).
+# @return Decision dictionary with action, reason and accumulated findings.
+#         Checks run in authentication, retry, link-host order. A retry limit
+#         rejects at or above the threshold; blocked-link-host names the match.
+#
+proc smtpd::standardpolicy {args} {
+    if {[llength $args] == 0} {::error "standardpolicy requires a DATA context"}
+    set settings [StandardPolicyOptions [lrange $args 0 end-1]]
+    set context [lindex $args end]
+    set findings [expr {[dict exists $context findings] ? [dict get $context findings] : {}}]
+    dict size $findings
+    collectfindings $context findings
+    set action accept
+    set reason policy-chain-end
+    if {[dict get $settings rejectSpfFailWithoutDkimKey]
+        && [dict exists $findings spf-fail] && [dict exists $findings dkim-no-key]} {
+        set action reject
+        set reason spf-fail-and-dkim-no-key
+    } elseif {[dict get $settings maxGreylistEarlyRetries] ne ""
+              && [dict exists $findings greylist-early-retries]
+              && [dict get $findings greylist-early-retries] >= [dict get $settings maxGreylistEarlyRetries]} {
+        set action reject
+        set reason excessive-greylist-early-retries
+    } elseif {[dict exists $findings link-destination-hosts]} {
+        foreach host [dict get $findings link-destination-hosts] {
+            if {$host in [dict get $settings blockedLinkHosts]} {
+                dict set findings blocked-link-host $host
+                set action reject
+                set reason known-spam-link-host
+                break
+            }
+        }
+    }
+    return [dict create action $action reason $reason findings $findings]
+}
+
 # Collect the standard DATA-policy observations before making delivery decisions.
 #
 # @param context DATA-policy context containing id, phase, peeraddr, sender and helo.

@@ -1031,6 +1031,44 @@ ns_param datapolicyproc {
 }
 ```
 
+For the common authentication, retry and exact-link-host checks, prefer the
+validated command prefix below instead of embedding Tcl decision scripts:
+
+```tcl
+ns_param datapolicyproc {
+    smtpd::standardpolicy
+    -rejectSpfFailWithoutDkimKey true
+    -maxGreylistEarlyRetries 10
+    -blockedLinkHosts {
+        accuse-de-reception-de-courrier-recommande-3.jimdosite.com
+        voir-mon-doc-1.jimdosite.com
+    }
+}
+```
+
+`smtpd::standardpolicy` calls `collectfindings` once, preserving seeded recipient
+and greylisting findings. It checks authentication first, then retry count, then
+link hosts. Rejection reasons remain `spf-fail-and-dkim-no-key`,
+`excessive-greylist-early-retries` and `known-spam-link-host`; a link rejection
+also records `blocked-link-host`. No match returns `accept: policy-chain-end`.
+The retry threshold is inclusive: 10 rejects at 10 or more early retries.
+
+All checks default to disabled: the boolean defaults to false, the retry limit
+to `{}` and the host list to `{}`. Hostnames are exact matches, normalized to
+lower case without a trailing dot; URLs and wildcard patterns are invalid.
+Use ASCII/punycode hostnames. This does not block the entire hosting domain.
+
+The default `smtpd::init` calls `smtpd::policyinit` to validate a direct
+`smtpd::standardpolicy` or `::smtpd::standardpolicy` prefix at startup without
+inspecting messages or doing DNS. Unknown/duplicate options, invalid booleans,
+nonpositive retry limits and invalid hosts produce startup errors. Custom
+`initproc` callbacks must call `smtpd::policyinit` as well. Options are also
+validated on invocation; a runtime failure is handled as a temporary policy
+failure. Validation does not execute arbitrary custom policy callbacks.
+
+See [the complete quarantine configuration example](examples/datapolicy-config.tcl).
+`policychain` and the individual collectors remain available for custom rules.
+
 Use `{smtpd::collectfindings $context findings}` as the first DATA-chain rule.
 This public helper collects SPF, DKIM-key and link findings in order, preserving
 existing recipient/greylisting findings before any decision can reject the mail.

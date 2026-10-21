@@ -92,6 +92,7 @@ source [file join $::env(ALIAS_TEST_ROOT) tests spf-tcl.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests spf-auto.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests auth-details.test]
 source [file join $::env(ALIAS_TEST_ROOT) tests link-policy.test]
+source [file join $::env(ALIAS_TEST_ROOT) tests standard-policy.test]
 
 set failures $::tcltest::numTests(Failed)
 cleanupTests

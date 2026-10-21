@@ -348,6 +348,7 @@ proc smtpd::ExpandFileAlias {format map domains recipient path budgetVar} {
 
 proc smtpd::init {} {
 
+    smtpd::policyinit
     smtpd::quarantineinit
     set path "ns/server/[ns_info server]/module/nssmtpd"
     ns_smtpd relay set {*}[ns_config $path relaydomains "localhost"]
