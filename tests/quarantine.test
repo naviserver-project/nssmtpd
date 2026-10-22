@@ -215,6 +215,25 @@ test quarantine-link-policy {shipped policy holds known spam links and preserves
         [expr {[llength [header_messages]] == $beforeRelay}]
 } -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 held known-spam-link-host voir-mon-doc-1.jimdosite.com 1}
 
+
+test quarantine-link-domain {shipped domain rule holds today's rotating spam subdomain without relaying} -setup {
+    set savedRules [nsv_get alias-test data-rules]
+    nsv_set alias-test data-rules [link_policy_example_rules]
+    set beforeIds [smtpd::QuarantineIds]
+    set beforeRelay [llength [header_messages]]
+} -body {
+    set host checkout-9ffe0d909f01c1c727604804fc1d7b2e-checkout.renewplean.sbs
+    set reply [header_submit [link_policy_message $host]]
+    set newIds {}
+    foreach entry [smtpd::QuarantineIds] {if {$entry ni $beforeIds} {lappend newIds $entry}}
+    set metadata [smtpd::quarantine show [lindex $newIds 0]]
+    list $reply [llength $newIds] [dict get $metadata state] \
+        [dict get $metadata decision reason] \
+        [expr {[dict get $metadata decision findings blocked-link-host] eq $host}] \
+        [dict get $metadata decision findings blocked-link-domain] \
+        [expr {[llength [header_messages]] == $beforeRelay}]
+} -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 held known-spam-link-domain 1 renewplean.sbs 1}
+
 test quarantine-link-policy-allowed {unrelated link host continues through the full policy and relay} -setup {
     set savedRules [nsv_get alias-test data-rules]
     nsv_set alias-test data-rules [link_policy_example_rules]

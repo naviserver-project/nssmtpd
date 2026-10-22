@@ -19,8 +19,8 @@ test standard-example {shipped example selects the public helper and validates w
     set settings [smtpd::StandardPolicyOptions [lrange $prefix 1 end]]
     list [lindex $prefix 0] [dict get $settings rejectSpfFailWithoutDkimKey] \
         [dict get $settings maxGreylistEarlyRetries] [llength [dict get $settings blockedLinkHosts]] \
-        $standardCollectorCalls
-} -result {smtpd::standardpolicy 1 10 2 0}
+        [dict get $settings blockedLinkDomains] $standardCollectorCalls
+} -result {smtpd::standardpolicy 1 10 4 renewplean.sbs 0}
 
 test standard-reasons {authentication, retry and link checks preserve rejection reasons and precedence} -body {
     set results {}
@@ -81,7 +81,7 @@ test standard-defaults {checks default disabled, even when authentication and re
 
 test standard-disabled {explicit false and empty options disable each check} -body {
     dict get [smtpd::standardpolicy -rejectSpfFailWithoutDkimKey false \
-        -maxGreylistEarlyRetries {} -blockedLinkHosts {} \
+        -maxGreylistEarlyRetries {} -blockedLinkHosts {} -blockedLinkDomains {} \
         {phase data findings {spf-fail true dkim-no-key true greylist-early-retries 100 link-destination-hosts example.test}}] action
 } -result accept
 
@@ -131,6 +131,56 @@ test standard-startup-valid {startup accepts both qualified names and leaves cus
     }
     list $results [expr {$before == $standardCollectorCalls}]
 } -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{0 0 0 0} 1}
+
+
+test standard-domains {domains include themselves and subdomains but exclude suffix lookalikes} -body {
+    set results {}
+    foreach host {renewplean.sbs a.renewplean.sbs a.b.renewplean.sbs notrenewplean.sbs renewplean.sbs.example.test renewplean.sbsx} {
+        set result [standard_test_decision [dict create link-destination-hosts $host]]
+        lappend results [dict get $result action]
+    }
+    set results
+} -result {reject reject reject accept accept accept}
+
+test standard-today-hosts {today's exact spam hosts reject without blocking their subdomains} -body {
+    set results {}
+    foreach host {mofferbg.eu top-mixx.com sub.mofferbg.eu sub.top-mixx.com} {
+        lappend results [dict get [standard_test_decision [dict create link-destination-hosts $host]] action]
+    }
+    set results
+} -result {reject reject accept accept}
+
+test standard-domain-findings {domain normalization and rejection preserve observations and recipient provenance} -body {
+    set settings [smtpd::StandardPolicyOptions {-blockedLinkDomains {EXAMPLE.TEST. example.test}}]
+    set result [smtpd::standardpolicy -blockedLinkDomains {EXAMPLE.TEST.} \
+        {phase data findings {link-destination-hosts a.example.test recipient-findings {one@example.test {greylist-early-retries 2}}}}]
+    list [dict get $settings blockedLinkDomains] [dict get $result reason] \
+        [dict get $result findings blocked-link-host] [dict get $result findings blocked-link-domain] \
+        [dict get $result findings recipient-findings] [dict get $result findings collected]
+} -result {example.test known-spam-link-domain a.example.test example.test {one@example.test {greylist-early-retries 2}} true}
+
+test standard-exact-precedence {exact matches retain their reason even after a domain-matching destination} -body {
+    set result [smtpd::standardpolicy -blockedLinkHosts exact.example.test -blockedLinkDomains example.test \
+        {phase data findings {link-destination-hosts {sub.example.test exact.example.test}}}]
+    list [dict get $result reason] [dict get $result findings blocked-link-host] \
+        [dict exists $result findings blocked-link-domain]
+} -result {known-spam-link-host exact.example.test 0}
+
+test standard-domain-startup {invalid domains fail startup without collecting findings} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set before $standardCollectorCalls
+} -body {
+    set results {}
+    foreach domains {https://example.test *.example.test a..example.test -bad.example.test {}} {
+        if {$domains eq {}} {set domains [list {}]}
+        ns_set update $section datapolicyproc [list smtpd::standardpolicy -blockedLinkDomains $domains]
+        lappend results [catch {smtpd::policyinit}]
+    }
+    ns_set update $section datapolicyproc {smtpd::standardpolicy -blockedLinkDomains example.test -blockedLinkDomains other.test}
+    lappend results [catch {smtpd::policyinit}]
+    list $results [expr {$before == $standardCollectorCalls}]
+} -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{1 1 1 1 1 1} 1}
 
 rename smtpd::collectfindings {}
 rename smtpd::standard_test_collectfindings smtpd::collectfindings

@@ -1,4 +1,5 @@
-# Exact hosts observed in operator-confirmed spam, not a general reputation list.
+# Destinations observed in operator-confirmed spam, not a reputation service.
+# Host entries match exactly; domain entries include every subdomain.
 # Source during server configuration, replacing an existing datapolicyproc.
 # smtpd::init validates standardpolicy options before normal SMTP processing.
 ns_section ns/server/$server/module/nssmtpd {
@@ -11,6 +12,11 @@ ns_section ns/server/$server/module/nssmtpd {
         -blockedLinkHosts {
             accuse-de-reception-de-courrier-recommande-3.jimdosite.com
             voir-mon-doc-1.jimdosite.com
+            mofferbg.eu
+            top-mixx.com
+        }
+        -blockedLinkDomains {
+            renewplean.sbs
         }
     }
 }

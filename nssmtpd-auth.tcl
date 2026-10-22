@@ -153,12 +153,12 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
 
 # Parse the standard policy command prefix without inspecting mail or doing DNS.
 proc smtpd::StandardPolicyOptions {options} {
-    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {}}
+    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {} blockedLinkDomains {}}
     if {[llength $options] % 2} {::error "standardpolicy options require name/value pairs"}
     set seen {}
     foreach {option value} $options {
         set name [string range $option 1 end]
-        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts}} {
+        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts -blockedLinkDomains}} {
             ::error "unknown standardpolicy option: $option"
         }
         if {$option in $seen} {::error "duplicate standardpolicy option: $option"}
@@ -173,14 +173,16 @@ proc smtpd::StandardPolicyOptions {options} {
                     ::error "$option requires a positive integer or an empty value to disable"
                 }
             }
-            blockedLinkHosts {
+            blockedLinkHosts -
+            blockedLinkDomains {
+                set kind [expr {$name eq "blockedLinkDomains" ? "domain" : "host"}]
                 set hosts {}
                 foreach host $value {
                     set host [string trimright [string tolower $host] .]
-                    if {[string length $host] > 253 || $host eq ""} {::error "invalid blocked link host: $host"}
+                    if {[string length $host] > 253 || $host eq ""} {::error "invalid blocked link $kind: $host"}
                     foreach label [split $host .] {
                         if {![regexp {^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$} $label]} {
-                            ::error "invalid blocked link host: $host (use an exact hostname, not a URL or pattern)"
+                            ::error "invalid blocked link $kind: $host (use an exact hostname, not a URL or pattern)"
                         }
                     }
                     if {$host ni $hosts} {lappend hosts $host}
@@ -208,10 +210,14 @@ proc smtpd::policyinit {} {
 # @param args Named options followed by the DATA context dictionary. Options:
 #        -rejectSpfFailWithoutDkimKey boolean (default false),
 #        -maxGreylistEarlyRetries positive integer or {} (default {}, disabled),
-#        -blockedLinkHosts list of exact hostnames (default {}).
+#        -blockedLinkHosts list of exact hostnames (default {}),
+#        -blockedLinkDomains list of domains and their subdomains (default {}).
 # @return Decision dictionary with action, reason and accumulated findings.
 #         Checks run in authentication, retry, link-host order. A retry limit
-#         rejects at or above the threshold; blocked-link-host names the match.
+#         rejects at or above the threshold. Exact host rules take precedence
+#         over domain rules. blocked-link-host names the actual destination;
+#         domain matches also record blocked-link-domain and return reason
+#         known-spam-link-domain. Domain matching requires a dot boundary.
 #
 proc smtpd::standardpolicy {args} {
     if {[llength $args] == 0} {::error "standardpolicy requires a DATA context"}
@@ -238,6 +244,22 @@ proc smtpd::standardpolicy {args} {
                 set action reject
                 set reason known-spam-link-host
                 break
+            }
+        }
+        if {$action eq "accept"} {
+            foreach host [dict get $findings link-destination-hosts] {
+                foreach domain [dict get $settings blockedLinkDomains] {
+                    # The leading dot excludes lookalike names and unrelated
+                    # suffixes. Configured names contain no glob characters.
+                    if {$host eq $domain || [string match *.$domain $host]} {
+                        dict set findings blocked-link-host $host
+                        dict set findings blocked-link-domain $domain
+                        set action reject
+                        set reason known-spam-link-domain
+                        break
+                    }
+                }
+                if {$action eq "reject"} {break}
             }
         }
     }

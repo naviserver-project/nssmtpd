@@ -26,7 +26,7 @@ Trusted/local and authenticated submission bypasses remain in effect; test with
 an untrusted client. DATA policy buffers relay mail up to `maxdata`.
 
 Use `smtpd::standardpolicy` for the supported authentication, retry-count and
-exact-link-host checks. See [custom policy callbacks](policy-reference.md) only
+exact-link-host and domain checks. See [custom policy callbacks](policy-reference.md) only
 when those options do not express the rule you need.
 
 ## Enable greylisting and preserve its state
@@ -286,12 +286,12 @@ Outbound MX routing remains separate.
 
 ## Apply validated DATA rules
 
-For the common authentication, retry and exact-link-host checks, prefer the
+For the common authentication, retry, exact-link-host and domain checks, prefer the
 validated command prefix below instead of embedding Tcl decision scripts:
 
-The link-host list below comes from operator-confirmed spam examples. Maintain
-an exact list based on your own review; it does not block every site on the
-same hosting service. See [quarantine review](quarantine.md) for held messages.
+The lists below come from operator-confirmed spam examples. Keep shared-hosting
+entries narrow: the Jimdo entries match exact sites, while the dedicated
+`renewplean.sbs` entry includes its subdomains. See [quarantine review](quarantine.md) for held messages.
 
 ```tcl
 ns_param datapolicyproc {
@@ -301,21 +301,33 @@ ns_param datapolicyproc {
     -blockedLinkHosts {
         accuse-de-reception-de-courrier-recommande-3.jimdosite.com
         voir-mon-doc-1.jimdosite.com
+        mofferbg.eu
+        top-mixx.com
+    }
+    -blockedLinkDomains {
+        renewplean.sbs
     }
 }
 ```
 
 `smtpd::standardpolicy` calls `collectfindings` once, preserving seeded recipient
 and greylisting findings. It checks authentication first, then retry count, then
-link hosts. Rejection reasons remain `spf-fail-and-dkim-no-key`,
-`excessive-greylist-early-retries` and `known-spam-link-host`; a link rejection
-also records `blocked-link-host`. No match returns `accept: policy-chain-end`.
+exact hosts, then domains. Existing rejection reasons remain
+`spf-fail-and-dkim-no-key`, `excessive-greylist-early-retries` and
+`known-spam-link-host`. Domain matches use `known-spam-link-domain`, record the
+configured `blocked-link-domain`, and retain the actual `blocked-link-host`.
+Exact-host matches take precedence even when another destination matches a domain. No match returns `accept: policy-chain-end`.
 The retry threshold is inclusive: 10 rejects at 10 or more early retries.
 
 All checks default to disabled: the boolean defaults to false, the retry limit
-to `{}` and the host list to `{}`. Hostnames are exact matches, normalized to
-lower case without a trailing dot; URLs and wildcard patterns are invalid.
-Use ASCII/punycode hostnames. This does not block the entire hosting domain.
+to `{}` and both link lists to `{}`. Both lists normalize names to lower case
+without a trailing dot; URLs and wildcard patterns are invalid. Use
+ASCII/punycode names. `-blockedLinkHosts` remains exact: it does not match
+subdomains. `-blockedLinkDomains` matches the named domain and descendants at a
+DNS-label boundary. For `renewplean.sbs`, `a.renewplean.sbs` matches, but
+`notrenewplean.sbs` and `renewplean.sbs.example.org` do not. The matcher does not
+perform DNS lookups or public-suffix/reputation checks; choose domain-wide
+entries only when that scope is intended.
 
 The default `smtpd::init` calls `smtpd::policyinit` to validate a direct
 `smtpd::standardpolicy` or `::smtpd::standardpolicy` prefix at startup without
