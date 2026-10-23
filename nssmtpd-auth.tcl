@@ -153,12 +153,12 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
 
 # Parse the standard policy command prefix without inspecting mail or doing DNS.
 proc smtpd::StandardPolicyOptions {options} {
-    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {} blockedLinkDomains {}}
+    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {} blockedLinkDomains {} localDkimDomains {}}
     if {[llength $options] % 2} {::error "standardpolicy options require name/value pairs"}
     set seen {}
     foreach {option value} $options {
         set name [string range $option 1 end]
-        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts -blockedLinkDomains}} {
+        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts -blockedLinkDomains -localDkimDomains}} {
             ::error "unknown standardpolicy option: $option"
         }
         if {$option in $seen} {::error "duplicate standardpolicy option: $option"}
@@ -174,15 +174,17 @@ proc smtpd::StandardPolicyOptions {options} {
                 }
             }
             blockedLinkHosts -
-            blockedLinkDomains {
-                set kind [expr {$name eq "blockedLinkDomains" ? "domain" : "host"}]
+            blockedLinkDomains -
+            localDkimDomains {
+                set kind [expr {$name eq "blockedLinkHosts" ? "host" : "domain"}]
+                set subject [expr {$name eq "localDkimDomains" ? "local DKIM domain" : "blocked link $kind"}]
                 set hosts {}
                 foreach host $value {
                     set host [string trimright [string tolower $host] .]
-                    if {[string length $host] > 253 || $host eq ""} {::error "invalid blocked link $kind: $host"}
+                    if {[string length $host] > 253 || $host eq ""} {::error "invalid $subject: $host"}
                     foreach label [split $host .] {
                         if {![regexp {^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$} $label]} {
-                            ::error "invalid blocked link $kind: $host (use an exact hostname, not a URL or pattern)"
+                            ::error "invalid $subject: $host (use an exact hostname, not a URL or pattern)"
                         }
                     }
                     if {$host ni $hosts} {lappend hosts $host}
@@ -193,6 +195,60 @@ proc smtpd::StandardPolicyOptions {options} {
         dict set settings $name $value
     }
     return $settings
+}
+
+# Evaluate only explicit local DKIM claims, not From/envelope identities or
+# cryptographic authentication. No extra DNS work is performed. A possible
+# alternative local signature or an inspection gap prevents this rejection.
+proc smtpd::StandardPolicyLocalDkim {domains findingsVar} {
+    upvar 1 $findingsVar findings
+    if {$domains eq ""} {return false}
+    foreach key {local-dkim-status local-dkim-domains local-dkim-signatures local-dkim-unusable-signatures local-dkim-inconclusive-signatures local-dkim-inspection-limited} {
+        dict unset findings $key
+    }
+    set claimed {}; set local {}; set unusable {}; set uncertain {}
+    set limited false
+    if {![dict exists $findings dkim-signatures]
+        || ![string is integer -strict [dict get $findings dkim-signatures]]
+        || [dict get $findings dkim-signatures] < 0} {
+        set limited true
+        set count 0
+    } else {
+        set count [dict get $findings dkim-signatures]
+        if {$count > 8 || [dict exists $findings dkim-limit]} {set limited true}
+    }
+    for {set index 1} {$index <= min($count,8)} {incr index} {
+        set prefix dkim-$index
+        if {![dict exists $findings $prefix-domain]} {
+            # Explicit malformed tags cannot provide a usable alternative.
+            # Missing observations, however, are not proof of invalidity.
+            if {![dict exists $findings $prefix-key]
+                || [dict get $findings $prefix-key] ne "invalid-signature-tags"} {set limited true}
+            continue
+        }
+        set domain [string trimright [string tolower [dict get $findings $prefix-domain]] .]
+        if {$domain ni $domains} continue
+        lappend local $index
+        if {$domain ni $claimed} {lappend claimed $domain}
+        set algorithm [expr {[dict exists $findings $prefix-algorithm] ? [dict get $findings $prefix-algorithm] : ""}]
+        set key [expr {[dict exists $findings $prefix-key] ? [dict get $findings $prefix-key] : ""}]
+        if {$algorithm eq "rsa-sha1" || $key in {no-key revoked-key}} {
+            lappend unusable $index
+        } else {
+            # A published key is only a possible alternative, not verification.
+            # DNS failures, unknown algorithms and malformed key records also
+            # remain inconclusive rather than being treated as absent keys.
+            lappend uncertain $index
+        }
+    }
+    set suspect [expr {$unusable ne "" && $uncertain eq "" && !$limited}]
+    dict set findings local-dkim-status [expr {$suspect ? "suspect" : (($uncertain ne "" || $limited) ? "inconclusive" : "no-local-claim")}]
+    dict set findings local-dkim-domains $claimed
+    dict set findings local-dkim-signatures $local
+    dict set findings local-dkim-unusable-signatures $unusable
+    dict set findings local-dkim-inconclusive-signatures $uncertain
+    dict set findings local-dkim-inspection-limited $limited
+    return $suspect
 }
 
 # Validate a configured direct standardpolicy prefix at startup. Custom initproc
@@ -211,9 +267,14 @@ proc smtpd::policyinit {} {
 #        -rejectSpfFailWithoutDkimKey boolean (default false),
 #        -maxGreylistEarlyRetries positive integer or {} (default {}, disabled),
 #        -blockedLinkHosts list of exact hostnames (default {}),
-#        -blockedLinkDomains list of domains and their subdomains (default {}).
+#        -blockedLinkDomains list of domains and their subdomains (default {}),
+#        -localDkimDomains exact domains whose unusable DKIM claims are checked
+#        (default {}, disabled). This is not cryptographic verification.
 # @return Decision dictionary with action, reason and accumulated findings.
-#         Checks run in authentication, retry, link-host order. A retry limit
+#         Checks run in authentication, local DKIM, retry, link-host order.
+#         Local DKIM findings retain signature indexes and uncertainty; rejection
+#         uses reason local-domain-impersonation. Enable quarantinePolicyRejects
+#         to hold rejected mail; otherwise the existing reject behavior applies. A retry limit
 #         rejects at or above the threshold. Exact host rules take precedence
 #         over domain rules. blocked-link-host names the actual destination;
 #         domain matches also record blocked-link-domain and return reason
@@ -232,6 +293,9 @@ proc smtpd::standardpolicy {args} {
         && [dict exists $findings spf-fail] && [dict exists $findings dkim-no-key]} {
         set action reject
         set reason spf-fail-and-dkim-no-key
+    } elseif {[StandardPolicyLocalDkim [dict get $settings localDkimDomains] findings]} {
+        set action reject
+        set reason local-domain-impersonation
     } elseif {[dict get $settings maxGreylistEarlyRetries] ne ""
               && [dict exists $findings greylist-early-retries]
               && [dict get $findings greylist-early-retries] >= [dict get $settings maxGreylistEarlyRetries]} {

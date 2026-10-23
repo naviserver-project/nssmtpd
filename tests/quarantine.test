@@ -234,6 +234,37 @@ test quarantine-link-domain {shipped domain rule holds today's rotating spam sub
         [expr {[llength [header_messages]] == $beforeRelay}]
 } -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 held known-spam-link-domain 1 renewplean.sbs 1}
 
+
+test quarantine-local-dkim {unusable local-domain claim is durably held with findings and no relay delivery} -setup {
+    set savedRules [nsv_get alias-test data-rules]
+    nsv_set alias-test data-rules {{
+        rename ::smtpd::AuthDns ::smtpd::local_test_saved_dns
+        set missingDns [expr {[namespace which -command ::ns_dns] eq ""}]
+        if {$missingDns} {proc ::ns_dns {args} {error unexpected}}
+        proc ::smtpd::AuthDns {name timeout} {return {rcode 3 truncated 0 answer {}}}
+        try {
+            set decision [smtpd::standardpolicy -localDkimDomains openacs.org $context]
+        } finally {
+            rename ::smtpd::AuthDns {}
+            rename ::smtpd::local_test_saved_dns ::smtpd::AuthDns
+            if {$missingDns} {rename ::ns_dns {}}
+        }
+        return $decision
+    }}
+    set beforeIds [smtpd::QuarantineIds]
+    set beforeRelay [llength [header_messages]]
+} -body {
+    set message "DKIM-Signature: v=1; a=rsa-sha256; d=openacs.org; s=smtp; b=AAAA; bh=AAAA\r\n[link_policy_message statsmail.eu]"
+    set reply [header_submit $message]
+    set newIds {}
+    foreach entry [smtpd::QuarantineIds] {if {$entry ni $beforeIds} {lappend newIds $entry}}
+    set metadata [smtpd::quarantine show [lindex $newIds 0]]
+    list $reply [llength $newIds] [dict get $metadata state] [dict get $metadata decision reason] \
+        [dict get $metadata decision findings local-dkim-status] [dict get $metadata decision findings dkim-1-key] \
+        [dict exists $metadata decision recipient-findings] \
+        [expr {[llength [header_messages]] == $beforeRelay}]
+} -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 held local-domain-impersonation suspect no-key 1 1}
+
 test quarantine-link-policy-allowed {unrelated link host continues through the full policy and relay} -setup {
     set savedRules [nsv_get alias-test data-rules]
     nsv_set alias-test data-rules [link_policy_example_rules]

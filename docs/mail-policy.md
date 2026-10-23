@@ -297,6 +297,7 @@ entries narrow: the Jimdo entries match exact sites, while the dedicated
 ns_param datapolicyproc {
     smtpd::standardpolicy
     -rejectSpfFailWithoutDkimKey true
+    -localDkimDomains {openacs.org}
     -maxGreylistEarlyRetries 10
     -blockedLinkHosts {
         accuse-de-reception-de-courrier-recommande-3.jimdosite.com
@@ -389,3 +390,40 @@ with DATA to confirm delivery. An unknown local recipient should still receive
 `550 Unknown recipient`, and an unrelated external destination should still
 receive `550 ... Relaying denied`. Confirm outgoing OpenACS mail still works.
 A manual `ns_smtpd resolve` does not exercise this incoming policy.
+
+### Quarantine unusable DKIM claims for local domains
+
+Opt in with `-localDkimDomains {openacs.org}`. Names are normalized for case and
+trailing dots, validated at startup, and match exactly: subdomains must be
+listed explicitly. The empty default disables this check. The example enables
+`quarantinePolicyRejects true`, so a rejection is held for review; without that
+setting the normal 550 rejection behavior applies.
+
+The check uses the existing bounded DKIM findings without extra DNS queries.
+It returns reason `local-domain-impersonation` only when at least one signature
+claims a listed domain and every such inspected claim has `no-key`, `revoked-key`
+or algorithm `rsa-sha1`. An obsolete algorithm is independently unusable even
+when its DNS lookup failed. A DNS timeout, SERVFAIL, unavailable resolver,
+truncation, unresolved CNAME, malformed/multiple key records or missing
+observations never count as a missing key. A signature-count inspection limit
+prevents this check from rejecting, because an unseen local alternative might
+exist. Other enabled rules still apply independently.
+
+Any other inspected local signature makes the result inconclusive, including
+`key-present-not-verified`: it might be a usable alternative, but is not claimed
+to be authenticated. Unrelated third-party signatures do not authenticate a
+local claim and do not bypass this check. SPF pass is not an exemption: the SPF
+identity and claimed DKIM identity can differ. Unsigned mail and the null
+sender alone do not trigger this rule. This is a conservative DKIM-claim
+heuristic, not full From-address impersonation detection, DKIM verification or
+DMARC. An attacker can imitate a published local selector; key availability
+cannot detect that forgery. Key removal and old forwarded signatures can also
+cause false positives, which is why quarantine and review are recommended.
+
+Findings include `local-dkim-status` (`suspect`, `inconclusive`, or
+`no-local-claim`), normalized `local-dkim-domains`, inspected local signature
+indexes in `local-dkim-signatures`, `local-dkim-unusable-signatures`,
+`local-dkim-inconclusive-signatures`, and `local-dkim-inspection-limited`.
+Original per-signature and recipient findings are preserved. The check runs
+after the existing SPF-fail/no-key rule and before retry/link decisions;
+existing reasons keep their precedence.

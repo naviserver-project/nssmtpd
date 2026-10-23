@@ -19,8 +19,8 @@ test standard-example {shipped example selects the public helper and validates w
     set settings [smtpd::StandardPolicyOptions [lrange $prefix 1 end]]
     list [lindex $prefix 0] [dict get $settings rejectSpfFailWithoutDkimKey] \
         [dict get $settings maxGreylistEarlyRetries] [llength [dict get $settings blockedLinkHosts]] \
-        [dict get $settings blockedLinkDomains] $standardCollectorCalls
-} -result {smtpd::standardpolicy 1 10 4 renewplean.sbs 0}
+        [dict get $settings blockedLinkDomains] [dict get $settings localDkimDomains] $standardCollectorCalls
+} -result {smtpd::standardpolicy 1 10 4 renewplean.sbs openacs.org 0}
 
 test standard-reasons {authentication, retry and link checks preserve rejection reasons and precedence} -body {
     set results {}
@@ -181,6 +181,103 @@ test standard-domain-startup {invalid domains fail startup without collecting fi
     lappend results [catch {smtpd::policyinit}]
     list $results [expr {$before == $standardCollectorCalls}]
 } -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{1 1 1 1 1 1} 1}
+
+
+proc standard_local_result {findings {domains openacs.org}} {
+    smtpd::standardpolicy -localDkimDomains $domains [dict create phase data findings $findings]
+}
+
+test standard-local-definitive {absent/revoked keys and obsolete algorithms produce a local-claim rejection, independent of SPF} -body {
+    set out {}
+    foreach signature {
+        {dkim-1-domain openacs.org dkim-1-key no-key dkim-1-algorithm rsa-sha256}
+        {dkim-1-domain openacs.org dkim-1-key revoked-key dkim-1-algorithm rsa-sha256}
+        {dkim-1-domain openacs.org dkim-1-key key-present-not-verified dkim-1-algorithm rsa-sha1}
+        {dkim-1-domain openacs.org dkim-1-key lookup-timeout dkim-1-algorithm rsa-sha1}
+    } {
+        set result [standard_local_result [dict merge {dkim-signatures 1 spf-result pass} $signature]]
+        lappend out [dict get $result reason] [dict get $result findings local-dkim-status]
+    }
+    set out
+} -result {local-domain-impersonation suspect local-domain-impersonation suspect local-domain-impersonation suspect local-domain-impersonation suspect}
+
+test standard-local-dns-uncertainty {DNS uncertainty, malformed keys and unverified key presence cannot become no-key evidence} -body {
+    set out {}
+    foreach key {lookup-timeout lookup-error dns-unavailable truncated-response unresolved-cname dns-rcode-2 invalid-key-record multiple-key-records key-present-not-verified} {
+        set result [standard_local_result [dict create dkim-signatures 1 dkim-1-domain openacs.org \
+            dkim-1-algorithm rsa-sha256 dkim-1-key $key]]
+        lappend out [list [dict get $result action] [dict get $result findings local-dkim-status]]
+    }
+    set out
+} -result {{accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive} {accept inconclusive}}
+
+test standard-local-multiple {alternative local signatures prevent a rejection; unrelated signatures cannot authenticate the local claim} -body {
+    set base {dkim-signatures 2 dkim-1-domain openacs.org dkim-1-key no-key dkim-1-algorithm rsa-sha256}
+    set out {}
+    foreach second {
+        {dkim-2-domain openacs.org dkim-2-key key-present-not-verified dkim-2-algorithm rsa-sha256}
+        {dkim-2-domain openacs.org dkim-2-key lookup-timeout dkim-2-algorithm rsa-sha256}
+        {dkim-2-domain foreign.test dkim-2-key key-present-not-verified dkim-2-algorithm rsa-sha256}
+        {dkim-2-domain foreign.test dkim-2-key dns-rcode-2 dkim-2-algorithm rsa-sha256}
+        {dkim-2-domain openacs.org dkim-2-key no-key dkim-2-algorithm rsa-sha256}
+    } {
+        set result [standard_local_result [dict merge $base $second]]
+        lappend out [list [dict get $result action] [dict get $result findings local-dkim-status] \
+            [dict get $result findings local-dkim-unusable-signatures] [dict get $result findings local-dkim-inconclusive-signatures]]
+    }
+    set out
+} -result {{accept inconclusive 1 2} {accept inconclusive 1 2} {reject suspect 1 {}} {reject suspect 1 {}} {reject suspect {1 2} {}}}
+
+test standard-local-inspection-gaps {signature limits and missing observations prevent rejection even after an unusable local claim} -body {
+    set out {}
+    foreach findings {
+        {dkim-signatures 9 dkim-1-domain openacs.org dkim-1-key no-key}
+        {dkim-signatures 2 dkim-1-domain openacs.org dkim-1-key no-key}
+        {dkim-signatures 1 dkim-1-domain openacs.org dkim-1-key no-key dkim-limit exceeded}
+        {}
+    } {
+        set result [standard_local_result $findings]
+        lappend out [dict get $result action] [dict get $result findings local-dkim-inspection-limited]
+    }
+    set out
+} -result {accept true accept true accept true accept true}
+
+test standard-local-exact-domains {configuration normalization is exact and opt-in; unsigned and foreign claims do not trigger} -body {
+    set out {}
+    foreach domain {OPENACS.ORG. sub.openacs.org notopenacs.org openacs.org.example.test foreign.test} {
+        set result [standard_local_result [dict create dkim-signatures 1 dkim-1-domain $domain dkim-1-key no-key] {OPENACS.ORG. openacs.org}]
+        lappend out [dict get $result action]
+    }
+    lappend out [dict get [standard_local_result {dkim-signatures 0 dkim-status unsigned}] action]
+    lappend out [dict get [standard_local_result {dkim-signatures 1 dkim-1-domain openacs.org dkim-1-key no-key} {}] action]
+    set out
+} -result {reject accept accept accept accept accept accept}
+
+test standard-local-provenance {local evidence retains original signature and recipient findings, including multiple configured domains} -body {
+    set result [standard_local_result {dkim-signatures 2 dkim-1-domain OPENACS.ORG dkim-1-key no-key \
+        dkim-2-domain dotlrn.org dkim-2-key revoked-key recipient-findings {webmaster@openacs.org {greylist-early-retries 0}}} {openacs.org dotlrn.org}]
+    list [dict get $result findings local-dkim-domains] [dict get $result findings local-dkim-signatures] \
+        [dict get $result findings dkim-1-key] [dict get $result findings recipient-findings] [dict get $result findings collected]
+} -result {{openacs.org dotlrn.org} {1 2} no-key {webmaster@openacs.org {greylist-early-retries 0}} true}
+
+test standard-local-startup {malformed domains and duplicate options fail validation before message collection} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set before $standardCollectorCalls
+} -body {
+    set results {}
+    foreach domains {https://openacs.org *.openacs.org a..openacs.org -bad.openacs.org} {
+        ns_set update $section datapolicyproc [list smtpd::standardpolicy -localDkimDomains $domains]
+        lappend results [catch {smtpd::policyinit}]
+    }
+    ns_set update $section datapolicyproc {smtpd::standardpolicy -localDkimDomains openacs.org -localDkimDomains dotlrn.org}
+    lappend results [catch {smtpd::policyinit}]
+    ns_set update $section datapolicyproc {smtpd::standardpolicy -localDkimDomains {OPENACS.ORG. openacs.org}}
+    lappend results [catch {smtpd::policyinit}]
+    list $results [expr {$before == $standardCollectorCalls}]
+} -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{1 1 1 1 1 0} 1}
+
+rename standard_local_result {}
 
 rename smtpd::collectfindings {}
 rename smtpd::standard_test_collectfindings smtpd::collectfindings

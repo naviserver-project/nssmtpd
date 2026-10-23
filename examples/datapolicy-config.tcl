@@ -8,6 +8,7 @@ ns_section ns/server/$server/module/nssmtpd {
     ns_param datapolicyproc {
         smtpd::standardpolicy
         -rejectSpfFailWithoutDkimKey true
+        -localDkimDomains {openacs.org}
         -maxGreylistEarlyRetries 10
         -blockedLinkHosts {
             accuse-de-reception-de-courrier-recommande-3.jimdosite.com
