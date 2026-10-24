@@ -60,6 +60,21 @@ Each opaque ID identifies two private files:
 
 ## Inspect and release held messages
 
+The nsstats quarantine list shows a **Signal** column next to the policy reason.
+Inspection shows the label and its basis. These labels describe the triggering
+rule, not a verified spam verdict or a numeric probability:
+
+| Signal | Triggering policy reasons |
+| --- | --- |
+| Strong | Operator-configured spam link host/domain; guarded local-domain DKIM impersonation |
+| Weak | SPF softfail with explicitly unsigned mail; SPF fail with absent DKIM keys; excessive early greylist retries |
+| Unknown | Custom, missing, or otherwise unclassified policy reason |
+
+Classification uses the stored decision reason, so it also applies to older
+retained entries without rewriting their metadata. A Strong label does not
+establish cryptographic DKIM verification. Labels do not change quarantine,
+release, or delivery behavior.
+
 Use single-line commands in nscp:
 
 ```tcl

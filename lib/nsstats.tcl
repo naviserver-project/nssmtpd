@@ -171,6 +171,38 @@ proc ::_ns_stats.smtp.quarantine.page {} {
     return "$html[::_ns_stats.footer]"
 }
 
+# Classify the triggering rule for review, not the message's actual legitimacy.
+# Derive this from the stored reason so older entries need no metadata migration.
+proc ::_ns_stats.smtp.quarantine.signal {decision} {
+    switch -- [::_ns_stats.smtp.quarantine.value $decision reason] {
+        known-spam-link-host -
+        known-spam-link-domain {
+            return [dict create strength Strong explanation \
+                {A link destination matches an operator-configured spam block list.}]
+        }
+        local-domain-impersonation {
+            return [dict create strength Strong explanation \
+                {An unusable DKIM claim names a configured local domain, without a usable or inconclusive local alternative. This is not cryptographic verification.}]
+        }
+        spf-softfail-and-unsigned {
+            return [dict create strength Weak explanation \
+                {SPF softfail combined with explicitly unsigned mail. This can also occur with legitimate forwarded or misconfigured mail.}]
+        }
+        spf-fail-and-dkim-no-key {
+            return [dict create strength Weak explanation \
+                {SPF failure combined with absent DKIM keys. Authentication failures alone do not establish spam.}]
+        }
+        excessive-greylist-early-retries {
+            return [dict create strength Weak explanation \
+                {Excessive early greylist retries indicate unusual sending behavior, not message content.}]
+        }
+        default {
+            return [dict create strength Unknown explanation \
+                {No signal-strength classification is defined for this policy reason.}]
+        }
+    }
+}
+
 proc ::_ns_stats.smtp.quarantine.list {} {
     set offset [ns_queryget offset 0]
     if {![string is integer -strict $offset] || $offset < 0} {set offset 0}
@@ -178,13 +210,14 @@ proc ::_ns_stats.smtp.quarantine.list {} {
     if {[catch {::smtpd::quarantine list -limit $limit -offset $offset} report]} {
         return "<p>Cannot list quarantine: [ns_quotehtml $report]</p>"
     }
-    set html {<h3>Quarantined messages</h3><div class='w3-responsive ns-quarantine-scroll'><table class='data data-table w3-table w3-hoverable ns-quarantine-table'><thead><tr><th>Received</th><th>Sender</th><th>Recipients</th><th>Reason</th><th>State</th><th>Inspect</th></tr></thead><tbody>}
+    set html {<h3>Quarantined messages</h3><div class='w3-responsive ns-quarantine-scroll'><table class='data data-table w3-table w3-hoverable ns-quarantine-table'><thead><tr><th>Received</th><th>Sender</th><th>Recipients</th><th>Reason</th><th>Signal</th><th>State</th><th>Inspect</th></tr></thead><tbody>}
     foreach entry [dict get $report entries] {
         set id [dict get $entry id]
         append html <tr>
         foreach value [list [clock format [dict get $entry createdAt] -format {%Y-%m-%d %H:%M:%S %Z}] \
             [dict get $entry sender] [join [dict keys [dict get $entry recipients]] {, }] \
-            [::_ns_stats.smtp.quarantine.value [dict get $entry decision] reason {Policy rejection}] [dict get $entry state]] {
+            [::_ns_stats.smtp.quarantine.value [dict get $entry decision] reason {Policy rejection}] \
+            [dict get [::_ns_stats.smtp.quarantine.signal [dict get $entry decision]] strength] [dict get $entry state]] {
             append html "<td>[ns_quotehtml $value]</td>"
         }
         append html "<td><a href='?@page=log.smtpsent&amp;smtpView=quarantine&amp;id=[ns_urlencode $id]'>Inspect [ns_quotehtml [string range $id 0 7]]</a></td></tr>"
@@ -198,7 +231,7 @@ proc ::_ns_stats.smtp.quarantine.list {} {
         set next [dict get $report nextOffset]
         append html "<a href='?@page=log.smtpsent&amp;smtpView=quarantine&amp;offset=$next'>Next</a>"
     }
-    return "$html</p>"
+    return "$html</p><p>Signal describes the triggering policy rule, not a verified spam verdict. Inspect the message for the classification basis.</p>"
 }
 
 proc ::_ns_stats.smtp.quarantine.detail {metadata} {
@@ -206,6 +239,7 @@ proc ::_ns_stats.smtp.quarantine.detail {metadata} {
     set context [dict get $metadata context]
     set decision [dict get $metadata decision]
     set state [dict get $metadata state]
+    set signal [::_ns_stats.smtp.quarantine.signal $decision]
     set html "<p><a href='?@page=log.smtpsent&amp;smtpView=quarantine'>All quarantined messages</a></p><h3>Message [ns_quotehtml $id]</h3>"
     if {[ns_queryget released {}] eq "1"} {
         append html {<p role='status'>Release attempt finished. Check the recipient outcomes below; upstream acceptance does not establish final mailbox delivery.</p>}
@@ -213,6 +247,8 @@ proc ::_ns_stats.smtp.quarantine.detail {metadata} {
     set rows [list [list State $state] [list {Envelope sender} [dict get $context sender]] \
         [list Received [clock format [dict get $metadata createdAt] -format {%Y-%m-%d %H:%M:%S %Z}]] \
         [list Reason [::_ns_stats.smtp.quarantine.value $decision reason {Policy rejection}]] \
+        [list Signal [dict get $signal strength]] \
+        [list {Signal basis} [dict get $signal explanation]] \
         [list {Message size} "[::_ns_stats.hr [dict get $metadata bytes]]B"]]
     append html [::_ns_stats.smtp.quarantine.table {Field Value} $rows]
     append html {<h4>Delivery recipients</h4>}

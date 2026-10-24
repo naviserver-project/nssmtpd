@@ -57,7 +57,7 @@ proc fixture {} {
             status {return [dict merge {directory /private/spool retention 604800 maxBytes 1073741824 maxMessages 10000 messages 1 states {held 1} bytes 100} [dict create enabled $::enabled]]}
             show {return $::metadata}
             list {return [dict create entries [list [dict create id $::goodId sender {<sender@example.org>} \
-                createdAt 1792000000 recipients {target@example.org pending} decision {reason {<policy-rejection>}} state held]] total 26 more true nextOffset 25]}
+                createdAt 1792000000 recipients {target@example.org pending} decision [dict get $::metadata decision] state held]] total 26 more true nextOffset 25]}
             release {
                 if {$::releaseError ne {}} {error $::releaseError}
                 return {state released}
@@ -168,6 +168,44 @@ foreach state {released releasing uncertain} {
     } -cleanup cleanup -result 0
 }
 
+
+foreach {reason strength} {
+    known-spam-link-host Strong
+    known-spam-link-domain Strong
+    local-domain-impersonation Strong
+    spf-softfail-and-unsigned Weak
+    spf-fail-and-dkim-no-key Weak
+    excessive-greylist-early-retries Weak
+    custom-policy-reason Unknown
+    {} Unknown
+} {
+    test quarantine-signal-$reason {list and inspection classify the stored triggering reason without changing release state} -setup fixture -body {
+        dict set metadata decision reason $reason
+        set report [::_ns_stats.smtp.quarantine.signal [dict get $metadata decision]]
+        set html [::_ns_stats.smtp.quarantine.list]
+        set detail [::_ns_stats.smtp.quarantine.detail $metadata]
+        list [dict get $report strength] \
+            [string match {*<th>Reason</th><th>Signal</th><th>State</th>*} $html] \
+            [string match "*<td>$strength</td><td>held</td>*" $html] \
+            [string match "*<td>Signal</td><td>$strength</td>*" $detail] \
+            [expr {[string first [ns_quotehtml [dict get $report explanation]] $detail] >= 0}] \
+            [dict get $metadata state]
+    } -cleanup cleanup -result [list $strength 1 1 1 1 held]
+}
+
+test quarantine-signal-missing {old or custom decisions without a reason remain explicitly unknown} -body {
+    dict get [::_ns_stats.smtp.quarantine.signal {action reject}] strength
+} -result Unknown
+
+test quarantine-signal-escaped {unclassified reason is escaped in both views, never interpreted as markup} -setup fixture -body {
+    dict set metadata decision reason {<script>bad()</script>}
+    set html [::_ns_stats.smtp.quarantine.list]
+    set detail [::_ns_stats.smtp.quarantine.detail $metadata]
+    list [string match {*&lt;script&gt;bad()*} $html] \
+        [string match {*<td>Unknown</td>*} $html] \
+        [string match {*&lt;script&gt;bad()*} $detail] \
+        [string match {*<td>Unknown</td>*} $detail]
+} -cleanup cleanup -result {1 1 1 1}
 
 removeFile $eml
 cleanupTests
