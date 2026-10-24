@@ -153,18 +153,19 @@ proc smtpd::dkimkeypolicy {context findingsVar} {
 
 # Parse the standard policy command prefix without inspecting mail or doing DNS.
 proc smtpd::StandardPolicyOptions {options} {
-    set settings {rejectSpfFailWithoutDkimKey false maxGreylistEarlyRetries {} blockedLinkHosts {} blockedLinkDomains {} localDkimDomains {}}
+    set settings {rejectSpfFailWithoutDkimKey false quarantineSpfSoftfailUnsigned false maxGreylistEarlyRetries {} blockedLinkHosts {} blockedLinkDomains {} localDkimDomains {}}
     if {[llength $options] % 2} {::error "standardpolicy options require name/value pairs"}
     set seen {}
     foreach {option value} $options {
         set name [string range $option 1 end]
-        if {$option ni {-rejectSpfFailWithoutDkimKey -maxGreylistEarlyRetries -blockedLinkHosts -blockedLinkDomains -localDkimDomains}} {
+        if {$option ni {-rejectSpfFailWithoutDkimKey -quarantineSpfSoftfailUnsigned -maxGreylistEarlyRetries -blockedLinkHosts -blockedLinkDomains -localDkimDomains}} {
             ::error "unknown standardpolicy option: $option"
         }
         if {$option in $seen} {::error "duplicate standardpolicy option: $option"}
         lappend seen $option
         switch -- $name {
-            rejectSpfFailWithoutDkimKey {
+            rejectSpfFailWithoutDkimKey -
+            quarantineSpfSoftfailUnsigned {
                 if {![string is boolean -strict $value]} {::error "$option requires a boolean"}
                 set value [expr {!!$value}]
             }
@@ -257,7 +258,11 @@ proc smtpd::policyinit {} {
     set prefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc ""]
     if {$prefix eq ""} {return}
     if {[lindex $prefix 0] in {smtpd::standardpolicy ::smtpd::standardpolicy}} {
-        StandardPolicyOptions [lrange $prefix 1 end]
+        set settings [StandardPolicyOptions [lrange $prefix 1 end]]
+        if {[dict get $settings quarantineSpfSoftfailUnsigned]
+            && ![ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]} {
+            ::error "-quarantineSpfSoftfailUnsigned requires quarantinePolicyRejects true"
+        }
     }
 }
 
@@ -265,13 +270,20 @@ proc smtpd::policyinit {} {
 #
 # @param args Named options followed by the DATA context dictionary. Options:
 #        -rejectSpfFailWithoutDkimKey boolean (default false),
+#        -quarantineSpfSoftfailUnsigned boolean (default false); requires
+#        quarantinePolicyRejects true, never rejects without quarantine,
 #        -maxGreylistEarlyRetries positive integer or {} (default {}, disabled),
 #        -blockedLinkHosts list of exact hostnames (default {}),
 #        -blockedLinkDomains list of domains and their subdomains (default {}),
 #        -localDkimDomains exact domains whose unusable DKIM claims are checked
 #        (default {}, disabled). This is not cryptographic verification.
 # @return Decision dictionary with action, reason and accumulated findings.
-#         Checks run in authentication, local DKIM, retry, link-host order.
+#         Checks run in authentication, local DKIM, softfail/unsigned, retry,
+#         link-host order. The softfail check requires explicit unsigned status
+#         and zero signatures; missing/uncertain DKIM is not unsigned. Matching
+#         mail uses the persistent reject-to-quarantine path, reason
+#         spf-softfail-and-unsigned. If quarantine is disabled at runtime, it
+#         defers instead of rejecting or forwarding the message.
 #         Local DKIM findings retain signature indexes and uncertainty; rejection
 #         uses reason local-domain-impersonation. Enable quarantinePolicyRejects
 #         to hold rejected mail; otherwise the existing reject behavior applies. A retry limit
@@ -289,6 +301,7 @@ proc smtpd::standardpolicy {args} {
     collectfindings $context findings
     set action accept
     set reason policy-chain-end
+    set quarantineOnly false
     if {[dict get $settings rejectSpfFailWithoutDkimKey]
         && [dict exists $findings spf-fail] && [dict exists $findings dkim-no-key]} {
         set action reject
@@ -296,6 +309,20 @@ proc smtpd::standardpolicy {args} {
     } elseif {[StandardPolicyLocalDkim [dict get $settings localDkimDomains] findings]} {
         set action reject
         set reason local-domain-impersonation
+    } elseif {[dict get $settings quarantineSpfSoftfailUnsigned]
+              && [dict exists $findings spf-result] && [dict get $findings spf-result] eq "softfail"
+              && [dict exists $findings dkim-status] && [dict get $findings dkim-status] eq "unsigned"
+              && [dict exists $findings dkim-signatures] && [dict get $findings dkim-signatures] eq "0"} {
+        set reason spf-softfail-and-unsigned
+        set quarantineOnly true
+        if {[ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]} {
+            # checkdatapolicy stores reject decisions durably before replying 250.
+            set action reject
+        } else {
+            # A live configuration change must not turn a quarantine-only rule
+            # into a hard rejection or silently let the message through.
+            set action defer
+        }
     } elseif {[dict get $settings maxGreylistEarlyRetries] ne ""
               && [dict exists $findings greylist-early-retries]
               && [dict get $findings greylist-early-retries] >= [dict get $settings maxGreylistEarlyRetries]} {
@@ -327,7 +354,9 @@ proc smtpd::standardpolicy {args} {
             }
         }
     }
-    return [dict create action $action reason $reason findings $findings]
+    set result [dict create action $action reason $reason findings $findings]
+    if {$quarantineOnly} {dict set result quarantine-only true}
+    return $result
 }
 
 # Collect the standard DATA-policy observations before making delivery decisions.

@@ -276,6 +276,64 @@ test quarantine-link-policy-allowed {unrelated link host continues through the f
         [expr {[llength [header_messages]] == $beforeRelay + 1}]
 } -cleanup {nsv_set alias-test data-rules $savedRules} -result {250 1 1}
 
+# Exercise real collection, SMTP custody and the existing persistent spool.
+foreach {mode expectedReply expectedHeld expectedRelay} {
+    hold 250 1 0
+    disabled 451 0 0
+    disabled-after-decision 451 0 0
+    storage-error 451 0 0
+    opt-out 250 0 1
+} {
+    test quarantine-softfail-unsigned-$mode {softfail/unsigned mail is held, never hard-rejected; unsafe storage defers} -setup {
+        set savedRules [nsv_get alias-test data-rules]
+        set hadSpfResults [nsv_exists spf-policy-test results]
+        set hadSpfCalls [nsv_exists spf-policy-test calls]
+        if {$hadSpfResults} {set savedSpfResults [nsv_get spf-policy-test results]}
+        if {$hadSpfCalls} {set savedSpfCalls [nsv_get spf-policy-test calls]}
+        nsv_set spf-policy-test results {softfail}
+        nsv_set spf-policy-test calls 0
+        set section [ns_configsection ns/server/test/module/nssmtpd]
+        set savedQuarantine [ns_config -bool ns/server/test/module/nssmtpd quarantinePolicyRejects false]
+        set savedMaxBytes [ns_config ns/server/test/module/nssmtpd quarantineMaxBytes 1GiB]
+        ns_set update $section quarantinePolicyRejects [expr {$mode ne "disabled"}]
+        if {$mode eq "storage-error"} {ns_set update $section quarantineMaxBytes 1}
+        set enabled [expr {$mode ne "opt-out"}]
+        nsv_set alias-test data-rules [list "smtpd::standardpolicy -quarantineSpfSoftfailUnsigned $enabled \$context"]
+        if {$mode eq "disabled-after-decision"} {
+            nsv_set alias-test data-rules {{
+                set decision [smtpd::standardpolicy -quarantineSpfSoftfailUnsigned true $context]
+                ns_set update [ns_configsection ns/server/test/module/nssmtpd] quarantinePolicyRejects false
+                return $decision
+            }}
+        }
+        set beforeIds [smtpd::QuarantineIds]
+        set beforeRelay [llength [header_messages]]
+    } -body {
+        set reply [header_submit "From: example@gmail.com\r\nTo: one@example.test\r\nSubject: unsigned\r\n\r\nBody\r\n"]
+        set newIds {}
+        foreach entry [smtpd::QuarantineIds] {if {$entry ni $beforeIds} {lappend newIds $entry}}
+        set reason {}; set auth {}
+        if {[llength $newIds]} {
+            set metadata [smtpd::quarantine show [lindex $newIds 0]]
+            set reason [dict get $metadata decision reason]
+            foreach key {spf-result dkim-status dkim-signatures} {
+                lappend auth [dict get $metadata decision findings $key]
+            }
+        }
+        list $reply [llength $newIds] [expr {[llength [header_messages]]-$beforeRelay}] \
+            $reason $auth
+    } -cleanup {
+        nsv_set alias-test data-rules $savedRules
+        if {$hadSpfResults} {nsv_set spf-policy-test results $savedSpfResults} else {nsv_unset spf-policy-test results}
+        if {$hadSpfCalls} {nsv_set spf-policy-test calls $savedSpfCalls} else {nsv_unset spf-policy-test calls}
+        ns_set update $section quarantinePolicyRejects $savedQuarantine
+        ns_set update $section quarantineMaxBytes $savedMaxBytes
+    } -result [list $expectedReply $expectedHeld $expectedRelay \
+                   [expr {$expectedHeld ? "spf-softfail-and-unsigned" : ""}] \
+                   [expr {$expectedHeld ? "softfail unsigned 0" : ""}]]
+}
+
+
 quarantine_test_clear
 ns_set update [ns_configsection ns/server/test/module/nssmtpd] quarantinePolicyRejects false
 nsv_unset alias-test data-rules

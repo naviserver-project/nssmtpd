@@ -289,14 +289,31 @@ Outbound MX routing remains separate.
 For the common authentication, retry, exact-link-host and domain checks, prefer the
 validated command prefix below instead of embedding Tcl decision scripts:
 
+`datapolicyproc` is a **Tcl command-prefix list**, not a script evaluated directly.
+Its first element is the command name; subsequent elements are its arguments.
+The outer braces preserve the multiline value, and newlines are list whitespace,
+so the options below do not require backslash continuations. nssmtpd expands
+this list and appends the DATA context dictionary as one final argument:
+
+```tcl
+uplevel #0 [list {*}$prefix $context]
+```
+
+A direct multiline call to `smtpd::standardpolicy` in a Tcl script would require
+backslash continuations. With `smtpd::policychain`, the command prefix instead
+contains a list of rule scripts as one argument; each rule is still a Tcl script
+and follows normal Tcl command/newline syntax.
+
 The lists below come from operator-confirmed spam examples. Keep shared-hosting
 entries narrow: the Jimdo entries match exact sites, while the dedicated
 `renewplean.sbs` entry includes its subdomains. See [quarantine review](quarantine.md) for held messages.
 
 ```tcl
+ns_param quarantinePolicyRejects true
 ns_param datapolicyproc {
     smtpd::standardpolicy
     -rejectSpfFailWithoutDkimKey true
+    -quarantineSpfSoftfailUnsigned true
     -localDkimDomains {openacs.org}
     -maxGreylistEarlyRetries 10
     -blockedLinkHosts {
@@ -312,7 +329,8 @@ ns_param datapolicyproc {
 ```
 
 `smtpd::standardpolicy` calls `collectfindings` once, preserving seeded recipient
-and greylisting findings. It checks authentication first, then retry count, then
+and greylisting findings. It checks hard SPF/key failure first, then local DKIM
+claims, SPF softfail with explicitly unsigned mail, retry count, then
 exact hosts, then domains. Existing rejection reasons remain
 `spf-fail-and-dkim-no-key`, `excessive-greylist-early-retries` and
 `known-spam-link-host`. Domain matches use `known-spam-link-domain`, record the
@@ -320,7 +338,7 @@ configured `blocked-link-domain`, and retain the actual `blocked-link-host`.
 Exact-host matches take precedence even when another destination matches a domain. No match returns `accept: policy-chain-end`.
 The retry threshold is inclusive: 10 rejects at 10 or more early retries.
 
-All checks default to disabled: the boolean defaults to false, the retry limit
+All checks default to disabled: both booleans default to false, the retry limit
 to `{}` and both link lists to `{}`. Both lists normalize names to lower case
 without a trailing dot; URLs and wildcard patterns are invalid. Use
 ASCII/punycode names. `-blockedLinkHosts` remains exact: it does not match
@@ -329,6 +347,23 @@ DNS-label boundary. For `renewplean.sbs`, `a.renewplean.sbs` matches, but
 `notrenewplean.sbs` and `renewplean.sbs.example.org` do not. The matcher does not
 perform DNS lookups or public-suffix/reputation checks; choose domain-wide
 entries only when that scope is intended.
+
+`-quarantineSpfSoftfailUnsigned true` holds mail only when all three findings
+are explicit: `spf-result softfail`, `dkim-status unsigned`, and
+`dkim-signatures 0`. It uses reason `spf-softfail-and-unsigned` and preserves
+the collected findings. SPF `none`, `neutral`, `pass`, DNS errors, missing DKIM
+observations, and mail containing any DKIM signature do not match this rule.
+A signature that is invalid, obsolete, unverified, or has no DNS key is not
+an unsigned message.
+
+This option requires `quarantinePolicyRejects true`; startup validation rejects
+an incompatible configuration. Internally it returns `reject` to the existing
+persistent quarantine path, which acknowledges SMTP DATA only after storing the
+message. If quarantine is disabled later, matching mail returns `defer` (451),
+not a hard rejection or normal delivery. Its `quarantine-only true` decision
+marker also protects against disablement between the callback and DATA handling.
+Storage failures likewise defer.
+Review held mail for false positives before adopting a stricter policy.
 
 The default `smtpd::init` calls `smtpd::policyinit` to validate a direct
 `smtpd::standardpolicy` or `::smtpd::standardpolicy` prefix at startup without

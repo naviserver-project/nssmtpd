@@ -19,8 +19,8 @@ test standard-example {shipped example selects the public helper and validates w
     set settings [smtpd::StandardPolicyOptions [lrange $prefix 1 end]]
     list [lindex $prefix 0] [dict get $settings rejectSpfFailWithoutDkimKey] \
         [dict get $settings maxGreylistEarlyRetries] [llength [dict get $settings blockedLinkHosts]] \
-        [dict get $settings blockedLinkDomains] [dict get $settings localDkimDomains] $standardCollectorCalls
-} -result {smtpd::standardpolicy 1 10 4 renewplean.sbs openacs.org 0}
+        [dict get $settings blockedLinkDomains] [dict get $settings localDkimDomains] [dict get $settings quarantineSpfSoftfailUnsigned] $standardCollectorCalls
+} -result {smtpd::standardpolicy 1 10 4 renewplean.sbs openacs.org 1 0}
 
 test standard-reasons {authentication, retry and link checks preserve rejection reasons and precedence} -body {
     set results {}
@@ -122,6 +122,8 @@ test standard-startup-invalid {default init catches malformed options before pro
 test standard-startup-valid {startup accepts both qualified names and leaves custom callbacks unexecuted} -setup {
     set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
     set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set savedQuarantine [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]
+    ns_set update $section quarantinePolicyRejects true
     set before $standardCollectorCalls
 } -body {
     set results {}
@@ -130,7 +132,7 @@ test standard-startup-valid {startup accepts both qualified names and leaves cus
         lappend results [catch {smtpd::policyinit}]
     }
     list $results [expr {$before == $standardCollectorCalls}]
-} -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{0 0 0 0} 1}
+} -cleanup {ns_set update $section datapolicyproc $savedPrefix; ns_set update $section quarantinePolicyRejects $savedQuarantine} -result {{0 0 0 0} 1}
 
 
 test standard-domains {domains include themselves and subdomains but exclude suffix lookalikes} -body {
@@ -278,6 +280,79 @@ test standard-local-startup {malformed domains and duplicate options fail valida
 } -cleanup {ns_set update $section datapolicyproc $savedPrefix} -result {{1 1 1 1 1 0} 1}
 
 rename standard_local_result {}
+
+# The new rule needs affirmative unsigned evidence, not merely missing keys.
+foreach {label findings expected} {
+    match {spf-result softfail dkim-status unsigned dkim-signatures 0} reject
+    spf-none {spf-result none dkim-status unsigned dkim-signatures 0} accept
+    spf-pass {spf-result pass dkim-status unsigned dkim-signatures 0} accept
+    spf-neutral {spf-result neutral dkim-status unsigned dkim-signatures 0} accept
+    spf-fail {spf-result fail dkim-status unsigned dkim-signatures 0} accept
+    spf-temperror {spf-result temperror dkim-status unsigned dkim-signatures 0} accept
+    spf-permerror {spf-result permerror dkim-status unsigned dkim-signatures 0} accept
+    no-spf {dkim-status unsigned dkim-signatures 0} accept
+    no-dkim {spf-result softfail} accept
+    no-status {spf-result softfail dkim-signatures 0} accept
+    no-count {spf-result softfail dkim-status unsigned} accept
+    signed {spf-result softfail dkim-signatures 1 dkim-1-key key-present-not-verified} accept
+    absent-key {spf-result softfail dkim-signatures 1 dkim-no-key true} accept
+    signed-conflict {spf-result softfail dkim-status unsigned dkim-signatures 1} accept
+    uncertain {spf-result softfail dkim-status unavailable dkim-signatures 0} accept
+} {
+    test standard-softfail-$label {only explicit SPF softfail with unsigned DKIM and zero signatures matches} -setup {
+        set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+        set savedQuarantine [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]
+        ns_set update $section quarantinePolicyRejects true
+    } -body {
+        set seed [dict merge {greylist-early-retries 2} $findings]
+        set decision [smtpd::standardpolicy -quarantineSpfSoftfailUnsigned true \
+                          [dict create phase data findings $seed]]
+        list [dict get $decision action] \
+            [expr {[dict get $decision findings] eq [dict merge $seed {collected true}]}]
+    } -cleanup {ns_set update $section quarantinePolicyRejects $savedQuarantine} -result [list $expected 1]
+}
+
+test standard-softfail-opt-in {default and explicit false preserve acceptance} -body {
+    set context {phase data findings {spf-result softfail dkim-status unsigned dkim-signatures 0}}
+    list [dict get [smtpd::standardpolicy $context] action] \
+        [dict get [smtpd::standardpolicy -quarantineSpfSoftfailUnsigned false $context] action]
+} -result {accept accept}
+
+test standard-softfail-no-quarantine {runtime disablement defers and preserves the specific reason} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedQuarantine [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]
+    ns_set update $section quarantinePolicyRejects false
+} -body {
+    set result [smtpd::standardpolicy -quarantineSpfSoftfailUnsigned true \
+        {phase data findings {spf-result softfail dkim-status unsigned dkim-signatures 0}}]
+    list [dict get $result action] [dict get $result reason]
+} -cleanup {ns_set update $section quarantinePolicyRejects $savedQuarantine} -result {defer spf-softfail-and-unsigned}
+
+test standard-softfail-startup {quarantine-only option requires quarantine, without collecting observations} -setup {
+    set section [ns_configsection ns/server/[ns_info server]/module/nssmtpd]
+    set savedPrefix [ns_config ns/server/[ns_info server]/module/nssmtpd datapolicyproc {}]
+    set savedQuarantine [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]
+    set before $standardCollectorCalls
+} -body {
+    ns_set update $section datapolicyproc {smtpd::standardpolicy -quarantineSpfSoftfailUnsigned true}
+    ns_set update $section quarantinePolicyRejects false
+    set failed [catch {smtpd::policyinit} message]
+    ns_set update $section quarantinePolicyRejects true
+    list $failed $message [catch {smtpd::policyinit}] [expr {$before == $standardCollectorCalls}]
+} -cleanup {
+    ns_set update $section datapolicyproc $savedPrefix
+    ns_set update $section quarantinePolicyRejects $savedQuarantine
+} -result {1 {-quarantineSpfSoftfailUnsigned requires quarantinePolicyRejects true} 0 1}
+
+foreach options {
+    {-quarantineSpfSoftfailUnsigned}
+    {-quarantineSpfSoftfailUnsigned perhaps}
+    {-quarantineSpfSoftfailUnsigned true -quarantineSpfSoftfailUnsigned false}
+} {
+    test standard-softfail-invalid-$options {new option validates arity, boolean values and duplicates} -body {
+        catch {smtpd::StandardPolicyOptions $options}
+    } -result 1
+}
 
 rename smtpd::collectfindings {}
 rename smtpd::standard_test_collectfindings smtpd::collectfindings

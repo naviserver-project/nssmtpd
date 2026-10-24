@@ -570,6 +570,14 @@ proc smtpd::checkdatapolicy {id} {
         dict set context findings $findings
         set result [uplevel #0 [list {*}$prefix $context]]
         set action [dict get $result action]
+        set quarantineEnabled [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]
+        if {$action eq "reject" && !$quarantineEnabled
+            && [dict exists $result quarantine-only] && [dict get $result quarantine-only]} {
+            # Honor quarantine-only decisions even if configuration changed
+            # after the callback selected its action. Never turn a hold into 550.
+            set action defer
+            dict set result action $action
+        }
         switch -- $action {
             accept {set code 250; set message "Message accepted"}
             defer {set code 451; set message "Please try again later"}
@@ -582,7 +590,7 @@ proc smtpd::checkdatapolicy {id} {
         }
         # Log original-recipient provenance for DATA findings, including held mail.
         dict set result recipient-findings $recipientFindings
-        if {$action eq "reject" && [ns_config -bool ns/server/[ns_info server]/module/nssmtpd quarantinePolicyRejects false]} {
+        if {$action eq "reject" && $quarantineEnabled} {
             set held [smtpd::QuarantineStore $id $context $result]
             smtpd::logevent $id message-policy [dict merge $result [dict create \
                 action quarantine policy-action reject quarantine-id $held code 250]]

@@ -36,6 +36,14 @@ and the transaction outcome is `message-policy-rejected`. Empty/unset leaves
 the existing streaming behavior unchanged. Diagnostic callbacks remain purely
 informational.
 
+`datapolicyproc` is a Tcl command-prefix **list** (command name followed by
+arguments), not a directly evaluated Tcl script. Braces preserve the multiline
+configuration value; newlines separate list elements, so multiline options need
+no backslash continuations. The dispatcher invokes it with
+`uplevel #0 [list {*}$prefix $context]`, appending the DATA context as one argument.
+Rule bodies passed to `smtpd::policychain` remain Tcl scripts; their command
+boundaries follow ordinary Tcl syntax.
+
 ```tcl
 ns_param spfproc smtpd::spfauto
 ns_param recipientpolicyproc {
@@ -184,3 +192,13 @@ The threshold is an example; this change does not install a rejection rule.
 With several accepted recipients, a message-wide rejection affects all of them;
 use `recipient-findings` when the rule needs recipient-specific interpretation.
 Deploy the native module and Tcl helpers together.
+
+### Quarantine-only DATA decisions
+
+The opt-in `standardpolicy -quarantineSpfSoftfailUnsigned true` rule requires
+SPF `softfail`, explicit DKIM status `unsigned`, and zero signatures. Matching
+results use reason `spf-softfail-and-unsigned` and carry `quarantine-only true`.
+With `quarantinePolicyRejects true`, the existing persistent hold path handles
+the rejection. With quarantine disabled, DATA handling converts a marked
+rejection to temporary deferral, including if the setting changed after the
+callback ran. Unmarked rejection decisions retain their existing behavior.

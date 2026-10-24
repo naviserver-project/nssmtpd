@@ -23,6 +23,12 @@ ns_section ns/server/$server/module/nssmtpd {
 }
 ```
 
+To hold SPF-softfailing, explicitly unsigned messages, add
+`-quarantineSpfSoftfailUnsigned true` to `smtpd::standardpolicy`. This opt-in
+rule requires the quarantine setting above. It records reason
+`spf-softfail-and-unsigned`; unknown DKIM status and signed messages are excluded.
+Matching messages defer if quarantine is disabled or cannot store them.
+
 ## Keep the spool private and persistent
 
 Mount this directory on persistent storage in a container. Use a dedicated
