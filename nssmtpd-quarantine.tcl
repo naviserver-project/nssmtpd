@@ -216,17 +216,25 @@ proc smtpd::quarantine {command args} {
             list {
                 ns_parseargs {{-offset 0} {-limit 50}} $args
                 if {![string is integer -strict $offset] || ![string is integer -strict $limit] || $offset < 0 || $limit < 1 || $limit > 1000} {::error "invalid quarantine page limits"}
-                set ids [smtpd::QuarantineIds]
-                set entries {}
-                foreach id [lrange $ids $offset [expr {$offset+$limit-1}]] {
+                # Sort before slicing pages. IDs are random; updatedAt changes
+                # on release and must not replace the original receipt time.
+                set ordered {}
+                foreach id [smtpd::QuarantineIds] {
                     set metadata [smtpd::QuarantineRead $id]
+                    lappend ordered [list [dict get $metadata createdAt] $id $metadata]
+                }
+                # QuarantineIds supplies a stable ID order for equal times.
+                set ordered [lsort -integer -decreasing -index 0 $ordered]
+                set entries {}
+                foreach item [lrange $ordered $offset [expr {$offset+$limit-1}]] {
+                    lassign $item createdAt id metadata
                     lappend entries [dict create id $id createdAt [dict get $metadata createdAt] \
                         state [dict get $metadata state] bytes [dict get $metadata bytes] \
                         sender [dict get $metadata context sender] \
                         recipients [dict get $metadata recipients] decision [dict get $metadata decision]]
                 }
-                return [dict create entries $entries total [llength $ids] nextOffset [expr {$offset+[llength $entries]}] \
-                    more [expr {$offset+[llength $entries] < [llength $ids]}]]
+                return [dict create entries $entries total [llength $ordered] nextOffset [expr {$offset+[llength $entries]}] \
+                    more [expr {$offset+[llength $entries] < [llength $ordered]}]]
             }
             show - message {
                 if {[llength $args] != 1} {::error "usage: smtpd::quarantine $command id"}

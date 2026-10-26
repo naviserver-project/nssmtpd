@@ -50,6 +50,31 @@ test quarantine-paging {bounded list pages expose complete retained set} -body {
         [expr {[dict get [lindex [dict get $a entries] 0] id] ne [dict get [lindex [dict get $b entries] 0] id]}]
 } -result {2 1 0 1}
 
+test quarantine-date-order {receipt times determine newest-first ordering before pagination} -setup {
+    set savedMetadata {}
+    set sortedIds [smtpd::QuarantineIds]
+    set stamp 1000
+    foreach entryId $sortedIds {
+        set metadata [smtpd::quarantine show $entryId]
+        dict unset metadata messagePath
+        dict set savedMetadata $entryId $metadata
+        dict set metadata createdAt [incr stamp]
+        # A newer audit timestamp on the oldest message must not affect order.
+        dict set metadata updatedAt [expr {3000 - $stamp}]
+        smtpd::QuarantineWrite [file join [smtpd::QuarantinePath $entryId] metadata.tcl] $metadata false
+    }
+} -body {
+    set a [smtpd::quarantine list -limit 1]
+    set b [smtpd::quarantine list -limit 1 -offset [dict get $a nextOffset]]
+    list [expr {[dict get [lindex [dict get $a entries] 0] id] eq [lindex $sortedIds end]}] \
+        [expr {[dict get [lindex [dict get $b entries] 0] id] eq [lindex $sortedIds 0]}] \
+        [dict get $a total] [dict get $a more] [dict get $b more]
+} -cleanup {
+    dict for {entryId metadata} $savedMetadata {
+        smtpd::QuarantineWrite [file join [smtpd::QuarantinePath $entryId] metadata.tcl] $metadata false
+    }
+} -result {1 1 2 1 0}
+
 test quarantine-binary {non-UTF-8 message bytes survive disk and release without conversion} -setup {
     set saved $original
     append original "binary: " [binary format H* e9ff80] "\r\n"
