@@ -345,13 +345,18 @@ nx::Class create ::smtpd::mcp::SmtpLogTool -superclass ::nsmcp::Tool {
 
 }
 
-# Each registry receives independent objects; credentials remain in nsmcp.
+# Named children belong to their registry and survive its blueprint serialization.
+# Credentials remain in nsmcp; each registry owns independent redactors and tool.
 proc ::smtpd::mcp::createTools {context} {
     set readBytes [ns_baseunit -size [::nsmcp::ToolRegistry providerConfig $context logReadBytes 1MiB]]
-    set redactor [::nsmcp::LogRedactor new]
-    set peerRedactor [::nsmcp::LogRedactor new -maskPeerAddresses false]
-    return [list [::smtpd::mcp::SmtpLogTool new \
+    set registry [dict get $context registry]
+    set owner ${registry}::smtp
+    ::nsmcp::Object create $owner
+    ::nsmcp::LogRedactor create ${owner}::redactor
+    ::nsmcp::LogRedactor create ${owner}::peerRedactor -maskPeerAddresses false
+    ::smtpd::mcp::SmtpLogTool create ${owner}::logs \
         -authorizer [dict get $context authorizer] \
-        -redactor $redactor -peerRedactor $peerRedactor \
-        -maxReadBytes $readBytes]]
+        -redactor ${owner}::redactor -peerRedactor ${owner}::peerRedactor \
+        -maxReadBytes $readBytes
+    return [list ${owner}::logs]
 }
