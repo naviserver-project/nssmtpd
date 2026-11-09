@@ -138,7 +138,7 @@ typedef struct _smtpdHdr {
 // Relay list
 typedef struct _smtpdRelay {
     struct _smtpdRelay *next;
-    const char *name;
+    char *name;
     char *host;
     unsigned short port;
 } smtpdRelay;
@@ -677,8 +677,8 @@ PercentDecode(char *dest, const char *source, char part)
 
 NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
-    char             *section, *addr2;
-    const char       *addr;
+    char             *section;
+    const char       *addr, *addr2;
     int               bufsize;
     smtpdRelay       *relay;
     Ns_DriverInitData init = {0};
@@ -928,15 +928,17 @@ NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 
     /* Parse flags */
     if ((addr = Ns_ConfigGetValue(section, "flags"))) {
-        char *n;
+        char *flags = ns_strdup(addr);
+        char *flag = flags, *n;
 
-        while (addr) {
-            if ((n = strchr(addr, ','))) {
+        while (flag != NULL) {
+            if ((n = strchr(flag, ','))) {
                 *n++ = '\0';
             }
-            serverPtr->flags |= SmtpdFlags(addr);
-            addr = n;
+            serverPtr->flags |= SmtpdFlags(flag);
+            flag = n;
         }
+        ns_free(flags);
         Ns_Log(Notice, "ns_smtpd: flags = 0x%x", serverPtr->flags);
     }
 
