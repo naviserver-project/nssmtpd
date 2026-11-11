@@ -1646,19 +1646,24 @@ SmtpdRejectSyntax(smtpdConn *conn, const char *command)
  */
 static void SmtpdThread(smtpdConn *conn)
 {
-    char *data;
-    Ns_Conn *nsconn = Ns_GetConn();
-    smtpdConfig *config = conn->config;
+    char         *data;
+    Ns_Conn      *nsconn = Ns_GetConn();
+    const char   *peer = Ns_ConnPeerAddr(nsconn);
+    const char   *host = peer;
+    smtpdConfig  *config = conn->config;
     Ns_ReturnCode rc = TCL_OK;
 
     Ns_ThreadSetName("-nssmptd:%ld-", conn->id);
     Ns_Log(SmtpdDebug,"SmtpdThread");
 
-    Ns_GetHostByAddr(&conn->line, Ns_ConnPeerAddr(nsconn));
-    if ((conn->line.length) > 0 && (conn->flags & SMTPD_RESOLVE) != 0u) {
-        SmtpdPuts(conn, "421 Service not available, could not resolve the hostname");
-        SmtpdConnFree(conn);
-        return;
+    if ((conn->flags & SMTPD_RESOLVE) != 0u) {
+        Tcl_DStringSetLength(&conn->line, 0);
+        if (!Ns_GetHostByAddr(&conn->line, peer)) {
+            SmtpdPuts(conn, "421 Service not available, could not resolve the hostname\r\n");
+            SmtpdConnFree(conn);
+            return;
+        }
+        host = conn->line.string;
     }
     if (!(conn->interp = Ns_GetConnInterp(nsconn))) {
         Ns_Log(Error, "nssmtpd: %ld: Conn/Tcl interp error: %s", conn->id, strerror(errno));
@@ -1667,9 +1672,9 @@ static void SmtpdThread(smtpdConn *conn)
         return;
     }
 
-    conn->host = ns_strdup(conn->line.string);
+    conn->host = ns_strdup(host);
     Ns_MutexLock(&config->locallock);
-    if (SmtpdCheckIpaddr(config->local, Ns_ConnPeerAddr(nsconn))) {
+    if (SmtpdCheckIpaddr(config->local, peer)) {
         conn->flags |= SMTPD_LOCAL;
     }
     Ns_MutexUnlock(&config->locallock);

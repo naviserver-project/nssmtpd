@@ -73,6 +73,10 @@ and aliases using [recipient routing](recipient-routing.md).
 For public incoming mail in a container, bind a container-reachable address and
 publish the SMTP port. See the [mail-path overview](../README.md#overview).
 
+Incoming connections use the peer IP address without a reverse DNS lookup by
+default. Add `resolve` to the module's comma-separated `flags` setting to require
+a reverse hostname. A failed lookup then returns SMTP `421` before the greeting.
+
 ## Connect application mail to the listener
 
 For NaviServer versions using the `ns/sendmail` configuration section, point
