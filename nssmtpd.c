@@ -1657,9 +1657,30 @@ static void SmtpdThread(smtpdConn *conn)
     Ns_Log(SmtpdDebug,"SmtpdThread");
 
     if ((conn->flags & SMTPD_RESOLVE) != 0u) {
+        const char *reply = NULL;
+
         Tcl_DStringSetLength(&conn->line, 0);
+#ifdef NS_HAVE_GETHOSTBYADDRSTATUS
+        switch (Ns_GetHostByAddrStatus(&conn->line, peer)) {
+        case NS_DNS_FOUND:
+            break;
+        case NS_DNS_NOT_FOUND:
+            reply = "554 5.7.1 Reverse hostname required\r\n";
+            break;
+        case NS_DNS_TEMPFAIL:
+            reply = "421 4.4.3 Temporary reverse hostname lookup failure\r\n";
+            break;
+        case NS_DNS_ERROR:
+            reply = "421 Service not available, could not resolve the hostname\r\n";
+            break;
+        }
+#else
         if (!Ns_GetHostByAddr(&conn->line, peer)) {
-            SmtpdPuts(conn, "421 Service not available, could not resolve the hostname\r\n");
+            reply = "421 Service not available, could not resolve the hostname\r\n";
+        }
+#endif
+        if (reply != NULL) {
+            SmtpdPuts(conn, reply);
             SmtpdConnFree(conn);
             return;
         }

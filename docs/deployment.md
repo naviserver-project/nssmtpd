@@ -75,7 +75,10 @@ publish the SMTP port. See the [mail-path overview](../README.md#overview).
 
 Incoming connections use the peer IP address without a reverse DNS lookup by
 default. Add `resolve` to the module's comma-separated `flags` setting to require
-a reverse hostname. A failed lookup then returns SMTP `421` before the greeting.
+a reverse hostname. With a NaviServer build that exposes reverse DNS status,
+a missing reverse hostname returns SMTP `554` before the greeting. Temporary
+lookup failures and other resolver errors return `421`. With older NaviServer
+builds, all lookup failures return `421`.
 
 ## Connect application mail to the listener
 
