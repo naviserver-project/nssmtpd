@@ -92,6 +92,11 @@ adding rows or changing recipient totals. Joining uses the selected log file;
 older logs, active transactions and transactions spanning rotation may show
 "Not recorded in this log". Logging remains disabled unless `eventlogging` is enabled.
 
+Expected STARTTLS handshake failures, such as incompatible TLS versions or
+ciphers and peer disconnects, are logged at Notice with the original diagnostic.
+Server-side TLS context failures and unrecognized handshake failures remain at
+Error. Both kinds still produce the same STARTTLS event when event logging is enabled.
+
 ## Use the nsstats pages
 
 `make install` installs `lib/nsstats-sent.adp`, `lib/nsstats-events.adp`

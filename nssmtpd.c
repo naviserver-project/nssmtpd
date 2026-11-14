@@ -3674,6 +3674,7 @@ SmtpdTLSFailure(smtpdConn *conn, const char *phase)
 {
     const char *result = Tcl_GetStringResult(conn->interp);
     Tcl_DString diagnostic;
+    Ns_LogSeverity severity = Error;
     Tcl_Obj *details = Tcl_NewDictObj();
 
     if (*result == '\0') {
@@ -3690,7 +3691,24 @@ SmtpdTLSFailure(smtpdConn *conn, const char *phase)
             Tcl_DStringAppend(&diagnostic, (const char *)p, 1);
         }
     }
-    Ns_Log(Error, "nssmtpd: %lu: peer %s: STARTTLS %s failed: %s",
+    /* Ns_TLS_SSLAccept exposes a text diagnostic. Downgrade known peer and
+     * negotiation failures; keep setup and unrecognized failures at Error. */
+    if (STREQ(phase, "handshake") && strncmp(result, "ssl accept failed: ", 19u) == 0) {
+        static const char *const expected[] = {
+            "::no shared cipher", "::version too low", "::unsupported protocol",
+            "::wrong version number", "::unexpected message", "::unexpected eof while reading",
+            "peer closed TLS connection during handshake",
+            "peer closed connection during TLS handshake",
+            "socket error during TLS handshake: Connection reset by peer"
+        };
+        for (size_t i = 0u; i < sizeof(expected)/sizeof(expected[0]); ++i) {
+            if (strstr(result + 19, expected[i]) != NULL) {
+                severity = Notice;
+                break;
+            }
+        }
+    }
+    Ns_Log(severity, "nssmtpd: %lu: peer %s: STARTTLS %s failed: %s",
            conn->id, Ns_ConnPeerAddr(Ns_GetConn()), phase, diagnostic.string);
     SmtpdEvent(conn, "starttls", details);
     Tcl_DStringFree(&diagnostic);
